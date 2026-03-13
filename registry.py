@@ -79,3 +79,19 @@ register("writer", fn_path="agents.writer_agent:run_writer",
 # Renderers
 register("ppt_render", fn_path="ppt_engine.renderer:render_pptx",
          cap_type="renderer", description="Render SlideDeck JSON to editable .pptx file")
+
+# General Chat
+register("general_chat", fn_path="agents.general_chat:run",
+         cap_type="agent", description="Direct Q&A conversation, answers questions without tools")
+
+# Tools
+register("web_search", fn_path="tools.web_search:run",
+         cap_type="tool", description="Search the web via Tavily and return results")
+register("translator", fn_path="tools.translator:run",
+         cap_type="tool", description="Translate text to a target language via LLM")
+register("summarizer", fn_path="tools.summarizer:run",
+         cap_type="tool", description="Summarize text into key points via LLM")
+register("code_executor", fn_path="tools.code_executor:run",
+         cap_type="tool", description="Execute Python code in a sandboxed subprocess")
+register("academic_search", fn_path="tools.academic_search:run",
+         cap_type="tool", description="Search Semantic Scholar and arXiv for academic papers")
