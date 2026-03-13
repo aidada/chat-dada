@@ -27,6 +27,17 @@ MODEL_CONFIGS = {
         "base_url": "https://co.yes.vg",
         "api_key": "cr_751bd8df910f05852082e75fe02b04b2aecf475dba758891d3e97a553f8c993a",
     },
+    # V2 new roles
+    "deep_research": {
+        "model": "gpt-5.4",
+        "base_url": "https://co.yes.vg",
+        "api_key": "cr_751bd8df910f05852082e75fe02b04b2aecf475dba758891d3e97a553f8c993a",
+    },
+    "data_analyst": {
+        "model": "gpt-5.4",
+        "base_url": "https://co.yes.vg",
+        "api_key": "cr_751bd8df910f05852082e75fe02b04b2aecf475dba758891d3e97a553f8c993a",
+    },
 }
 
 
