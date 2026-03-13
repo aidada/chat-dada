@@ -1,0 +1,37 @@
+# 忽略所有
+*
+
+# 但保留当前目录文件
+!*/
+
+# 保留需要的文件
+!.gitignore
+!README.md
+!requirements.txt
+!pyproject.toml
+!main.py
+!agent.py
+!index.html
+!agents/
+!agents/**
+!ppt_engine/
+!ppt_engine/**
+!outputs/
+!outputs/**
+!docs/
+!docs/**
+
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
