@@ -7,7 +7,7 @@ python-dotenv>=1.0.0
 # LangGraph + LangChain
 langgraph>=0.2.0
 langchain-core>=0.2.0
-langchain-anthropic>=0.1.0
+langchain-openai>=0.1.0
 langchain-community>=0.2.0
 
 # 浏览器控制
@@ -17,11 +17,8 @@ playwright>=1.44.0
 # 搜索（可选）
 tavily-python>=0.3.0
 
-# Multi-model support
-langchain-openai>=0.1.0
-
-# PPT generation
-python-pptx>=0.6.23
-
-# PDF parsing (already installed)
+# 文档处理
 pypdf>=4.0.0
+
+# PPT 生成
+python-pptx>=0.6.23
