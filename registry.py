@@ -95,3 +95,15 @@ register("code_executor", fn_path="tools.code_executor:run",
          cap_type="tool", description="Execute Python code in a sandboxed subprocess")
 register("academic_search", fn_path="tools.academic_search:run",
          cap_type="tool", description="Search Semantic Scholar and arXiv for academic papers")
+
+# New Agents (V2)
+register("deep_research", fn_path="agents.deep_research:run",
+         cap_type="agent", description="Multi-round deep research with web + academic search")
+register("data_analyst", fn_path="agents.data_analyst:run",
+         cap_type="agent", description="Analyze data files with code execution and generate insights")
+
+# New Renderers (V2)
+register("word_render", fn_path="renderers.word_renderer:run",
+         cap_type="renderer", description="Render markdown text to editable .docx file")
+register("excel_render", fn_path="renderers.excel_renderer:run",
+         cap_type="renderer", description="Render structured data to .xlsx Excel file")
