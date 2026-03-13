@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-from agents.orchestrator import run_agent
+from orchestrator.runner import run_orchestrator as run_agent
 
 app = FastAPI(title="Local Agent")
 
