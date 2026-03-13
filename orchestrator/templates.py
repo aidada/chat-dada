@@ -59,6 +59,22 @@ TEMPLATES = {
              "input_key": "render_input", "depends_on": [2]},
         ],
     },
+    "image_to_visio": {
+        "description": "Convert an image to a diagram file",
+        "steps": [
+            {"id": 1, "type": "tool", "name": "image_to_diagram",
+             "input_key": "image_path"},
+            {"id": 2, "type": "renderer", "name": "visio_render",
+             "input_key": "render_input", "depends_on": [1]},
+        ],
+    },
+    "image_generation": {
+        "description": "Generate images from text descriptions",
+        "steps": [
+            {"id": 1, "type": "tool", "name": "image_gen",
+             "input_key": "prompt"},
+        ],
+    },
 }
 
 

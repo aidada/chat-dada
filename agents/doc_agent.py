@@ -47,7 +47,7 @@ def read_pdf_file(file_path: str) -> str:
         return f"PDF 解析失败: {e}"
 
 
-DOC_TOOLS = [read_text_file, read_pdf_file]
+CORE_TOOLS = [read_text_file, read_pdf_file]
 
 
 # ── State ──
@@ -73,14 +73,14 @@ DOC_SYSTEM = """你是一个专业的文档分析师。你的任务是读取给�
 
 
 async def doc_planner(state: DocState) -> dict:
-    llm = get_llm("doc_analyst").bind_tools(DOC_TOOLS)
+    llm = get_llm("doc_analyst").bind_tools(CORE_TOOLS)
     messages = [SystemMessage(content=DOC_SYSTEM)] + state["messages"]
     response = await llm.ainvoke(messages)
     return {"messages": [response], "step_count": state["step_count"] + 1}
 
 
 async def doc_tool_executor(state: DocState) -> dict:
-    return await ToolNode(DOC_TOOLS).ainvoke(state)
+    return await ToolNode(CORE_TOOLS).ainvoke(state)
 
 
 def doc_finish(state: DocState) -> dict:
@@ -101,9 +101,23 @@ def doc_should_continue(state: DocState) -> Literal["tools", "finish"]:
 
 # ── Graph ──
 def build_doc_graph():
+    from registry import get_tools_for_agent
+    core_names = {t.name for t in CORE_TOOLS}
+    dynamic = get_tools_for_agent("doc_analyst", exclude_names=core_names)
+    all_tools = CORE_TOOLS + dynamic
+
+    async def doc_planner_node(state: DocState) -> dict:
+        llm = get_llm("doc_analyst").bind_tools(all_tools)
+        messages = [SystemMessage(content=DOC_SYSTEM)] + state["messages"]
+        response = await llm.ainvoke(messages)
+        return {"messages": [response], "step_count": state["step_count"] + 1}
+
+    async def doc_tool_executor_node(state: DocState) -> dict:
+        return await ToolNode(all_tools).ainvoke(state)
+
     g = StateGraph(DocState)
-    g.add_node("planner", doc_planner)
-    g.add_node("tools", doc_tool_executor)
+    g.add_node("planner", doc_planner_node)
+    g.add_node("tools", doc_tool_executor_node)
     g.add_node("finish", doc_finish)
     g.set_entry_point("planner")
     g.add_conditional_edges("planner", doc_should_continue, {"tools": "tools", "finish": "finish"})

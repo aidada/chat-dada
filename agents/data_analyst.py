@@ -65,7 +65,7 @@ def read_data_file(file_path: str) -> str:
         return f"读取失败: {e}"
 
 
-ANALYST_TOOLS = [execute_python, read_data_file]
+CORE_TOOLS = [execute_python, read_data_file]
 
 
 class AnalystState(TypedDict):
@@ -88,14 +88,14 @@ ANALYST_SYSTEM = """你是一个专业的数据分析师。你的任务是分析
 
 
 async def analyst_planner(state: AnalystState) -> dict:
-    llm = get_llm("doc_analyst").bind_tools(ANALYST_TOOLS)
+    llm = get_llm("doc_analyst").bind_tools(CORE_TOOLS)
     messages = [SystemMessage(content=ANALYST_SYSTEM)] + state["messages"]
     response = await llm.ainvoke(messages)
     return {"messages": [response], "step_count": state["step_count"] + 1}
 
 
 async def analyst_tools(state: AnalystState) -> dict:
-    return await ToolNode(ANALYST_TOOLS).ainvoke(state)
+    return await ToolNode(CORE_TOOLS).ainvoke(state)
 
 
 def analyst_finish(state: AnalystState) -> dict:
@@ -115,9 +115,23 @@ def analyst_should_continue(state: AnalystState) -> Literal["tools", "finish"]:
 
 
 def build_analyst_graph():
+    from registry import get_tools_for_agent
+    core_names = {t.name for t in CORE_TOOLS}
+    dynamic = get_tools_for_agent("data_analyst", exclude_names=core_names)
+    all_tools = CORE_TOOLS + dynamic
+
+    async def analyst_planner_node(state: AnalystState) -> dict:
+        llm = get_llm("doc_analyst").bind_tools(all_tools)
+        messages = [SystemMessage(content=ANALYST_SYSTEM)] + state["messages"]
+        response = await llm.ainvoke(messages)
+        return {"messages": [response], "step_count": state["step_count"] + 1}
+
+    async def analyst_tools_node(state: AnalystState) -> dict:
+        return await ToolNode(all_tools).ainvoke(state)
+
     g = StateGraph(AnalystState)
-    g.add_node("planner", analyst_planner)
-    g.add_node("tools", analyst_tools)
+    g.add_node("planner", analyst_planner_node)
+    g.add_node("tools", analyst_tools_node)
     g.add_node("finish", analyst_finish)
     g.set_entry_point("planner")
     g.add_conditional_edges("planner", analyst_should_continue, {"tools": "tools", "finish": "finish"})

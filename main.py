@@ -3,6 +3,9 @@ Local Agent - FastAPI + Multi-Agent + WebSocket 实时推送
 运行: uvicorn main:app --reload --port 8000
 """
 import json
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles

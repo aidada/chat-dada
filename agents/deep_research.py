@@ -51,7 +51,7 @@ async def browser_navigate(task_description: str) -> str:
     return final or "Browser task done."
 
 
-RESEARCH_TOOLS = [web_search, academic_search, browser_navigate]
+CORE_TOOLS = [web_search, academic_search, browser_navigate]
 
 
 class ResearchState(TypedDict):
@@ -79,14 +79,14 @@ RESEARCH_SYSTEM = """你是一个专业的深度研究员。你的任务是对�
 
 
 async def research_planner(state: ResearchState) -> dict:
-    llm = get_llm("search").bind_tools(RESEARCH_TOOLS)
+    llm = get_llm("search").bind_tools(CORE_TOOLS)
     messages = [SystemMessage(content=RESEARCH_SYSTEM)] + state["messages"]
     response = await llm.ainvoke(messages)
     return {"messages": [response], "step_count": state["step_count"] + 1}
 
 
 async def research_tools(state: ResearchState) -> dict:
-    return await ToolNode(RESEARCH_TOOLS).ainvoke(state)
+    return await ToolNode(CORE_TOOLS).ainvoke(state)
 
 
 def research_finish(state: ResearchState) -> dict:
@@ -106,9 +106,23 @@ def research_should_continue(state: ResearchState) -> Literal["tools", "finish"]
 
 
 def build_research_graph():
+    from registry import get_tools_for_agent
+    core_names = {t.name for t in CORE_TOOLS}
+    dynamic = get_tools_for_agent("deep_research", exclude_names=core_names)
+    all_tools = CORE_TOOLS + dynamic
+
+    async def research_planner_node(state: ResearchState) -> dict:
+        llm = get_llm("search").bind_tools(all_tools)
+        messages = [SystemMessage(content=RESEARCH_SYSTEM)] + state["messages"]
+        response = await llm.ainvoke(messages)
+        return {"messages": [response], "step_count": state["step_count"] + 1}
+
+    async def research_tools_node(state: ResearchState) -> dict:
+        return await ToolNode(all_tools).ainvoke(state)
+
     g = StateGraph(ResearchState)
-    g.add_node("planner", research_planner)
-    g.add_node("tools", research_tools)
+    g.add_node("planner", research_planner_node)
+    g.add_node("tools", research_tools_node)
     g.add_node("finish", research_finish)
     g.set_entry_point("planner")
     g.add_conditional_edges("planner", research_should_continue, {"tools": "tools", "finish": "finish"})
