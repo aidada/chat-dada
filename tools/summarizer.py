@@ -2,9 +2,11 @@
 Summarizer Tool — single LLM call to summarize text.
 """
 from langchain_core.messages import HumanMessage, SystemMessage
-from models import get_llm
+from models import get_llm, response_text
+from logger import log_async
 
 
+@log_async("tool", "summarizer")
 async def run(input_data) -> dict:
     """
     Summarize text content.
@@ -25,4 +27,4 @@ async def run(input_data) -> dict:
         HumanMessage(content=text),
     ]
     response = await llm.ainvoke(messages)
-    return {"status": "ok", "result": response.content}
+    return {"status": "ok", "result": response_text(response)}

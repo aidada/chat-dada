@@ -12,7 +12,9 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
+from content_utils import extract_text_content, normalize_markdown_report
 from models import get_llm
+from logger import log_async
 
 
 # ── Tools ──
@@ -86,7 +88,7 @@ async def doc_tool_executor(state: DocState) -> dict:
 def doc_finish(state: DocState) -> dict:
     for msg in reversed(state["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
-            return {"analysis": str(msg.content)}
+            return {"analysis": normalize_markdown_report(extract_text_content(msg))}
     return {"analysis": ""}
 
 
@@ -126,8 +128,12 @@ def build_doc_graph():
     return g.compile()
 
 
+@log_async("agent", "doc_agent")
 async def run_doc_analysis(file_paths: list[str]) -> str:
     """Run the doc analyst agent on a list of files."""
+    if not file_paths:
+        return ""
+
     graph = build_doc_graph()
     files_desc = "\n".join(f"- {p}" for p in file_paths)
     state = {

@@ -11,7 +11,9 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
+from content_utils import extract_text_content, normalize_markdown_report
 from models import get_llm
+from logger import log_async
 
 
 @tool
@@ -101,7 +103,7 @@ async def analyst_tools(state: AnalystState) -> dict:
 def analyst_finish(state: AnalystState) -> dict:
     for msg in reversed(state["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
-            return {"analysis": str(msg.content)}
+            return {"analysis": normalize_markdown_report(extract_text_content(msg))}
     return {"analysis": ""}
 
 
@@ -140,18 +142,24 @@ def build_analyst_graph():
     return g.compile()
 
 
+@log_async("agent", "data_analyst")
 async def run(input_data) -> dict:
-    """Unified interface for registry dispatch."""
     if isinstance(input_data, str):
         query = input_data
+        memory_context = ""
     elif isinstance(input_data, dict):
         query = input_data.get("query", input_data.get("analysis_input", str(input_data)))
+        memory_context = input_data.get("memory_context", "")
     else:
         query = str(input_data)
+        memory_context = ""
 
     graph = build_analyst_graph()
+    task_prompt = f"请分析以下数据/需求：\n{query}"
+    if memory_context:
+        task_prompt = f"{memory_context}\n\n{task_prompt}"
     state = {
-        "messages": [HumanMessage(content=f"请分析以下数据/需求：\n{query}")],
+        "messages": [HumanMessage(content=task_prompt)],
         "step_count": 0,
         "analysis": "",
     }

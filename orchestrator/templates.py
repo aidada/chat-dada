@@ -18,16 +18,14 @@ TEMPLATES = {
         ],
     },
     "research_report": {
-        "description": "Deep research on a topic and produce a Word document",
+        "description": "Deep research on a topic and produce a Markdown report",
         "steps": [
             {"id": 1, "type": "agent", "name": "deep_research",
              "input_key": "search_query", "parallel_with": [2]},
             {"id": 2, "type": "agent", "name": "doc_analyst",
              "input_key": "file_paths", "parallel_with": [1]},
-            {"id": 3, "type": "agent", "name": "writer",
-             "input_key": "writer_input", "depends_on": [1, 2]},
-            {"id": 4, "type": "renderer", "name": "word_render",
-             "input_key": "render_input", "depends_on": [3]},
+            {"id": 3, "type": "renderer", "name": "markdown_render",
+             "input_key": "render_input", "depends_on": [1, 2]},
         ],
     },
     "data_analysis": {

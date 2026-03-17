@@ -10,9 +10,12 @@
 !requirements.txt
 !pyproject.toml
 !main.py
+!task_runtime.py
+!task_dispatcher.py
 !agent.py
 !models.py
 !registry.py
+!logger.py
 !index.html
 !agents/
 !agents/**
@@ -20,6 +23,8 @@
 !ppt_engine/**
 !orchestrator/
 !orchestrator/**
+!memory/
+!memory/**
 !tools/
 !tools/**
 !renderers/
@@ -32,6 +37,9 @@
 !outputs/**
 !docs/
 !docs/**
+!tests/
+!tests/**
+!todo.md
 
 # Virtual environment
 .venv/
@@ -47,3 +55,6 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+# Logs
+logs/*.log*

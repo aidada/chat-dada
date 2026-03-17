@@ -5,7 +5,10 @@ import subprocess
 import tempfile
 import os
 
+from logger import log_async
 
+
+@log_async("tool", "code_executor")
 async def run(input_data) -> dict:
     """
     Execute Python code in a sandboxed subprocess.

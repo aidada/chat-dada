@@ -131,6 +131,9 @@ register("general_chat", fn_path="agents.general_chat:run",
 register("web_search", fn_path="tools.web_search:run",
          cap_type="tool", description="Search the web via Tavily and return results",
          available_to=[])
+register("brave_search", fn_path="tools.brave_search:run",
+         cap_type="tool", description="Search the web via Brave and return title/link/snippet results",
+         available_to=["search", "deep_research"])
 register("translator", fn_path="tools.translator:run",
          cap_type="tool", description="Translate text to a target language via LLM",
          available_to=["deep_research"])
@@ -159,6 +162,8 @@ register("data_analyst", fn_path="agents.data_analyst:run",
 # New Renderers (V2)
 register("word_render", fn_path="renderers.word_renderer:run",
          cap_type="renderer", description="Render markdown text to editable .docx file")
+register("markdown_render", fn_path="renderers.markdown_renderer:run",
+         cap_type="renderer", description="Save markdown text to a .md file")
 register("excel_render", fn_path="renderers.excel_renderer:run",
          cap_type="renderer", description="Render structured data to .xlsx Excel file")
 register("visio_render", fn_path="renderers.visio_renderer:run",

@@ -7,7 +7,10 @@ import urllib.parse
 
 import httpx
 
+from logger import log_async
 
+
+@log_async("tool", "academic_search")
 async def run(input_data) -> dict:
     """
     Search academic papers on Semantic Scholar and arXiv.
