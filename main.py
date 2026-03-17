@@ -5,11 +5,12 @@ Local Agent - FastAPI + Multi-Agent + Task Streaming via POST + SSE
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import os
 import shutil
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,24 @@ load_dotenv()
 setup_logging()
 log = logging.getLogger("chatdada.main")
 
-app = FastAPI(title="Local Agent")
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://chatdada:chatdada@localhost:5432/chatdada"
+)
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+task_service = TaskService(DATABASE_URL, REDIS_URL)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await task_service.connect()
+    yield
+    await task_service.close()
+
+
+app = FastAPI(title="Local Agent", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,12 +62,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": "服务端内部错误，请查看后端日志。"},
     )
-
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
-
-TASK_DB_PATH = Path("data/task_runs.sqlite3")
-task_service = TaskService(TASK_DB_PATH)
 
 
 class TaskCreateRequest(BaseModel):
@@ -120,43 +132,60 @@ def _parse_after_seq(request: Request, after_seq: int | None) -> int:
 
 
 async def _event_stream(request: Request, task_id: str, after_seq: int) -> StreamingResponse:
-    snapshot = task_service.get_task(task_id)
+    snapshot = await task_service.get_task(task_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="任务不存在")
 
     async def event_generator():
-        queue = task_service.subscribe(task_id)
+        # Subscribe first, then replay — prevents race between publish and replay
+        pubsub = await task_service.subscribe(task_id)
         last_sent = after_seq
 
         try:
-            replay_events = task_service.get_events_after(task_id, after_seq)
+            replay_events = await task_service.get_events_after(task_id, after_seq)
             for event in replay_events:
-                last_sent = max(last_sent, int(event["seq"]))
-                yield format_sse(event)
+                if int(event["seq"]) > last_sent:
+                    last_sent = int(event["seq"])
+                    yield format_sse(event)
 
             while True:
                 if await request.is_disconnected():
                     break
 
-                current = task_service.get_task(task_id)
-                if current is None:
-                    break
-                if task_is_terminal(current["status"]) and queue.empty():
-                    break
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True,
+                    timeout=HEARTBEAT_INTERVAL_SECONDS,
+                )
 
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL_SECONDS)
-                except asyncio.TimeoutError:
+                if message is None:
+                    # Timeout: check task status then send heartbeat or break
+                    current = await task_service.get_task(task_id)
+                    if current is None or task_is_terminal(current["status"]):
+                        break
                     yield ": keep-alive\n\n"
                     continue
 
-                if int(event["seq"]) <= last_sent:
+                if message["type"] != "message":
                     continue
 
-                last_sent = int(event["seq"])
+                try:
+                    event = json.loads(message["data"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+                seq = int(event.get("seq", 0))
+                if seq <= last_sent:
+                    continue
+
+                last_sent = seq
                 yield format_sse(event)
+
+                # After each event, check if task reached terminal status
+                current = await task_service.get_task(task_id)
+                if current and task_is_terminal(current["status"]):
+                    break
         finally:
-            task_service.unsubscribe(task_id, queue)
+            await task_service.unsubscribe(task_id, pubsub)
 
     return StreamingResponse(
         event_generator(),
@@ -227,7 +256,7 @@ async def create_task(payload: TaskCreateRequest):
 
 @app.get("/tasks/{task_id}")
 async def get_task(task_id: str):
-    snapshot = task_service.get_task(task_id)
+    snapshot = await task_service.get_task(task_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     return snapshot
@@ -299,29 +328,49 @@ async def websocket_endpoint(websocket: WebSocket):
                 file_paths=file_paths,
             )
             task_id = snapshot["task_id"]
-            queue = task_service.subscribe(task_id)
+
+            # Subscribe first, then replay — prevents race between publish and replay
+            pubsub = await task_service.subscribe(task_id)
             last_sent = 0
 
             try:
-                replay_events = task_service.get_events_after(task_id, 0)
+                replay_events = await task_service.get_events_after(task_id, 0)
                 for event in replay_events:
-                    last_sent = max(last_sent, int(event["seq"]))
-                    await websocket.send_json(event)
+                    if int(event["seq"]) > last_sent:
+                        last_sent = int(event["seq"])
+                        await websocket.send_json(event)
 
                 while True:
-                    current = task_service.get_task(task_id)
-                    if current is None:
-                        break
-                    if task_is_terminal(current["status"]) and queue.empty():
-                        break
+                    message = await pubsub.get_message(
+                        ignore_subscribe_messages=True,
+                        timeout=HEARTBEAT_INTERVAL_SECONDS,
+                    )
 
-                    event = await queue.get()
-                    if int(event["seq"]) <= last_sent:
+                    if message is None:
+                        current = await task_service.get_task(task_id)
+                        if current is None or task_is_terminal(current["status"]):
+                            break
                         continue
-                    last_sent = int(event["seq"])
+
+                    if message["type"] != "message":
+                        continue
+
+                    try:
+                        event = json.loads(message["data"])
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    seq = int(event.get("seq", 0))
+                    if seq <= last_sent:
+                        continue
+                    last_sent = seq
                     await websocket.send_json(event)
+
+                    current = await task_service.get_task(task_id)
+                    if current and task_is_terminal(current["status"]):
+                        break
             finally:
-                task_service.unsubscribe(task_id, queue)
+                await task_service.unsubscribe(task_id, pubsub)
     except WebSocketDisconnect:
         log.info("Client disconnected")
 

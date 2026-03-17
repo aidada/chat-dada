@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
+import os
 import time
 import unittest
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -13,6 +12,11 @@ import main
 from task_dispatcher import RouteDecision, route_task_request
 from task_interaction import ask_user
 from task_runtime import TaskService
+
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL", "postgresql://chatdada:chatdada@localhost:5432/chatdada"
+)
+TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/1")
 
 
 async def fake_orchestrator_runner(task: str, on_step, user_id: str = "anonymous") -> str:
@@ -44,7 +48,9 @@ async def fake_interactive_runner(task: str, on_step, user_id: str = "anonymous"
     return f"interactive for {user_id}: {answer}"
 
 
-async def fake_dispatcher(task_text: str, file_paths: list[str], mode: str = "auto", user_id: str = "anonymous") -> RouteDecision:
+async def fake_dispatcher(
+    task_text: str, file_paths: list[str], mode: str = "auto", user_id: str = "anonymous"
+) -> RouteDecision:
     route_name, reason, confidence = route_task_request(task_text, file_paths, mode)
     executor = fake_chat_runner if route_name == "general_chat" else fake_orchestrator_runner
     return RouteDecision(
@@ -55,13 +61,13 @@ async def fake_dispatcher(task_text: str, file_paths: list[str], mode: str = "au
     )
 
 
-async def wait_for_terminal(service: TaskService, task_id: str, timeout: float = 2.0) -> dict:
+async def wait_for_terminal(service: TaskService, task_id: str, timeout: float = 5.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        snapshot = service.get_task(task_id)
+        snapshot = await service.get_task(task_id)
         if snapshot and snapshot["status"] in {"succeeded", "failed", "cancelled"}:
             return snapshot
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
     raise AssertionError(f"Timed out waiting for task {task_id} to finish")
 
 
@@ -69,18 +75,18 @@ async def wait_for_status(
     service: TaskService,
     task_id: str,
     statuses: set[str],
-    timeout: float = 2.0,
+    timeout: float = 5.0,
 ) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        snapshot = service.get_task(task_id)
+        snapshot = await service.get_task(task_id)
         if snapshot and snapshot["status"] in statuses:
             return snapshot
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
     raise AssertionError(f"Timed out waiting for task {task_id} to reach {statuses}")
 
 
-def wait_for_terminal_http(client: TestClient, task_id: str, timeout: float = 2.0) -> dict:
+def wait_for_terminal_http(client: TestClient, task_id: str, timeout: float = 5.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         response = client.get(f"/tasks/{task_id}")
@@ -88,7 +94,7 @@ def wait_for_terminal_http(client: TestClient, task_id: str, timeout: float = 2.
             snapshot = response.json()
             if snapshot["status"] in {"succeeded", "failed", "cancelled"}:
                 return snapshot
-        time.sleep(0.02)
+        time.sleep(0.05)
     raise AssertionError(f"Timed out waiting for task {task_id} to finish")
 
 
@@ -96,7 +102,7 @@ def wait_for_status_http(
     client: TestClient,
     task_id: str,
     statuses: set[str],
-    timeout: float = 2.0,
+    timeout: float = 5.0,
 ) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -105,17 +111,20 @@ def wait_for_status_http(
             snapshot = response.json()
             if snapshot["status"] in statuses:
                 return snapshot
-        time.sleep(0.02)
+        time.sleep(0.05)
     raise AssertionError(f"Timed out waiting for task {task_id} to reach {statuses}")
 
 
 class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.service = TaskService(Path(self.tmpdir.name) / "tasks.sqlite3", dispatcher=fake_dispatcher)
+        self.service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=fake_dispatcher)
+        await self.service.connect()
+        # Clean tables before each test for isolation
+        async with self.service.store.pool.acquire() as conn:
+            await conn.execute("TRUNCATE TABLE task_events, task_runs")
 
     async def asyncTearDown(self) -> None:
-        self.tmpdir.cleanup()
+        await self.service.close()
 
     async def test_submit_task_routes_to_orchestrator_when_files_are_present(self) -> None:
         snapshot = await self.service.submit_task(
@@ -132,7 +141,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("attachments require tool-capable orchestration", final_snapshot["route_reason"])
         self.assertIn("orchestrated for user-1", final_snapshot["result"])
 
-        events = self.service.get_events_after(snapshot["task_id"], 0)
+        events = await self.service.get_events_after(snapshot["task_id"], 0)
         self.assertEqual(
             [event["type"] for event in events],
             ["start", "step", "step", "file", "result", "monitoring"],
@@ -157,7 +166,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("direct chat", final_snapshot["route_reason"])
         self.assertIn("chat for user-3", final_snapshot["result"])
 
-        events = self.service.get_events_after(snapshot["task_id"], 0)
+        events = await self.service.get_events_after(snapshot["task_id"], 0)
         self.assertIn("Route: general_chat", events[1]["content"])
 
     async def test_task_can_pause_for_user_reply_and_resume(self) -> None:
@@ -174,32 +183,38 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
                 confidence=1.0,
             )
 
-        service = TaskService(Path(self.tmpdir.name) / "interactive.sqlite3", dispatcher=interactive_dispatcher)
-        snapshot = await service.submit_task(
-            task_text="研究一个有歧义的问题",
-            user_id="user-5",
-            mode="agent",
-            thinking_level="high",
-            file_paths=[],
-        )
+        service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=interactive_dispatcher)
+        await service.connect()
+        try:
+            snapshot = await service.submit_task(
+                task_text="研究一个有歧义的问题",
+                user_id="user-5",
+                mode="agent",
+                thinking_level="high",
+                file_paths=[],
+            )
 
-        waiting_snapshot = await wait_for_status(service, snapshot["task_id"], {"waiting_for_user"})
-        self.assertEqual(waiting_snapshot["status"], "waiting_for_user")
-        self.assertEqual(
-            waiting_snapshot["pending_question"]["content"],
-            "你更想看理论可行性，还是工程实现与实验效果？",
-        )
+            waiting_snapshot = await wait_for_status(
+                service, snapshot["task_id"], {"waiting_for_user"}
+            )
+            self.assertEqual(waiting_snapshot["status"], "waiting_for_user")
+            self.assertEqual(
+                waiting_snapshot["pending_question"]["content"],
+                "你更想看理论可行性，还是工程实现与实验效果？",
+            )
 
-        await service.reply_to_task(snapshot["task_id"], "更关注工程实现与实验效果")
-        final_snapshot = await wait_for_terminal(service, snapshot["task_id"])
-        self.assertEqual(final_snapshot["status"], "succeeded")
-        self.assertIn("更关注工程实现与实验效果", final_snapshot["result"])
+            await service.reply_to_task(snapshot["task_id"], "更关注工程实现与实验效果")
+            final_snapshot = await wait_for_terminal(service, snapshot["task_id"])
+            self.assertEqual(final_snapshot["status"], "succeeded")
+            self.assertIn("更关注工程实现与实验效果", final_snapshot["result"])
 
-        events = service.get_events_after(snapshot["task_id"], 0)
-        self.assertEqual(
-            [event["type"] for event in events],
-            ["start", "step", "step", "question", "user_reply", "step", "result", "monitoring"],
-        )
+            events = await service.get_events_after(snapshot["task_id"], 0)
+            self.assertEqual(
+                [event["type"] for event in events],
+                ["start", "step", "step", "question", "user_reply", "step", "result", "monitoring"],
+            )
+        finally:
+            await service.close()
 
 
 class TaskRoutingTests(unittest.TestCase):
@@ -240,13 +255,12 @@ class TaskRoutingTests(unittest.TestCase):
 
 class TaskEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
         self.original_service = main.task_service
-        main.task_service = TaskService(Path(self.tmpdir.name) / "tasks.sqlite3", dispatcher=fake_dispatcher)
+        # TestClient lifespan will call connect()/close() automatically
+        main.task_service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=fake_dispatcher)
 
     def tearDown(self) -> None:
         main.task_service = self.original_service
-        self.tmpdir.cleanup()
 
     def test_post_get_and_replay_events(self) -> None:
         with TestClient(main.app) as client:
@@ -308,7 +322,8 @@ class TaskEndpointTests(unittest.TestCase):
             )
 
         main.task_service = TaskService(
-            Path(self.tmpdir.name) / "interactive-http.sqlite3",
+            TEST_DATABASE_URL,
+            TEST_REDIS_URL,
             dispatcher=interactive_dispatcher,
         )
 

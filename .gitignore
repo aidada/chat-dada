@@ -40,6 +40,9 @@
 !tests/
 !tests/**
 !todo.md
+!Dockerfile
+!scripts/
+!scripts/**
 
 # Virtual environment
 .venv/
