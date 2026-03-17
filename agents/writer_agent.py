@@ -6,7 +6,8 @@ import json
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from models import get_llm
+from models import get_llm, response_text
+from logger import log_async
 from ppt_engine.dsl_schema import SlideDeck
 
 
@@ -45,8 +46,21 @@ WRITER_SYSTEM = """你是一个专业的 PPT 内容撰写专家。你会收到�
 - 只输出 JSON，不要输出其他内容"""
 
 
-async def run_writer(storyline: str, search_findings: str, doc_analysis: str, author: str = "") -> SlideDeck:
+@log_async("agent", "writer_agent")
+async def run_writer(
+    storyline: str | dict,
+    search_findings: str = "",
+    doc_analysis: str = "",
+    author: str = "",
+) -> SlideDeck:
     """Run the writer agent to produce Slide DSL from materials."""
+    if isinstance(storyline, dict):
+        input_data = storyline
+        storyline = str(input_data.get("storyline", ""))
+        search_findings = str(input_data.get("search_findings", search_findings))
+        doc_analysis = str(input_data.get("doc_analysis", doc_analysis))
+        author = str(input_data.get("author", author))
+
     llm = get_llm("writer")
     prompt = f"""## PPT 大纲
 {storyline}
@@ -64,7 +78,7 @@ async def run_writer(storyline: str, search_findings: str, doc_analysis: str, au
         HumanMessage(content=prompt),
     ]
     response = await llm.ainvoke(messages)
-    content = response.content
+    content = response_text(response)
 
     # Extract JSON from response (handle markdown code blocks)
     if "```json" in content:

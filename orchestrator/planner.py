@@ -4,12 +4,16 @@ Orchestrator Planner — classifies user intent and generates execution plans.
 2. If no match, use LLM free-form planning with full registry context
 """
 import json
+import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from models import get_llm
+from logger import log_async
+from models import get_llm, response_text
 from registry import registry_summary
 from orchestrator.templates import intent_descriptions, get_template, list_intents
+
+log = logging.getLogger("chatdada.orchestrator")
 
 
 CLASSIFY_SYSTEM = """你是一个任务分类器。根据用户的任务描述，判断最匹配的意图类型。
@@ -51,7 +55,8 @@ FREEFORM_SYSTEM = """你是一个任务编排器。用户给了一个任务，�
 - 只输出 JSON"""
 
 
-async def classify_and_plan(task: str) -> dict:
+@log_async("orchestrator", "classify_and_plan")
+async def classify_and_plan(task: str, memory_context: str = "") -> dict:
     """
     Classify user intent and return an execution plan.
 
@@ -69,10 +74,11 @@ async def classify_and_plan(task: str) -> dict:
     classify_prompt = CLASSIFY_SYSTEM.format(intents=intent_descriptions())
     messages = [
         SystemMessage(content=classify_prompt),
+        *([SystemMessage(content=memory_context)] if memory_context else []),
         HumanMessage(content=task),
     ]
     response = await llm.ainvoke(messages)
-    content = _extract_json(response.content)
+    content = _extract_json(response_text(response))
 
     try:
         classification = json.loads(content)
@@ -82,6 +88,7 @@ async def classify_and_plan(task: str) -> dict:
     intent = classification.get("intent", "free_form")
     confidence = classification.get("confidence", 0.0)
     params = classification.get("params", {})
+    log.info(f"Classified intent={intent} confidence={confidence:.2f}")
 
     # Step 2: Match template or free-form plan
     template = get_template(intent) if confidence >= 0.5 else None
@@ -108,10 +115,11 @@ async def classify_and_plan(task: str) -> dict:
     freeform_prompt = FREEFORM_SYSTEM.format(registry=registry_summary())
     messages = [
         SystemMessage(content=freeform_prompt),
+        *([SystemMessage(content=memory_context)] if memory_context else []),
         HumanMessage(content=task),
     ]
     response = await llm.ainvoke(messages)
-    content = _extract_json(response.content)
+    content = _extract_json(response_text(response))
 
     try:
         plan = json.loads(content)
@@ -126,6 +134,7 @@ async def classify_and_plan(task: str) -> dict:
     steps = plan.get("steps", [])
     context = plan.get("context", {"task": task})
     context["task"] = task
+    log.info(f"Free-form plan generated: {len(steps)} steps")
 
     return {
         "intent": plan.get("intent", "free_form"),

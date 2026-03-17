@@ -1,458 +1,396 @@
-# Local Agent — 通用多智能体任务平台
+# chat dada / Local Agent
 
-> **V2 Universal Agent** — 从 PPT-only 多智能体系统升级为注册表驱动的通用任务平台
+一个基于 FastAPI、LangGraph 和流式任务运行时的通用多智能体平台。当前代码库已经从早期的 WebSocket-only PPT 生成器，演进为支持聊天、深度研究、文件分析、翻译、图片生成、Markdown/Word/Excel/PPT 输出的任务系统。
 
-## 目录
+前端页面位于 [static/index.html](static/index.html)，后端入口位于 [main.py](main.py)。
 
-- [项目简介](#项目简介)
-- [架构总览](#架构总览)
-- [系统工作流](#系统工作流)
-- [模块详解](#模块详解)
-  - [注册表 (Registry)](#注册表-registry)
-  - [编排层 (Orchestrator)](#编排层-orchestrator)
-  - [Agents (智能体)](#agents-智能体)
-  - [Tools (工具)](#tools-工具)
-  - [Renderers (渲染器)](#renderers-渲染器)
-  - [PPT Engine](#ppt-engine)
-- [目录结构](#目录结构)
-- [快速开始](#快速开始)
-- [API 接口](#api-接口)
-- [V1 遗留代码说明](#v1-遗留代码说明)
+## 当前能力概览
 
----
+- 任务提交采用 `POST /tasks`，事件流采用 `GET /tasks/{task_id}/events` 的 SSE 模式，支持断线重放。
+- 任务状态和事件持久化到 `data/task_runs.sqlite3`，不是纯内存队列。
+- 支持人机交互追问。任务运行中可进入 `waiting_for_user`，再通过 `POST /tasks/{task_id}/reply` 继续。
+- 编排链路支持用户记忆。`orchestrator` 路由会从 `data/memory/` 召回历史片段，并在任务结束后回写长期记忆。
+- 能力通过统一注册表维护，当前共 19 个已注册能力：6 个 agents、8 个 tools、5 个 renderers。
+- 支持多种输出形态：直接回答、Markdown、Word、Excel、PPT、图片、占位版 Visio JSON。
 
-## 项目简介
+## 架构
 
-Local Agent 是一个基于 **FastAPI + LangGraph + WebSocket** 的多智能体任务平台。用户通过 Web 界面发送任务，系统自动分析意图、调度多个 Agent/Tool/Renderer 协同工作，最终返回结果（文本、PPT、Word、Excel 等）。
-
-**核心特性：**
-- 注册表驱动：零硬编码，所有能力通过统一注册表管理
-- 混合路由：模板匹配已知意图 + LLM 自由规划未知意图
-- 依赖图调度：支持步骤间 `depends_on` 依赖，自动并发执行无依赖步骤
-- 实时推送：WebSocket 逐步推送执行进度
-- 多格式输出：PPT / Word / Excel / 图片 / 纯文本
-
----
-
-## 架构总览
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        前端 (index.html)                        │
-│                    WebSocket ↕ JSON 消息                        │
-├─────────────────────────────────────────────────────────────────┤
-│                      FastAPI (main.py)                          │
-│               GET /  ·  GET /download  ·  WS /ws                │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────── Orchestrator 编排层 ────────────────────┐    │
-│  │                                                         │    │
-│  │  ┌─────────┐   ┌──────────┐   ┌────────────────────┐   │    │
-│  │  │ Planner │──▶│Templates │   │    Scheduler       │   │    │
-│  │  │ 意图分类 │   │ 预设模板  │   │ 依赖图并发调度     │   │    │
-│  │  └────┬────┘   └──────────┘   └────────────────────┘   │    │
-│  │       │                              ▲                  │    │
-│  │       └──────────────────────────────┘                  │    │
-│  │                Runner (入口)                             │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                         │ resolve_fn()                           │
-│              ┌──────────┴──────────┐                            │
-│              │   Registry 注册表    │                            │
-│              │  17 个已注册能力     │                            │
-│              └──────────┬──────────┘                            │
-│         ┌───────────────┼───────────────┐                      │
-│         ▼               ▼               ▼                      │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐              │
-│  │   Agents    │ │    Tools    │ │  Renderers  │              │
-│  │  (LLM 循环) │ │  (单次调用)  │ │  (纯代码)   │              │
-│  │             │ │             │ │             │              │
-│  │ · search    │ │ · web_search│ │ · ppt_render│              │
-│  │ · doc_analyst│ │ · translator│ │ · word_render│             │
-│  │ · writer    │ │ · summarizer│ │ ·excel_render│             │
-│  │ · general   │ │ · code_exec │ │ ·visio_render│             │
-│  │ · deep_res  │ │ · academic  │ │             │              │
-│  │ · data_anal │ │ · image_gen │ │             │              │
-│  │             │ │ · img2diag │ │             │              │
-│  └─────────────┘ └─────────────┘ └─────────────┘              │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+```text
+Browser / API Client
+        │
+        ├── POST /upload
+        ├── POST /tasks
+        ├── GET  /tasks/{task_id}
+        ├── GET  /tasks/{task_id}/events   (SSE)
+        └── POST /tasks/{task_id}/reply
+        │
+        ▼
+FastAPI app (main.py)
+        │
+        ▼
+TaskService / TaskRunStore (task_runtime.py)
+        │              ├── SQLite: data/task_runs.sqlite3
+        │              └── SSE replay / live subscribers
+        ▼
+Task Dispatcher (task_dispatcher.py)
+        │
+        ├── general_chat
+        └── orchestrator
+                │
+                ├── memory recall / save
+                ├── planner
+                ├── template selection or free-form planning
+                └── scheduler
+                        │
+                        ▼
+                 registry.py
+        ┌──────────────┼──────────────┐
+        ▼              ▼              ▼
+      agents         tools        renderers
 ```
 
-### 三层能力模型
+## 任务模式
 
-| 类型 | 说明 | 特点 | 示例 |
-|------|------|------|------|
-| **Agent** | 智能体，包含 LLM 推理循环 | 可多轮调用工具、有状态 | search, writer, deep_research |
-| **Tool** | 单次调用工具 | 无状态、一进一出 | web_search, translator, code_executor |
-| **Renderer** | 文件渲染器 | 纯代码、不调用 LLM | ppt_render, word_render, excel_render, visio_render |
+`POST /tasks` 支持 3 种模式：
 
----
+| mode | 行为 |
+| --- | --- |
+| `auto` | 默认模式。按附件和关键词在 `general_chat` 与 `orchestrator` 之间自动路由 |
+| `chat` | 强制走直接对话，不允许附件 |
+| `agent` | 强制走编排器 |
 
-## 系统工作流
+`thinking_level` 当前支持 `low` / `medium` / `high`，会通过 [models.py](models.py) 映射到底层模型的推理强度参数。
 
-```
-用户输入任务
-     │
-     ▼
-┌─────────────┐
-│   Planner   │  ① 意图分类 (LLM)
-│  classify_  │
-│  and_plan() │
-└──────┬──────┘
-       │
-       ├── confidence ≥ 0.5 ──▶ 匹配预设模板 (templates.py)
-       │                         7 种模板: ppt_report, research_report,
-       │                         data_analysis, quick_question, translate_doc,
-       │                         image_to_visio, image_generation
-       │
-       └── confidence < 0.5 ──▶ LLM 自由规划 (基于 registry_summary)
-                                  动态生成 steps + context
-       │
-       ▼
-┌─────────────┐
-│   Runner    │  ② 路由执行
-└──────┬──────┘
-       │
-       ├── ppt_report ──▶ 专用 PPT 流程（向后兼容 V1）
-       ├── quick_question ──▶ 直接 LLM 回答
-       └── 其他 ──▶ Scheduler 依赖图执行
-                      │
-                      ▼
-              ┌─────────────┐
-              │  Scheduler  │  ③ 波次并发执行
-              │ execute_plan│
-              └──────┬──────┘
-                     │
-          ┌──── Wave 1 ────┐
-          │  step 1  step 2 │  (无依赖，并发)
-          └────────┬────────┘
-                   │
-          ┌──── Wave 2 ────┐
-          │     step 3      │  (依赖 1,2)
-          └────────┬────────┘
-                   │
-          ┌──── Wave 3 ────┐
-          │     step 4      │  (依赖 3)
-          └────────────────┘
-```
+## 已注册能力
 
-### 预设任务模板
+能力注册定义见 [registry.py](registry.py)。
 
-| 模板 | 描述 | 执行流水线 |
-|------|------|-----------|
-| `ppt_report` | 研究主题 → 生成 PPT | search ∥ doc_analyst → writer → ppt_render |
-| `research_report` | 深度研究 → 生成 Word | deep_research ∥ doc_analyst → writer → word_render |
-| `data_analysis` | 数据文件分析 | doc_analyst → data_analyst → writer |
-| `quick_question` | 直接问答 | general_chat |
-| `translate_doc` | 文档翻译 | doc_analyst → translator → word_render |
-| `image_to_visio` | 图片转图表文件 | image_to_diagram → visio_render |
-| `image_generation` | 文本生成图片 | image_gen |
+### Agents
 
-> `∥` 表示并行执行，`→` 表示有依赖的顺序执行
+| 名称 | 入口 | 说明 |
+| --- | --- | --- |
+| `general_chat` | `agents.general_chat:run` | 直接问答，支持流式文本增量 |
+| `search` | `agents.search_agent:run_search` | Web 搜索与页面抓取 |
+| `doc_analyst` | `agents.doc_agent:run_doc_analysis` | 读取并分析 PDF/文本/附件 |
+| `writer` | `agents.writer_agent:run_writer` | 生成写作内容或幻灯片 DSL |
+| `deep_research` | `agents.deep_research:run` | 多轮研究，支持 Web、学术检索、浏览器、追问 |
+| `data_analyst` | `agents.data_analyst:run` | 数据分析与代码执行协同 |
 
----
+### Tools
 
-## 模块详解
+| 名称 | 入口 | 说明 |
+| --- | --- | --- |
+| `web_search` | `tools.web_search:run` | Tavily 搜索 |
+| `brave_search` | `tools.brave_search:run` | Brave 搜索 |
+| `academic_search` | `tools.academic_search:run` | Semantic Scholar + arXiv |
+| `translator` | `tools.translator:run` | LLM 翻译 |
+| `summarizer` | `tools.summarizer:run` | LLM 摘要 |
+| `code_executor` | `tools.code_executor:run` | Python 沙箱执行 |
+| `image_gen` | `tools.image_gen:run` | 文本生成图片 |
+| `image_to_diagram` | `tools.image_to_diagram:run` | 图片转结构化图表 |
 
-### 注册表 (Registry)
+### Renderers
 
-**文件：** `registry.py`
+| 名称 | 入口 | 输出 |
+| --- | --- | --- |
+| `ppt_render` | `ppt_engine.renderer:render_pptx` | `.pptx` |
+| `markdown_render` | `renderers.markdown_renderer:run` | `.md` |
+| `word_render` | `renderers.word_renderer:run` | `.docx` |
+| `excel_render` | `renderers.excel_renderer:run` | `.xlsx` |
+| `visio_render` | `renderers.visio_renderer:run` | 当前为占位 JSON 输出 |
 
-系统的核心枢纽。所有能力在此注册，Orchestrator 通过名称查找和动态导入（`importlib`）实现零硬编码调度。
+## 编排模板
 
-```python
-# 注册一个能力
-register("search", fn_path="agents.search_agent:run_search",
-         cap_type="agent", description="Web search + browser scraping")
+模板定义见 [orchestrator/templates.py](orchestrator/templates.py)。
 
-# 调用时动态解析
-fn = resolve_fn("search")   # → agents.search_agent.run_search
-result = await fn(input_data)
+| intent | 典型流水线 | 当前输出 |
+| --- | --- | --- |
+| `ppt_report` | `search` + `doc_analyst` -> `writer` -> `ppt_render` | `.pptx` |
+| `research_report` | `deep_research` + `doc_analyst` -> `markdown_render` | `.md` |
+| `data_analysis` | `doc_analyst` -> `data_analyst` -> `writer` | 文本/结构化结果 |
+| `quick_question` | `general_chat` | 直接文本回答 |
+| `translate_doc` | `doc_analyst` -> `translator` -> `word_render` | `.docx` |
+| `image_to_visio` | `image_to_diagram` -> `visio_render` | `.json` |
+| `image_generation` | `image_gen` | 图片文件 |
+
+补充说明：
+
+- `ppt_report` 在 [orchestrator/runner.py](orchestrator/runner.py) 中仍保留了一条兼容旧版 PPT 的专用分支。
+- 当任务不匹配模板时，`planner` 会基于注册表摘要自由规划步骤。
+
+## 流式任务协议
+
+当前主协议不是旧版 `/ws`，而是任务式 API。
+
+### 1. 上传附件
+
+```bash
+curl -F "file=@/absolute/path/to/report.pdf" http://localhost:8000/upload
 ```
 
-**已注册能力清单（17 个）：**
+返回示例：
 
-| 名称 | 类型 | 模块路径 | 说明 |
-|------|------|---------|------|
-| search | agent | agents.search_agent:run_search | Web 搜索 + 浏览器抓取 |
-| doc_analyst | agent | agents.doc_agent:run_doc_analysis | PDF/文本文件解析 |
-| writer | agent | agents.writer_agent:run_writer | Slide DSL JSON 生成 |
-| general_chat | agent | agents.general_chat:run | 直接问答 |
-| deep_research | agent | agents.deep_research:run | 多轮深度研究（Web + 学术） |
-| data_analyst | agent | agents.data_analyst:run | 数据分析 + 代码执行 |
-| web_search | tool | tools.web_search:run | Tavily 搜索 |
-| translator | tool | tools.translator:run | LLM 翻译 |
-| summarizer | tool | tools.summarizer:run | LLM 摘要 |
-| code_executor | tool | tools.code_executor:run | Python 沙箱执行 |
-| academic_search | tool | tools.academic_search:run | 学术论文搜索（Semantic Scholar + arXiv） |
-| image_gen | tool | tools.image_gen:run | 文本生成图片（Nano Banana2 API） |
-| image_to_diagram | tool | tools.image_to_diagram:run | 图片转结构化图表 JSON（Vision 模型） |
-| ppt_render | renderer | ppt_engine.renderer:render_pptx | Slide DSL → .pptx |
-| word_render | renderer | renderers.word_renderer:run | Markdown → .docx |
-| excel_render | renderer | renderers.excel_renderer:run | 结构化数据 → .xlsx |
-| visio_render | renderer | renderers.visio_renderer:run | 图表 JSON → Visio（占位，输出 JSON） |
-
----
-
-### 编排层 (Orchestrator)
-
-**目录：** `orchestrator/`
-
-| 文件 | 职责 |
-|------|------|
-| `runner.py` | 主入口，替代旧版 `agents/orchestrator.py`，保持相同回调接口 |
-| `planner.py` | 意图分类 + LLM 自由规划 |
-| `scheduler.py` | 依赖图调度器，按波次并发执行 |
-| `templates.py` | 7 个预设任务模板 |
-
-**Runner** 是 `main.py` 的唯一入口：
-```python
-from orchestrator.runner import run_orchestrator as run_agent
+```json
+{
+  "path": "/absolute/server/path/uploads/abcd1234_report.pdf",
+  "name": "report.pdf"
+}
 ```
 
----
+### 2. 创建任务
 
-### Agents (智能体)
-
-**目录：** `agents/`
-
-每个 Agent 是一个 LangGraph `StateGraph` 子图，包含 LLM 推理 + 工具调用循环。
-
-| 文件 | Agent | 特点 |
-|------|-------|------|
-| `search_agent.py` | 搜索 Agent | Tavily + browser-use，最多 10 步 |
-| `doc_agent.py` | 文档分析 Agent | PDF/文本文件读取和提取 |
-| `writer_agent.py` | 写作 Agent | 生成 Slide DSL JSON |
-| `general_chat.py` | 通用对话 Agent | 单次 LLM 调用，无工具 |
-| `deep_research.py` | 深度研究 Agent | Web + 学术 + 浏览器，最多 15 步 |
-| `data_analyst.py` | 数据分析 Agent | Python 代码执行 + 数据文件读取，最多 10 步 |
-
-> `orchestrator.py` 是 V1 遗留代码，已由 `orchestrator/runner.py` 替代。参见 [V1 遗留代码说明](#v1-遗留代码说明)。
-
-#### 动态工具注入
-
-Agent 除了自带的核心 tools 外，还可以在构建 graph 时从 registry 动态获取额外工具。通过 `available_to` 字段控制哪些 agent 可以使用哪些 registry tools：
-
-```python
-# registry.py 中注册时指定
-register("image_gen", ..., available_to=["deep_research", "data_analyst"])
-
-# agent 构建 graph 时自动注入
-from registry import get_tools_for_agent
-dynamic = get_tools_for_agent("deep_research", exclude_names=core_names)
-all_tools = CORE_TOOLS + dynamic  # 合并核心 + 动态工具
+```bash
+curl -X POST http://localhost:8000/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "task": "分析这份附件并给我一份研究结论",
+    "user_id": "alice",
+    "mode": "auto",
+    "thinking_level": "high",
+    "file_paths": ["/absolute/server/path/uploads/abcd1234_report.pdf"]
+  }'
 ```
 
-**当前动态工具分配：**
+返回示例：
 
-| Registry Tool | 可用 Agent | 原因 |
-|---|---|---|
-| image_gen | deep_research, data_analyst | 研究/分析可能需要生成配图 |
-| image_to_diagram | doc_analyst, deep_research | 文档分析可能遇到图片需解析 |
-| summarizer | deep_research, data_analyst | 压缩长文本 |
-| translator | deep_research | 研究可能遇到外文资料 |
-| code_executor | deep_research | 研究可能需要验证代码 |
+```json
+{
+  "task_id": "task_1234567890ab",
+  "status": "queued"
+}
+```
 
-> `web_search` 和 `academic_search` 的 `available_to` 为空，因为相关 agent 已有自己的 `@tool` 版本。
+### 3. 查询任务快照
 
----
+```bash
+curl http://localhost:8000/tasks/task_1234567890ab
+```
 
-### Tools (工具)
+任务快照包含：
 
-**目录：** `tools/`
+- `status`
+- `route_name`
+- `route_reason`
+- `route_confidence`
+- `pending_question`
+- `result`
+- `error`
+- `last_seq`
 
-独立的单次调用函数，统一接口 `async def run(input_data) -> dict`。
+### 4. 订阅事件流
 
-| 文件 | 功能 |
-|------|------|
-| `web_search.py` | Tavily 网络搜索 |
-| `translator.py` | LLM 翻译 |
-| `summarizer.py` | LLM 摘要 |
-| `code_executor.py` | Python 沙箱执行（subprocess，30s 超时） |
-| `academic_search.py` | Semantic Scholar + arXiv 搜索（httpx） |
-| `image_gen.py` | 文本生成图片（Nano Banana2 API） |
-| `image_to_diagram.py` | 图片转结构化图表 JSON（Vision 模型） |
+```bash
+curl -N http://localhost:8000/tasks/task_1234567890ab/events
+```
 
----
+SSE 事件支持 `Last-Event-ID` 和 `after_seq` 重放。当前会出现的用户态事件类型包括：
 
-### Renderers (渲染器)
+| type | 含义 |
+| --- | --- |
+| `start` | 任务开始 |
+| `step` | 过程日志 |
+| `question` | 任务向用户追问 |
+| `user_reply` | 用户回复已写入任务上下文 |
+| `result_delta` | 流式增量文本 |
+| `file` | 生成了可下载文件 |
+| `result` | 最终成功结果 |
+| `error` | 最终失败结果 |
+| `monitoring` | 本次任务的监控摘要 |
 
-**目录：** `renderers/` + `ppt_engine/`
+### 5. 回复追问
 
-纯代码文件生成，不调用 LLM。
+当任务状态变成 `waiting_for_user` 时：
 
-| 文件 | 输出格式 | 依赖库 |
-|------|---------|--------|
-| `ppt_engine/renderer.py` | .pptx | python-pptx |
-| `renderers/word_renderer.py` | .docx | python-docx |
-| `renderers/excel_renderer.py` | .xlsx | openpyxl |
-| `renderers/visio_renderer.py` | .json (占位) | — (python-vsdx 待实现) |
+```bash
+curl -X POST http://localhost:8000/tasks/task_1234567890ab/reply \
+  -H 'Content-Type: application/json' \
+  -d '{"answer": "更关注工程实现与实验效果"}'
+```
 
-### PPT Engine
+### 6. 下载生成文件
 
-**目录：** `ppt_engine/`
+```bash
+curl -O http://localhost:8000/download/your_file.docx
+```
 
-| 文件 | 职责 |
-|------|------|
-| `dsl_schema.py` | Slide DSL 数据模型（Pydantic），定义 SlideDeck / Slide / Element 结构 |
-| `renderer.py` | 将 SlideDeck DSL 渲染为 .pptx 文件 |
+## WebSocket 兼容路径
 
----
+[main.py](main.py) 仍保留 `/ws`，用于兼容旧客户端，但新客户端应优先使用：
+
+- `POST /tasks`
+- `GET /tasks/{task_id}/events`
+
+## 用户记忆
+
+记忆模块位于 [memory/store.py](memory/store.py)。
+
+默认存储路径：
+
+```text
+data/memory/<user_id>/
+├── profile.md
+├── summaries/YYYY/YYYY-MM.md
+└── timeline/YYYY/MM/YYYY-MM-DD.md
+```
+
+当前逻辑：
+
+- `orchestrator` 路由开始前会根据 `user_id` 召回相关历史片段。
+- 任务结束后会把当前任务与结果写入时间线和月度摘要。
+- 同时尝试抽取稳定画像，更新长期 profile。
+
+如果不希望使用默认目录，可设置 `LOCAL_AGENT_MEMORY_DIR`。
 
 ## 目录结构
 
-```
+```text
 .
-├── main.py                    # FastAPI 入口，WebSocket 端点
-├── registry.py                # 统一能力注册表（V2 核心）
-├── models.py                  # LLM 配置中心，按角色分配模型
+├── main.py                    # FastAPI 入口
+├── task_runtime.py            # 任务持久化、SSE、回复恢复
+├── task_dispatcher.py         # auto/chat/agent 路由判定
+├── task_interaction.py        # 任务内 ask_user 交互桥接
+├── models.py                  # 模型与 provider 配置中心
+├── registry.py                # 统一能力注册表
+├── logger.py                  # 结构化日志与监控汇总
+├── content_utils.py           # 输出文本提取与清洗
 │
-├── orchestrator/              # V2 编排层
-│   ├── runner.py              # 主入口（替代旧 agents/orchestrator.py）
-│   ├── planner.py             # 意图分类 + 自由规划
-│   ├── scheduler.py           # 依赖图调度器
-│   └── templates.py           # 预设任务模板
+├── orchestrator/
+│   ├── planner.py             # intent 分类与自由规划
+│   ├── runner.py              # 编排总入口
+│   ├── scheduler.py           # 依赖图执行
+│   └── templates.py           # 预设模板
 │
-├── agents/                    # 智能体（LLM 循环）
-│   ├── search_agent.py        # 搜索 Agent
-│   ├── doc_agent.py           # 文档分析 Agent
-│   ├── writer_agent.py        # 写作 Agent
-│   ├── general_chat.py        # 通用对话 Agent（V2 新增）
-│   ├── deep_research.py       # 深度研究 Agent（V2 新增）
-│   ├── data_analyst.py        # 数据分析 Agent（V2 新增）
-│   └── orchestrator.py        # ⚠️ V1 遗留，已由 orchestrator/runner.py 替代
+├── agents/
+├── tools/
+├── renderers/
+├── ppt_engine/
 │
-├── tools/                     # 独立工具（V2 新增）
-│   ├── web_search.py          # Tavily 搜索
-│   ├── translator.py          # LLM 翻译
-│   ├── summarizer.py          # LLM 摘要
-│   ├── code_executor.py       # Python 沙箱执行
-│   ├── academic_search.py     # 学术论文搜索
-│   ├── image_gen.py           # 文本生成图片（Nano Banana2）
-│   └── image_to_diagram.py    # 图片转结构化图表（Vision）
-│
-├── renderers/                 # 文件渲染器（V2 新增）
-│   ├── word_renderer.py       # Markdown → .docx
-│   ├── excel_renderer.py      # 结构化数据 → .xlsx
-│   └── visio_renderer.py      # 图表 JSON → Visio（占位）
-│
-├── ppt_engine/                # PPT 渲染引擎
-│   ├── dsl_schema.py          # Slide DSL 数据模型
-│   └── renderer.py            # SlideDeck → .pptx
-│
-├── old/                       # ⚠️ V1 遗留备份
-│   └── agent.py               # 最初的单 agent 代码
-│
-├── static/
-│   └── index.html             # 前端页面
-│
-├── outputs/                   # 生成文件输出目录
-├── docs/plans/                # 设计文档和实施计划
-├── requirements.txt           # Python 依赖
-└── pyproject.toml             # 项目配置
+├── memory/                    # 记忆模块
+├── static/index.html          # 当前前端页面
+├── old/                       # 旧版前端与单体 agent 备份
+├── uploads/                   # 上传文件
+├── outputs/                   # 生成文件
+├── data/                      # SQLite 与记忆数据
+└── tests/                     # 单元测试
 ```
 
----
-
-## 快速开始
+## 安装与运行
 
 ### 环境要求
 
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/) (推荐) 或 pip
+- Python 3.13
+- `uv` 或 `pip`
 
-### 安装
+### 安装依赖
+
+推荐使用项目虚拟环境：
 
 ```bash
-# 创建虚拟环境
 uv venv .venv
 source .venv/bin/activate
 
-# 安装依赖
 uv pip install -r requirements.txt
+uv pip install langchain-google-genai langchain-tavily
 
-# 安装 playwright 浏览器（搜索 Agent 需要）
 playwright install chromium
 ```
 
-### 配置
+说明：
 
-编辑 `models.py` 中的 `MODEL_CONFIGS`，设置各角色的 LLM 模型和 API Key。
+- 当前代码直接 import `langchain_google_genai` 和 `langchain_tavily`，因此新环境建议显式安装。
+- 如果只做非浏览器能力开发，`playwright install chromium` 仍建议执行，因为 `deep_research` 会使用 `browser-use`。
 
-如需搜索功能，设置环境变量：
+### 最小可用配置
+
+默认模型配置见 [models.py](models.py)。按当前仓库默认值，至少需要：
+
 ```bash
-export TAVILY_API_KEY="your-api-key"
+CO_API_KEY=your_proxy_key
 ```
 
-### 运行
+服务启动时会自动调用 `load_dotenv()` 读取仓库根目录的 `.env` 文件，也可以直接通过 shell 环境变量注入。
+
+常见可选配置：
+
+```bash
+# 搜索
+TAVILY_API_KEY=your_tavily_key
+BRAVE_SEARCH_API_KEY=your_brave_key
+
+# Provider / 模型
+OPENAI_API_KEY=your_openai_key
+GOOGLE_API_KEY=your_google_key
+MOONSHOT_API_KEY=your_moonshot_key
+ANTHROPIC_API_KEY=your_anthropic_key
+YESCODE_GEMINI_BASE_URL=https://co.yes.vg/gemini
+
+# 运行时
+LOCAL_AGENT_MEMORY_DIR=data/memory
+LLM_TIMEOUT_SECONDS=7200
+LLM_MAX_RETRIES=2
+
+# 图片生成
+IMAGE_GEN_API_URL=https://co.yes.vg/v1/chat/completions
+IMAGE_GEN_MODEL=gemini-3.1-flash-image-landscape
+```
+
+### 启动服务
 
 ```bash
 uvicorn main:app --reload --port 8000
 ```
 
-浏览器访问 `http://localhost:8000`，通过 Web 界面发送任务。
+启动后访问：
 
----
+- `http://localhost:8000/`
 
-## API 接口
+## 当前默认模型映射
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/` | GET | 返回前端页面 |
-| `/download/{filename}` | GET | 下载生成的文件 |
-| `/ws` | WebSocket | 任务交互通道 |
+当前角色到模型的默认映射定义在 [models.py](models.py)：
 
-### WebSocket 消息格式
+| role | provider | model |
+| --- | --- | --- |
+| `orchestrator` | `proxy` | `gpt-5.4` |
+| `search` | `proxy` | `gpt-5.4` |
+| `doc_analyst` | `google_proxy` | `gemini-3.1-pro-preview-customtools` |
+| `writer` | `proxy` | `gpt-5.4` |
+| `deep_research` | `google_proxy` | `gemini-3.1-pro-preview-customtools` |
+| `data_analyst` | `proxy` | `gpt-5.4` |
 
-**客户端 → 服务端：**
-```json
-{"task": "帮我研究人工智能发展趋势并生成PPT"}
+如果要切换模型或 provider，直接修改 `PROVIDERS` 和 `MODEL_CONFIGS`。
+
+## 监控与调试
+
+除了业务事件流，后端还提供两个调试接口：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/verbose` / `POST /api/verbose` | 查看或切换 verbose 输出 |
+| `POST /api/log-level` | 动态调整日志级别 |
+
+任务结束时会追加一个 `monitoring` 事件，内容来自 [logger.py](logger.py) 的采集汇总，包括耗时、LLM 调用数、token 统计和错误信息。
+
+## 测试
+
+当前测试位于 [tests](tests)：
+
+- `test_task_streaming.py` 覆盖任务提交、SSE、追问回复、HTTP 接口
+- `test_models.py` 覆盖模型适配层
+- `test_scheduler.py`、`test_orchestrator_runner.py` 覆盖编排执行
+- `test_deep_research.py`、`test_word_renderer.py`、`test_markdown_renderer.py` 覆盖核心能力
+
+运行：
+
+```bash
+python -m unittest discover -s tests
 ```
 
-**服务端 → 客户端：**
-```json
-{"type": "start", "content": "开始执行: ..."}
-{"type": "step",  "content": "🔍 Search Agent: searching..."}
-{"type": "file",  "url": "/download/report_abc123.pptx", "name": "report_abc123.pptx"}
-{"type": "result","content": "PPT 已生成：共 8 页"}
-{"type": "error", "content": "错误信息"}
-```
+## 旧版代码说明
 
----
+这些路径仍保留，但不再是主执行链路：
 
-## V1 遗留代码说明
+- [old/agent.py](old/agent.py)
+- [old/index.html](old/index.html)
+- [agents/orchestrator.py](agents/orchestrator.py)
 
-以下文件属于 V1 版本（PPT-only 多智能体系统），已被 V2 架构替代，保留仅供参考：
-
-| 文件 | 状态 | 替代方案 |
-|------|------|---------|
-| `agents/orchestrator.py` | **⚠️ 已废弃** | `orchestrator/runner.py` — 注册表驱动的通用编排器 |
-| `old/agent.py` | **⚠️ 已归档** | V1 最初的单文件 agent，已拆分为多模块架构 |
-
-**V1 → V2 主要变化：**
-
-| 维度 | V1 | V2 |
-|------|----|----|
-| 能力范围 | 仅 PPT 生成 | 通用任务（PPT/Word/Excel/研究/分析/翻译/问答） |
-| 调度方式 | 硬编码 4 步流水线 | 注册表 + 依赖图 + 模板/自由规划 |
-| Agent 数量 | 3 个（search, doc, writer） | 6 个 + 7 tools + 4 renderers = **17 个能力** |
-| 意图理解 | 无（全部走 PPT 流程） | LLM 意图分类 + 7 种模板 + 自由规划 |
-| 并发控制 | 手动 `asyncio.gather` | 调度器自动按依赖波次并发 |
-| 扩展方式 | 改代码 | `registry.py` 注册即可 |
-
----
-
-## 技术栈
-
-| 技术 | 用途 |
-|------|------|
-| FastAPI | Web 框架 + WebSocket |
-| LangGraph | Agent 状态图 |
-| LangChain | LLM 接口层 |
-| browser-use | 浏览器自动化 |
-| python-pptx | PPT 生成 |
-| python-docx | Word 生成 |
-| openpyxl | Excel 生成 |
-| Tavily | 网络搜索 |
-| httpx | HTTP 客户端（学术搜索） |
-| Playwright | 浏览器引擎 |
+当前应以 [orchestrator/runner.py](orchestrator/runner.py) 和 [task_runtime.py](task_runtime.py) 为准。

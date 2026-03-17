@@ -8,23 +8,17 @@ import base64
 
 import httpx
 
+from logger import log_async
+
 
 # Nano Banana2 API configuration
-IMAGE_API_URL = os.getenv("IMAGE_GEN_API_URL", "https://co.yes.vg/v1/images/generations")
-IMAGE_API_KEY = os.getenv("IMAGE_GEN_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-IMAGE_MODEL = os.getenv("IMAGE_GEN_MODEL", "nano-banana2")
+IMAGE_API_URL = os.getenv("IMAGE_GEN_API_URL", "https://co.yes.vg/v1/chat/completions")
+IMAGE_API_KEY = os.getenv("CO_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+IMAGE_MODEL = os.getenv("IMAGE_GEN_MODEL", "gemini-3.1-flash-image-landscape")
 
 
+@log_async("tool", "image_gen")
 async def run(input_data) -> dict:
-    """
-    Generate images from text prompts.
-
-    Args:
-        input_data: str (single prompt) or dict with:
-            - "prompt" or "prompts": str or list[str]
-            - "size": image size (default "1024x1024")
-            - "n": number of images per prompt (default 1)
-    """
     if isinstance(input_data, str):
         prompts = [input_data]
         size = "1024x1024"

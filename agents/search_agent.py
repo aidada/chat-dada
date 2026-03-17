@@ -11,7 +11,9 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from models import get_llm
+from content_utils import extract_text_content, normalize_markdown_report
+from models import get_browser_use_llm, get_llm
+from logger import log_async
 
 try:
     from langchain_community.tools.tavily_search import TavilySearchResults
@@ -35,7 +37,7 @@ class SearchState(TypedDict):
 # ── Tools ──
 @tool
 async def web_search(query: str) -> str:
-    """搜索互联网获取最新信息。"""
+    """用 Tavily 搜索互联网，适合研究型查询和提取较完整的摘要。"""
     if HAS_TAVILY:
         search = TavilySearchResults(max_results=5)
         results = await search.ainvoke(query)
@@ -46,8 +48,8 @@ async def web_search(query: str) -> str:
 @tool
 async def browser_navigate(task_description: str) -> str:
     """控制浏览器完成复杂网页任务：抓取动态内容、多步交互。"""
-    browser = Browser(config=BrowserConfig(headless=True))
-    llm = get_llm("search")
+    browser = Browser(browser_profile=BrowserConfig(headless=True))
+    llm = get_browser_use_llm("search")
     agent = BrowserAgent(task=task_description, llm=llm, browser=browser, max_actions_per_step=5)
     result = await agent.run(max_steps=10)
     final = result.final_result() if hasattr(result, "final_result") else str(result)
@@ -61,9 +63,10 @@ CORE_TOOLS = [web_search, browser_navigate]
 SEARCH_SYSTEM = """你是一个专业的搜索研究员。你的任务是根据给定的搜索主题，通过多次搜索收集全面的信息。
 
 策略：
-1. 先用 web_search 进行关键词搜索
-2. 如果需要抓取具体网页内容，用 browser_navigate
-3. 收集足够信息后，直接用文字总结你的发现
+1. brave_search 适合快速发现候选网页和来源
+2. web_search 适合研究型查询和拿到更完整的摘要
+3. 如果需要抓取具体网页内容，用 browser_navigate
+4. 收集足够信息后，直接用文字总结你的发现
 
 输出格式：将所有发现整理为结构化的要点，包含来源 URL。"""
 
@@ -82,7 +85,7 @@ async def search_tool_executor(state: SearchState) -> dict:
 def search_finish(state: SearchState) -> dict:
     for msg in reversed(state["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
-            return {"findings": str(msg.content)}
+            return {"findings": normalize_markdown_report(extract_text_content(msg))}
     return {"findings": ""}
 
 
@@ -122,11 +125,25 @@ def build_search_graph():
     return g.compile()
 
 
-async def run_search(query: str) -> str:
+@log_async("agent", "search_agent")
+async def run_search(input_data) -> str:
     """Run the search agent and return findings as text."""
+    if isinstance(input_data, str):
+        query = input_data
+        memory_context = ""
+    elif isinstance(input_data, dict):
+        query = input_data.get("query", input_data.get("search_query", str(input_data)))
+        memory_context = input_data.get("memory_context", "")
+    else:
+        query = str(input_data)
+        memory_context = ""
+
     graph = build_search_graph()
+    task_prompt = f"请搜索以下主题并整理发现：\n{query}"
+    if memory_context:
+        task_prompt = f"{memory_context}\n\n{task_prompt}"
     state = {
-        "messages": [HumanMessage(content=f"请搜索以下主题并整理发现：\n{query}")],
+        "messages": [HumanMessage(content=task_prompt)],
         "query": query,
         "step_count": 0,
         "findings": "",

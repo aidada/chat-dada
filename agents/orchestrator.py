@@ -14,7 +14,7 @@ from typing import Callable, Awaitable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from models import get_llm
+from models import get_llm, response_text
 from agents.search_agent import run_search
 from agents.doc_agent import run_doc_analysis
 from agents.writer_agent import run_writer
@@ -53,7 +53,7 @@ async def run_agent(task: str, on_step: Callable[[str], Awaitable[None]]) -> str
         HumanMessage(content=task),
     ]
     response = await llm.ainvoke(messages)
-    content = response.content
+    content = response_text(response)
 
     # Parse plan JSON
     if "```json" in content:
