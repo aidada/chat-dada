@@ -152,6 +152,35 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["findings"], "## 直接结论\n\n可以，但依赖额外几何约束。")
 
+    async def test_research_finish_skips_thinking_only_message_and_uses_previous_text(self) -> None:
+        state = {
+            "messages": [
+                AIMessage(content=[{"type": "text", "text": "**直接结论**\n\n前一轮已经给出结论。"}]),
+                AIMessage(content=[{"type": "thinking", "thinking": "继续检索。"}]),
+            ],
+            "query": "GNSS NLOS",
+            "step_count": 2,
+            "findings": "",
+        }
+
+        result = deep_research.research_finish(state)
+
+        self.assertEqual(result["findings"], "## 直接结论\n\n前一轮已经给出结论。")
+
+    async def test_research_finish_falls_back_to_accumulated_findings(self) -> None:
+        state = {
+            "messages": [
+                AIMessage(content=[{"type": "thinking", "thinking": "继续检索。"}]),
+            ],
+            "query": "GNSS NLOS",
+            "step_count": 2,
+            "findings": "### brave_search\n已有检索笔记。",
+        }
+
+        result = deep_research.research_finish(state)
+
+        self.assertEqual(result["findings"], "### brave_search\n已有检索笔记。")
+
     async def test_run_rewrites_final_report_with_markdown_headings(self) -> None:
         class _FakeGraph:
             async def ainvoke(self, state):

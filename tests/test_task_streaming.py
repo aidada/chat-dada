@@ -224,7 +224,17 @@ class TaskRoutingTests(unittest.TestCase):
     def test_auto_routes_task_request_to_orchestrator(self) -> None:
         route_name, reason, confidence = route_task_request("帮我搜索今天的 AI 新闻并整理成报告", [], "auto")
         self.assertEqual(route_name, "orchestrator")
-        self.assertIn("tool or multi-step", reason)
+        self.assertIn("keywords", reason)
+        self.assertGreater(confidence, 0.5)
+
+    def test_auto_routes_research_request_to_orchestrator_even_if_it_mentions_how(self) -> None:
+        route_name, reason, confidence = route_task_request(
+            "对于如何构建多路径时空图仍然没研究，我想要识别 NLOS 信号，同时还要构建纯 GNSS 提取的城市多路径时空图，用于后续 GNSS 定位抑制多路径误差",
+            [],
+            "auto",
+        )
+        self.assertEqual(route_name, "orchestrator")
+        self.assertIn("research", reason)
         self.assertGreater(confidence, 0.5)
 
 

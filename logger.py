@@ -243,6 +243,14 @@ def _extract_llm_content(obj: Any) -> str:
     return str(content)
 
 
+def _extract_total_tokens(usage: Any) -> int:
+    if not usage:
+        return 0
+    if isinstance(usage, dict):
+        return int(usage.get("total_tokens", 0) or 0)
+    return int(getattr(usage, "total_tokens", 0) or 0)
+
+
 def _prepare_responses_kwargs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[tuple[Any, ...], dict[str, Any]]:
     if kwargs.get("instructions"):
         return args, kwargs
@@ -356,9 +364,7 @@ class _LoggingLLM:
             result = await self._llm.ainvoke(*args, **kwargs)
             dur = (time.time() - t0) * 1000
 
-            tokens = 0
-            if hasattr(result, "usage_metadata") and result.usage_metadata:
-                tokens = getattr(result.usage_metadata, "total_tokens", 0) or 0
+            tokens = _extract_total_tokens(getattr(result, "usage_metadata", None))
 
             meta = {
                 "model": self._model,
@@ -408,10 +414,9 @@ class _LoggingLLM:
             async for chunk in self._llm.astream(*args, **kwargs):
                 usage = getattr(chunk, "usage_metadata", None)
                 if usage:
-                    if isinstance(usage, dict):
-                        tokens = int(usage.get("total_tokens", tokens) or tokens)
-                    else:
-                        tokens = int(getattr(usage, "total_tokens", tokens) or tokens)
+                    chunk_tokens = _extract_total_tokens(usage)
+                    if chunk_tokens:
+                        tokens = chunk_tokens
 
                 if is_verbose() and len("".join(preview_parts)) < 200:
                     chunk_text = _extract_llm_content(chunk)

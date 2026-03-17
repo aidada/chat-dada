@@ -13,6 +13,13 @@ AGENT_KEYWORDS = (
     "搜索",
     "查找",
     "检索",
+    "研究",
+    "调研",
+    "深度研究",
+    "论文",
+    "文献",
+    "综述",
+    "参考文献",
     "浏览",
     "打开",
     "访问",
@@ -26,6 +33,10 @@ AGENT_KEYWORDS = (
     "ppt",
     "幻灯片",
     "research",
+    "paper",
+    "papers",
+    "literature",
+    "survey",
     "search",
     "browse",
     "open",
@@ -56,6 +67,17 @@ CHAT_KEYWORDS = (
     "总结一下",
 )
 
+MULTI_STEP_HINTS = (
+    "同时",
+    "并且",
+    "以及",
+    "还要",
+    "还需要",
+    "用于",
+    "先",
+    "再",
+)
+
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -63,6 +85,10 @@ class RouteDecision:
     reason: str
     executor: TaskExecutor
     confidence: float
+
+
+def _matched_keywords(text: str, keywords: tuple[str, ...]) -> list[str]:
+    return [keyword for keyword in keywords if keyword in text]
 
 
 def route_task_request(task_text: str, file_paths: list[str], mode: str = "auto") -> tuple[str, str, float]:
@@ -78,11 +104,20 @@ def route_task_request(task_text: str, file_paths: list[str], mode: str = "auto"
     if file_paths:
         return "orchestrator", "attachments require tool-capable orchestration", 0.98
 
-    if any(keyword in lowered for keyword in AGENT_KEYWORDS):
-        return "orchestrator", "detected explicit tool or multi-step task keywords", 0.9
+    agent_hits = _matched_keywords(lowered, AGENT_KEYWORDS)
+    if agent_hits:
+        hit_preview = ", ".join(agent_hits[:3])
+        return "orchestrator", f"detected research/tool task keywords: {hit_preview}", 0.9
 
-    if any(keyword in lowered for keyword in CHAT_KEYWORDS):
-        return "general_chat", "detected direct chat / Q&A language", 0.85
+    multi_step_hits = _matched_keywords(lowered, MULTI_STEP_HINTS)
+    if len(text) >= 40 and len(multi_step_hits) >= 2:
+        hit_preview = ", ".join(multi_step_hits[:3])
+        return "orchestrator", f"detected multi-step planning hints: {hit_preview}", 0.82
+
+    chat_hits = _matched_keywords(lowered, CHAT_KEYWORDS)
+    if chat_hits:
+        hit_preview = ", ".join(chat_hits[:3])
+        return "general_chat", f"detected direct chat / Q&A language: {hit_preview}", 0.85
 
     return "general_chat", "defaulted to direct chat because no orchestration signals were found", 0.65
 

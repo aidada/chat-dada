@@ -10,7 +10,7 @@ Required environment variables (set in .env or shell):
     ANTHROPIC_API_KEY — for "anthropic" provider (Claude native)
 Optional environment variables:
     YESCODE_GEMINI_BASE_URL — override yescode Gemini endpoint
-                              (default: https://co.yes.vg/gemini/v1beta)
+                              (default: https://co.yes.vg/gemini)
 
 Adding a new provider:
     1. Add an entry to PROVIDERS with client/endpoint_url/api_key_env
@@ -31,6 +31,7 @@ from langchain_openai import ChatOpenAI
 _thinking_level: ContextVar[str] = ContextVar("thinking_level", default="medium")
 DEFAULT_LLM_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "7200"))
 DEFAULT_LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "2"))
+GOOGLE_PROXY_SUPPORTED_THINKING_LEVELS = {"low", "high"}
 
 
 def set_thinking_level(level: str) -> None:
@@ -59,8 +60,8 @@ PROVIDERS: dict[str, dict] = {
         "api_key_env": "MOONSHOT_API_KEY",
     },
     "google_proxy": {
-        "client": "google",  # yescode Gemini proxy, native Gemini wire format
-        "endpoint_url": "https://co.yes.vg/gemini/v1beta",
+        "client": "gemini_openai_adapter",  # yescode Gemini proxy with request/response logging
+        "endpoint_url": "https://co.yes.vg/gemini",
         "endpoint_url_env": "YESCODE_GEMINI_BASE_URL",
         "api_key_env": "CO_API_KEY",
     },
@@ -88,6 +89,16 @@ def _debug_body_preview(body: Any, limit: int = 4000) -> str:
         return "<empty>"
     if isinstance(body, bytes):
         text = body.decode("utf-8", errors="replace")
+    elif isinstance(body, (dict, list, tuple)):
+        try:
+            text = json.dumps(body, ensure_ascii=False, default=str)
+        except TypeError:
+            text = str(body)
+    elif hasattr(body, "model_dump"):
+        try:
+            text = json.dumps(body.model_dump(), ensure_ascii=False, default=str)
+        except TypeError:
+            text = str(body)
     else:
         text = str(body)
     if not text.strip():
@@ -95,12 +106,58 @@ def _debug_body_preview(body: Any, limit: int = 4000) -> str:
     return text[:limit] + ("...(truncated)" if len(text) > limit else "")
 
 
-def _log_google_proxy_raw_response(model: str, capture: dict[str, Any], exc: Exception) -> None:
+def _capture_google_proxy_request(
+    capture: dict[str, Any],
+    http_method: Any,
+    path: Any,
+    request_dict: Any,
+    http_options: Any,
+) -> None:
+    capture.update(
+        {
+            "http_method": str(http_method).upper() if http_method is not None else None,
+            "path": path,
+            "request_body": request_dict,
+            "http_options": http_options,
+        }
+    )
+
+
+def _log_google_proxy_request(model: str, capture: dict[str, Any]) -> None:
     log = logging.getLogger("chatdada.llm")
-    log.error(
-        "Gemini proxy raw response after JSON parse failure for %s: path=%s headers=%s body=%s error=%s",
+    log.debug(
+        "Gemini proxy request for %s: method=%s path=%s body=%s http_options=%s",
+        model,
+        capture.get("http_method"),
+        capture.get("path"),
+        _debug_body_preview(capture.get("request_body")),
+        _debug_body_preview(capture.get("http_options")),
+    )
+
+
+def _log_google_proxy_response(model: str, capture: dict[str, Any]) -> None:
+    log = logging.getLogger("chatdada.llm")
+    log.debug(
+        "Gemini proxy response for %s: path=%s response_headers=%s response_body=%s",
         model,
         capture.get("path"),
+        capture.get("headers"),
+        _debug_body_preview(capture.get("body")),
+    )
+
+
+def _log_google_proxy_failure(model: str, capture: dict[str, Any], exc: Exception) -> None:
+    log = logging.getLogger("chatdada.llm")
+    log.error(
+        (
+            "Gemini proxy request failed for %s: method=%s path=%s "
+            "request_body=%s http_options=%s response_headers=%s response_body=%s error=%s"
+        ),
+        model,
+        capture.get("http_method"),
+        capture.get("path"),
+        _debug_body_preview(capture.get("request_body")),
+        _debug_body_preview(capture.get("http_options")),
         capture.get("headers"),
         _debug_body_preview(capture.get("body")),
         exc,
@@ -122,6 +179,15 @@ def _translate_openai_kwargs_to_gemini(kwargs: dict[str, Any]) -> dict[str, Any]
         translated.pop(key, None)
 
     return translated
+
+
+def _normalize_google_proxy_thinking_level(level: Any) -> str | None:
+    normalized = str(level or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized in GOOGLE_PROXY_SUPPORTED_THINKING_LEVELS:
+        return normalized
+    return "low"
 
 
 class GeminiOpenAIAdapter:
@@ -192,8 +258,11 @@ class GeminiOpenAIAdapter:
             return None, None
 
         def wrapped_request(http_method, path, request_dict, http_options=None):
+            _capture_google_proxy_request(capture, http_method, path, request_dict, http_options)
+            _log_google_proxy_request(self.model, capture)
             response = original_request(http_method, path, request_dict, http_options)
             self._capture_response(capture, path, response)
+            _log_google_proxy_response(self.model, capture)
             return response
 
         return original_request, wrapped_request
@@ -204,8 +273,11 @@ class GeminiOpenAIAdapter:
             return None, None
 
         async def wrapped_async_request(http_method, path, request_dict, http_options=None):
+            _capture_google_proxy_request(capture, http_method, path, request_dict, http_options)
+            _log_google_proxy_request(self.model, capture)
             response = await original_async_request(http_method, path, request_dict, http_options)
             self._capture_response(capture, path, response)
+            _log_google_proxy_response(self.model, capture)
             return response
 
         return original_async_request, wrapped_async_request
@@ -224,8 +296,8 @@ class GeminiOpenAIAdapter:
         api_client.request = wrapped_request
         try:
             return self._llm.invoke(*args, **call_kwargs)
-        except json.JSONDecodeError as exc:
-            _log_google_proxy_raw_response(self.model, capture, exc)
+        except Exception as exc:
+            _log_google_proxy_failure(self.model, capture, exc)
             raise
         finally:
             api_client.request = original_request
@@ -244,8 +316,8 @@ class GeminiOpenAIAdapter:
         api_client.async_request = wrapped_async_request
         try:
             return await self._llm.ainvoke(*args, **call_kwargs)
-        except json.JSONDecodeError as exc:
-            _log_google_proxy_raw_response(self.model, capture, exc)
+        except Exception as exc:
+            _log_google_proxy_failure(self.model, capture, exc)
             raise
         finally:
             api_client.async_request = original_async_request
@@ -269,8 +341,8 @@ class GeminiOpenAIAdapter:
         try:
             async for chunk in self._llm.astream(*args, **call_kwargs):
                 yield chunk
-        except json.JSONDecodeError as exc:
-            _log_google_proxy_raw_response(self.model, capture, exc)
+        except Exception as exc:
+            _log_google_proxy_failure(self.model, capture, exc)
             raise
         finally:
             api_client.async_request = original_async_request
@@ -358,7 +430,10 @@ def _normalize_provider_endpoint(client_type: str, endpoint_url: str) -> tuple[s
         return endpoint_url, extra
 
     if client_type in {"google", "gemini_openai_adapter"}:
-        # Gemini SDK 的 base_url 本来就可以直接指向 /v1beta
+        # ChatGoogleGenerativeAI 会自动再拼接默认的 /v1beta，
+        # 所以这里必须传不带版本段的基地址，避免出现 /v1beta/v1beta。
+        if endpoint_url.endswith("/v1beta"):
+            return endpoint_url.removesuffix("/v1beta"), extra
         return endpoint_url, extra
 
     if client_type == "anthropic":
@@ -442,7 +517,12 @@ def get_llm(role: str, **kwargs: Any) -> BaseChatModel:
 
     # Inject thinking_level: explicit kwargs > ContextVar > default "medium"
     thinking_level = client_kwargs.pop("thinking_level", None) or _thinking_level.get()
-    client_kwargs["thinking_level"] = thinking_level
+    if provider_name == "google_proxy":
+        normalized_thinking_level = _normalize_google_proxy_thinking_level(thinking_level)
+        if normalized_thinking_level is not None:
+            client_kwargs["thinking_level"] = normalized_thinking_level
+    else:
+        client_kwargs["thinking_level"] = thinking_level
 
     from logger import _LoggingLLM
 

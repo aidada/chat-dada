@@ -56,7 +56,7 @@ class GeminiOpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("use_responses_api", captured)
         self.assertNotIn("output_version", captured)
 
-    async def test_adapter_logs_raw_body_on_json_decode_error(self) -> None:
+    async def test_adapter_logs_request_body_and_response_body_on_error(self) -> None:
         class _FakeGeminiLLM:
             def __init__(self, **kwargs) -> None:
                 self.model = kwargs["model"]
@@ -76,10 +76,10 @@ class GeminiOpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
                 await self.client.aio.models._api_client.async_request(
                     "post",
                     f"models/{self.model}:generateContent",
-                    {},
+                    {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
                     None,
                 )
-                raise json.JSONDecodeError("Expecting value", "", 0)
+                raise RuntimeError("404 Not Found")
 
         with patch("langchain_google_genai.ChatGoogleGenerativeAI", new=_FakeGeminiLLM):
             llm = GeminiOpenAIAdapter(
@@ -88,13 +88,74 @@ class GeminiOpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
                 base_url="https://co.yes.vg/gemini/v1beta",
             )
 
-            with self.assertLogs("chatdada.llm", level="ERROR") as logs:
-                with self.assertRaises(json.JSONDecodeError):
+            with self.assertLogs("chatdada.llm", level="DEBUG") as logs:
+                with self.assertRaisesRegex(RuntimeError, "404 Not Found"):
                     await llm.ainvoke([])
 
         joined = "\n".join(logs.output)
-        self.assertIn("Gemini proxy raw response after JSON parse failure", joined)
+        self.assertIn("Gemini proxy request for gemini-3.1-pro-preview", joined)
+        self.assertIn('"contents": [{"role": "user", "parts": [{"text": "hello"}]}]', joined)
+        self.assertIn("Gemini proxy request failed for gemini-3.1-pro-preview", joined)
         self.assertIn("not-json-body", joined)
+
+    async def test_adapter_logs_response_body_on_success(self) -> None:
+        success_body = json.dumps(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [
+                                {
+                                    "thoughtSignature": "sig",
+                                    "text": "An HTTP request works by sending a request and receiving a response.",
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usageMetadata": {"totalTokenCount": 793, "candidatesTokenCount": 45, "thoughtsTokenCount": 737},
+            }
+        )
+
+        class _FakeGeminiLLM:
+            def __init__(self, **kwargs) -> None:
+                self.model = kwargs["model"]
+                self.client = SimpleNamespace(
+                    aio=SimpleNamespace(
+                        models=SimpleNamespace(
+                            _api_client=SimpleNamespace(async_request=self._async_request)
+                        )
+                    )
+                )
+
+            async def _async_request(self, http_method, path, request_dict, http_options=None):
+                return _DummyResponse(success_body)
+
+            async def ainvoke(self, *args, **kwargs):
+                await self.client.aio.models._api_client.async_request(
+                    "post",
+                    f"models/{self.model}:generateContent",
+                    {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
+                    None,
+                )
+                return SimpleNamespace(content="ok", usage_metadata={"total_tokens": 793})
+
+        with patch("langchain_google_genai.ChatGoogleGenerativeAI", new=_FakeGeminiLLM):
+            llm = GeminiOpenAIAdapter(
+                "gemini-3.1-pro-preview",
+                "test-key",
+                base_url="https://co.yes.vg/gemini/v1beta",
+            )
+
+            with self.assertLogs("chatdada.llm", level="DEBUG") as logs:
+                result = await llm.ainvoke([])
+
+        self.assertEqual(result.content, "ok")
+        joined = "\n".join(logs.output)
+        self.assertIn("Gemini proxy response for gemini-3.1-pro-preview", joined)
+        self.assertIn('"thoughtSignature": "sig"', joined)
+        self.assertIn('"text": "An HTTP request works by sending a request and receiving a response."', joined)
 
 
 class ModelDefaultsTests(unittest.TestCase):
@@ -110,7 +171,7 @@ class ModelDefaultsTests(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], DEFAULT_LLM_TIMEOUT_SECONDS)
         self.assertEqual(kwargs["max_retries"], DEFAULT_LLM_MAX_RETRIES)
 
-    def test_get_llm_builds_google_proxy_via_google_client(self) -> None:
+    def test_get_llm_builds_google_proxy_via_adapter_without_default_medium_thinking(self) -> None:
         with patch.dict(
             os.environ,
             {"CO_API_KEY": "test-key"},
@@ -128,10 +189,49 @@ class ModelDefaultsTests(unittest.TestCase):
         self.assertEqual(role, "search")
         self.assertEqual(model, "gemini-3.1-pro-preview")
         self.assertIs(client, build_client.return_value)
-        self.assertEqual(build_client.call_args.args, ("google", "gemini-3.1-pro-preview", "test-key"))
+        self.assertEqual(build_client.call_args.args, ("gemini_openai_adapter", "gemini-3.1-pro-preview", "test-key"))
         kwargs = build_client.call_args.kwargs
-        self.assertEqual(kwargs["base_url"], "https://co.yes.vg/gemini/v1beta")
-        self.assertEqual(kwargs["thinking_level"], "medium")
+        self.assertEqual(kwargs["base_url"], "https://co.yes.vg/gemini")
+        self.assertEqual(kwargs["thinking_level"], "low")
+
+    def test_get_llm_preserves_supported_google_proxy_thinking_level(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CO_API_KEY": "test-key"},
+            clear=False,
+        ):
+            with patch.dict(
+                "models.MODEL_CONFIGS",
+                {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
+                clear=False,
+            ):
+                with patch("models._build_client", return_value=object()) as build_client:
+                    with patch("logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                        get_llm("search", thinking_level="high")
+
+        kwargs = build_client.call_args.kwargs
+        self.assertEqual(kwargs["thinking_level"], "high")
+
+    def test_get_llm_strips_google_proxy_v1beta_suffix_from_env_base_url(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CO_API_KEY": "test-key",
+                "YESCODE_GEMINI_BASE_URL": "https://co.yes.vg/gemini/v1beta",
+            },
+            clear=False,
+        ):
+            with patch.dict(
+                "models.MODEL_CONFIGS",
+                {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
+                clear=False,
+            ):
+                with patch("models._build_client", return_value=object()) as build_client:
+                    with patch("logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                        get_llm("search", thinking_level="high")
+
+        kwargs = build_client.call_args.kwargs
+        self.assertEqual(kwargs["base_url"], "https://co.yes.vg/gemini")
 
     def test_get_browser_use_llm_uses_openai_compatible_base_url(self) -> None:
         class _FakeLLM:

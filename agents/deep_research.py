@@ -2,6 +2,7 @@
 Deep Research Agent — multi-round research with web search + academic search.
 Upgraded version of search_agent with academic paper support.
 """
+import logging
 from dataclasses import dataclass
 from typing import Annotated, Literal
 from typing_extensions import TypedDict
@@ -16,6 +17,8 @@ from content_utils import extract_result_text, extract_text_content, normalize_m
 from logger import log_async
 from models import get_browser_use_llm, get_llm
 from task_interaction import ask_user
+
+log = logging.getLogger("chatdada.agent")
 
 try:
     from langchain_community.tools.tavily_search import TavilySearchResults
@@ -232,10 +235,19 @@ async def research_tools(state: ResearchState) -> dict:
 
 
 def research_finish(state: ResearchState) -> dict:
+    fallback = normalize_markdown_report(extract_text_content(state.get("findings", "")))
     for msg in reversed(state["messages"]):
-        if isinstance(msg, AIMessage) and msg.content:
-            return {"findings": normalize_markdown_report(extract_text_content(msg))}
-    return {"findings": ""}
+        if not isinstance(msg, AIMessage):
+            continue
+        text = normalize_markdown_report(extract_text_content(msg))
+        if text:
+            return {"findings": text}
+
+    if fallback:
+        log.warning("deep_research finish found no textual AIMessage content; falling back to accumulated findings")
+    else:
+        log.warning("deep_research finish found no textual AIMessage content or accumulated findings")
+    return {"findings": fallback}
 
 
 def research_should_continue(state: ResearchState) -> Literal["tools", "finish"]:
