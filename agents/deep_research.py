@@ -1030,13 +1030,6 @@ def _message_text(message: BaseMessage) -> str:
     return str(content)
 
 
-def _truncate_text(text: str, limit: int) -> str:
-    compact = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 1].rstrip() + "…"
-
-
 async def _rewrite_final_report(
     query: str,
     findings: str,
