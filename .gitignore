@@ -19,6 +19,14 @@
 !index.html
 !agents/
 !agents/**
+!core/
+!core/**
+!runtime/
+!runtime/**
+!capabilities/
+!capabilities/**
+!storage/
+!storage/**
 !ppt_engine/
 !ppt_engine/**
 !orchestrator/
@@ -40,6 +48,12 @@
 !tests/
 !tests/**
 !todo.md
+!context_manager.py
+!content_utils.py
+!task_interaction.py
+!research_memory.py
+!progress_tracker.py
+!research_planner.py
 !Dockerfile
 !scripts/
 !scripts/**
