@@ -30,7 +30,7 @@ class FindingEntryTests(unittest.TestCase):
         self.assertEqual(restored.key_claims, ["claim1"])
 
 
-class ResearchContextTests(unittest.TestCase):
+class ResearchContextTests(unittest.IsolatedAsyncioTestCase):
     def test_add_entry_updates_step(self) -> None:
         ctx = ResearchContext()
         ctx.add_entry(FindingEntry(step=3, tool_name="t", query="q", raw_content="x"))
@@ -52,7 +52,7 @@ class ResearchContextTests(unittest.TestCase):
         self.assertIn("https://example.com/page", entries[0].source_urls)
         self.assertIn("https://other.org/doc", entries[0].source_urls)
 
-    def test_trigger_compression_compacts_old(self) -> None:
+    async def test_trigger_compression_compacts_old(self) -> None:
         ctx = ResearchContext()
         # Add a large entry at step 1
         ctx.add_entry(
@@ -62,7 +62,7 @@ class ResearchContextTests(unittest.TestCase):
         ctx.add_entry(
             FindingEntry(step=3, tool_name="t2", query="q", raw_content="B" * 100)
         )
-        ctx.trigger_compression(step=3)
+        await ctx.trigger_compression(step=3)
 
         old_entry = ctx.entries[0]
         self.assertTrue(old_entry.compact_content)
@@ -73,12 +73,12 @@ class ResearchContextTests(unittest.TestCase):
         self.assertFalse(recent.compact_content)
         self.assertEqual(recent.raw_content, "B" * 100)
 
-    def test_trigger_compression_noop_below_threshold(self) -> None:
+    async def test_trigger_compression_noop_below_threshold(self) -> None:
         ctx = ResearchContext()
         ctx.add_entry(
             FindingEntry(step=1, tool_name="t", query="q", raw_content="short")
         )
-        ctx.trigger_compression(step=5)
+        await ctx.trigger_compression(step=5)
         self.assertFalse(ctx.entries[0].compact_content)
         self.assertEqual(ctx.entries[0].raw_content, "short")
 
@@ -166,8 +166,19 @@ class ResearchContextTests(unittest.TestCase):
         output = ctx.build_final_context()
         self.assertLess(output.find("step1"), output.find("step3"))
 
+    async def test_trigger_compression_priority_order(self) -> None:
+        """Weak entries compressed before strong when over budget."""
+        ctx = ResearchContext()
+        ctx.add_entry(FindingEntry(step=1, tool_name="t", query="q",
+                                   raw_content="W" * 5000, evidence_strength="weak"))
+        ctx.add_entry(FindingEntry(step=1, tool_name="t", query="q",
+                                   raw_content="S" * 5000, evidence_strength="strong"))
+        await ctx.trigger_compression(step=5, token_budget=6000, query="test")
+        self.assertEqual(ctx.entries[0].raw_content, "")
+        self.assertTrue(len(ctx.entries[1].raw_content) > 0)
 
-class ExtractUrlsTests(unittest.TestCase):
+
+class ExtractUrlsTests(unittest.IsolatedAsyncioTestCase):
     def test_extract_urls(self) -> None:
         text = "Visit https://a.com/page and http://b.org/doc. Also https://a.com/page again."
         urls = _extract_urls(text)
@@ -188,22 +199,22 @@ class ExtractUrlsTests(unittest.TestCase):
         data = entry.to_dict()
         self.assertEqual(data["_version"], FINDING_ENTRY_VERSION)
 
-    def test_trigger_compression_with_budget(self) -> None:
+    async def test_trigger_compression_with_budget(self) -> None:
         ctx = ResearchContext()
         # Add entries at steps 1 and 2
         ctx.add_entry(FindingEntry(step=1, tool_name="t", query="q", raw_content="A" * 5000))
         ctx.add_entry(FindingEntry(step=2, tool_name="t", query="q", raw_content="B" * 5000))
         # Budget of 200 should trigger aggressive compression (step age >= 1)
-        ctx.trigger_compression(step=3, token_budget=200)
+        await ctx.trigger_compression(step=3, token_budget=200)
         # Both should be compressed (ages 2 and 1 respectively)
         self.assertTrue(ctx.entries[0].compact_content)
         self.assertEqual(ctx.entries[0].raw_content, "")
         self.assertTrue(ctx.entries[1].compact_content)
 
-    def test_trigger_compression_budget_zero_no_change(self) -> None:
+    async def test_trigger_compression_budget_zero_no_change(self) -> None:
         ctx = ResearchContext()
         ctx.add_entry(FindingEntry(step=1, tool_name="t", query="q", raw_content="short"))
-        ctx.trigger_compression(step=5, token_budget=0)
+        await ctx.trigger_compression(step=5, token_budget=0)
         self.assertFalse(ctx.entries[0].compact_content)
         self.assertEqual(ctx.entries[0].raw_content, "short")
 
@@ -215,7 +226,7 @@ class ExtractUrlsTests(unittest.TestCase):
         # Snippet should start with first 100 chars (fallback, no structured lines)
         self.assertTrue(entry.compact_content.startswith("A" * 100))
 
-    def test_compression_already_compacted_skipped(self) -> None:
+    async def test_compression_already_compacted_skipped(self) -> None:
         """Entry with existing compact_content should not be re-compacted."""
         ctx = ResearchContext()
         entry = FindingEntry(
@@ -224,7 +235,7 @@ class ExtractUrlsTests(unittest.TestCase):
             compact_content="Already compacted",
         )
         ctx.add_entry(entry)
-        ctx.trigger_compression(step=5)
+        await ctx.trigger_compression(step=5)
         # compact_content should remain unchanged
         self.assertEqual(entry.compact_content, "Already compacted")
 

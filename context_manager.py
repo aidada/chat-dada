@@ -177,27 +177,58 @@ class ResearchContext:
         entry.compact_content = f"{snippet}\n来源：{urls_str}"
         entry.raw_content = ""
 
-    def trigger_compression(self, step: int, token_budget: int = 0) -> None:
+    async def trigger_compression(self, step: int, token_budget: int = 0, query: str = "") -> None:
         """Compress old entries when total raw content exceeds threshold.
 
-        Rule-based (no LLM call): entries whose step is at least 2 behind
-        *step* get their raw_content replaced with a compact snippet.
-        If token_budget > 0 and still over budget, apply more aggressive compression.
+        Priority: weak/empty entries first, strong entries last (use LLM summary).
+        Entries within 2 steps of current are never compressed.
         """
-        # Phase 1: standard compression (step age >= 2)
+        budget = token_budget or RAW_CONTENT_THRESHOLD
         total_raw = sum(len(e.raw_content) for e in self.entries)
-        if total_raw > RAW_CONTENT_THRESHOLD:
-            for entry in self.entries:
-                if (step - entry.step) >= 2 and not entry.compact_content:
+        if total_raw <= budget:
+            return
+
+        # Collect compressible candidates (age >= 2, has raw, not yet compacted)
+        candidates = [
+            e for e in self.entries
+            if (step - e.step) >= 2 and e.raw_content and not e.compact_content
+        ]
+        # Sort: strong first (popped last since pop() takes from end)
+        candidates.sort(key=lambda e: (
+            0 if e.evidence_strength == "strong" else 1,
+            e.step,
+        ))
+
+        while total_raw > budget and candidates:
+            entry = candidates.pop()
+            old_len = len(entry.raw_content)
+            if entry.evidence_strength == "strong":
+                try:
+                    await self._llm_compact_entry(entry, query)
+                except Exception:
                     self._compact_entry(entry)
+            else:
+                self._compact_entry(entry)
+            total_raw -= old_len
 
         # Phase 2: aggressive compression if over token budget
-        if token_budget > 0:
-            total = sum(len(e.raw_content) + len(e.compact_content) for e in self.entries)
-            if total > token_budget:
-                for entry in self.entries:
-                    if (step - entry.step) >= 1 and entry.raw_content:
-                        self._compact_entry(entry, snippet_len=100)
+        if token_budget > 0 and total_raw > token_budget:
+            for entry in self.entries:
+                if (step - entry.step) >= 1 and entry.raw_content and not entry.compact_content:
+                    self._compact_entry(entry, snippet_len=100)
+
+    async def _llm_compact_entry(self, entry: FindingEntry, query: str) -> None:
+        """Compress a high-value entry using LLM summarization."""
+        from models import get_llm, response_text
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        llm = get_llm("orchestrator")
+        resp = await llm.ainvoke([
+            SystemMessage(content="请把以下工具返回内容压缩为≤300字的结构化摘要，保留所有数据、URL和关键结论。"),
+            HumanMessage(content=f"研究主题：{query}\n\n原文：\n{entry.raw_content[:3000]}"),
+        ])
+        entry.compact_content = response_text(resp)
+        entry.raw_content = ""
 
     def update_summary(self, summary: str) -> None:
         self.summary = summary
