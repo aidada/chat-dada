@@ -111,5 +111,62 @@ class RecallToPromptTests(unittest.TestCase):
         self.assertEqual(recall.to_prompt(), "")
 
 
+class RememberTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.store = MemoryStoreV2(root=self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    async def test_remember_creates_pending_facts(self) -> None:
+        from unittest.mock import patch, AsyncMock
+        from langchain_core.messages import AIMessage
+
+        class _MockLLM:
+            async def ainvoke(self, prompt):
+                return AIMessage(content='[{"category": "identity", "content": "博士生"}]')
+
+        with patch("storage.user_store_v2.get_llm", return_value=_MockLLM()):
+            await self.store.remember("test_user", "我是博士生", "好的", intent="chat")
+
+        mem = UserMemoryData.load(self.root / "test_user")
+        self.assertEqual(len(mem.pending_facts), 1)
+        self.assertEqual(mem.pending_facts[0].category, "identity")
+        self.assertIn("last_seen", mem.meta)
+
+    async def test_remember_appends_timeline(self) -> None:
+        from unittest.mock import patch
+        from langchain_core.messages import AIMessage
+
+        class _MockLLM:
+            async def ainvoke(self, prompt):
+                return AIMessage(content='[]')
+
+        with patch("storage.user_store_v2.get_llm", return_value=_MockLLM()):
+            await self.store.remember("test_user", "hello", "hi", intent="chat")
+
+        hot_dir = self.root / "test_user" / "timeline" / "hot"
+        self.assertTrue(hot_dir.exists())
+        day_files = list(hot_dir.glob("*.md"))
+        self.assertEqual(len(day_files), 1)
+
+    async def test_remember_extracts_project(self) -> None:
+        from unittest.mock import patch
+        from langchain_core.messages import AIMessage
+
+        class _MockLLM:
+            async def ainvoke(self, prompt):
+                return AIMessage(content='[{"category": "project", "content": "GNSS NLOS 检测论文"}]')
+
+        with patch("storage.user_store_v2.get_llm", return_value=_MockLLM()):
+            await self.store.remember("test_user", "我在做GNSS论文", "好的", intent="research")
+
+        mem = UserMemoryData.load(self.root / "test_user")
+        self.assertEqual(len(mem.projects), 1)
+        self.assertEqual(mem.projects[0].name, "GNSS NLOS 检测论文")
+
+
 if __name__ == "__main__":
     unittest.main()
