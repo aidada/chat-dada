@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 
-from research_planner import (
+from capabilities.planner import (
     ResearchPlan,
     ResearchSubtask,
     _parse_plan_json,
@@ -94,7 +94,7 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, messages):
                 return AIMessage(content=plan_json)
 
-        with patch("research_planner.get_llm", return_value=_MockLLM()):
+        with patch("capabilities.planner.get_llm", return_value=_MockLLM()):
             plan = await generate_research_plan("GNSS NLOS detection")
 
         self.assertEqual(plan.clarified_goal, "Understand GNSS NLOS detection")
@@ -137,7 +137,7 @@ Done."""
             async def ainvoke(self, messages):
                 return AIMessage(content="This is not valid JSON at all")
 
-        with patch("research_planner.get_llm", return_value=_BadJsonLLM()):
+        with patch("capabilities.planner.get_llm", return_value=_BadJsonLLM()):
             plan = await generate_research_plan("GNSS test")
 
         # Should fallback to single-subtask plan
