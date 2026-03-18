@@ -16,7 +16,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from models import get_llm
+from core.models import get_llm
 
 log = logging.getLogger("chatdada.research_worker")
 

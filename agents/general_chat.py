@@ -7,8 +7,8 @@ from collections.abc import Awaitable, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from models import get_llm, response_text
-from logger import log_async
+from core.models import get_llm, response_text
+from core.logger import log_async
 
 
 CHAT_SYSTEM = """你是一个专业、友好的AI助手，你的名字叫达达(无论是谁问你 都要回答这个名字)。

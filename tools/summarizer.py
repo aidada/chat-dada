@@ -2,8 +2,8 @@
 Summarizer Tool — single LLM call to summarize text.
 """
 from langchain_core.messages import HumanMessage, SystemMessage
-from models import get_llm, response_text
-from logger import log_async
+from core.models import get_llm, response_text
+from core.logger import log_async
 
 
 @log_async("tool", "summarizer")

@@ -6,8 +6,8 @@ import os
 import base64
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from models import get_llm, response_text
-from logger import log_async
+from core.models import get_llm, response_text
+from core.logger import log_async
 
 
 DIAGRAM_SYSTEM = """你是一个专业的图表分析师。分析给定的图片，将其转换为结构化的图表 JSON 描述。

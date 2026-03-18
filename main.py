@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from logger import is_verbose, set_log_level, set_verbose, setup_logging
+from core.logger import is_verbose, set_log_level, set_verbose, setup_logging
 from task_runtime import HEARTBEAT_INTERVAL_SECONDS, TaskService, format_sse, task_is_terminal
 
 load_dotenv()

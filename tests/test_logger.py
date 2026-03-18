@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from logger import _LoggingLLM, monitor, new_trace_id
+from core.logger import _LoggingLLM, monitor, new_trace_id
 
 
 class _FakeLLM:

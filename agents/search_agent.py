@@ -11,9 +11,9 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from content_utils import extract_text_content, normalize_markdown_report
-from models import get_browser_use_llm, get_llm
-from logger import log_async
+from core.content_utils import extract_text_content, normalize_markdown_report
+from core.models import get_browser_use_llm, get_llm
+from core.logger import log_async
 
 try:
     from langchain_community.tools.tavily_search import TavilySearchResults
@@ -100,7 +100,7 @@ def search_should_continue(state: SearchState) -> Literal["tools", "finish"]:
 
 # ── Graph ──
 def build_search_graph():
-    from registry import get_tools_for_agent
+    from core.registry import get_tools_for_agent
     core_names = {t.name for t in CORE_TOOLS}
     dynamic = get_tools_for_agent("search", exclude_names=core_names)
     all_tools = CORE_TOOLS + dynamic

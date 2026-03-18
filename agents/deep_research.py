@@ -16,10 +16,10 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from content_utils import extract_result_text, extract_text_content, normalize_markdown_report
+from core.content_utils import extract_result_text, extract_text_content, normalize_markdown_report
 from context_manager import ResearchContext
-from logger import log_async
-from models import get_browser_use_llm, get_llm, response_text
+from core.logger import log_async
+from core.models import get_browser_use_llm, get_llm, response_text
 from progress_tracker import ProgressTracker, extract_gaps_from_summary, extract_progress_from_tool_results
 from research_memory import ResearchMemory
 from research_planner import ResearchPlan, generate_research_plan, get_next_subtask, is_plan_complete
@@ -422,7 +422,7 @@ async def _synthesize_parallel_findings(
 def build_research_graph(config: ResearchConfig | None = None):
     if config is None:
         config = ResearchConfig()
-    from registry import get_tools_for_agent
+    from core.registry import get_tools_for_agent
     core_names = {t.name for t in CORE_TOOLS}
     dynamic = get_tools_for_agent("deep_research", exclude_names=core_names)
     all_tools = CORE_TOOLS + dynamic
@@ -555,7 +555,7 @@ def build_research_graph(config: ResearchConfig | None = None):
 
 def build_hierarchical_research_graph():
     """Build a graph with plan generation → subtask routing → research loop → synthesis."""
-    from registry import get_tools_for_agent
+    from core.registry import get_tools_for_agent
     core_names = {t.name for t in CORE_TOOLS}
     dynamic = get_tools_for_agent("deep_research", exclude_names=core_names)
     all_tools = CORE_TOOLS + dynamic
@@ -729,7 +729,7 @@ def build_hierarchical_research_graph():
 
 def build_parallel_research_graph():
     """Build a graph with plan generation → parallel workers → synthesis."""
-    from registry import get_tools_for_agent
+    from core.registry import get_tools_for_agent
     core_names = {t.name for t in CORE_TOOLS}
     dynamic = get_tools_for_agent("deep_research", exclude_names=core_names)
     all_tools = CORE_TOOLS + dynamic

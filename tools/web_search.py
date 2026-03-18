@@ -5,7 +5,7 @@ Extracted from search_agent for standalone use.
 
 import os
 
-from logger import log_async
+from core.logger import log_async
 
 try:
     from langchain_community.tools.tavily_search import TavilySearchResults
