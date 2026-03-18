@@ -88,9 +88,8 @@ class ResearchState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     query: str
     step_count: int
-    findings: str               # kept for backward compatibility
     report_profile: str
-    research_context: dict      # serialized ResearchContext
+    research_context: dict      # serialized ResearchContext — 唯一数据源
     task_id: str                # research memory task ID
     progress: dict              # serialized ProgressTracker
     research_plan: dict         # serialized ResearchPlan (P1-1)
@@ -277,14 +276,9 @@ async def research_planner(state: ResearchState) -> dict:
     await ctx.trigger_compression(step)
     prompt_context = ctx.build_prompt_context()
 
-    # --- backward-compatible findings ---
-    findings = _merge_findings(
-        state.get("findings", ""),
-        _summarize_tool_messages(tool_msgs),
-    )
     messages = _build_research_messages(
         state["query"],
-        prompt_context or findings,
+        prompt_context,
         state.get("report_profile", DEFAULT_REPORT_PROFILE),
         attention_block=attention_block,
     )
@@ -292,7 +286,6 @@ async def research_planner(state: ResearchState) -> dict:
     return {
         "messages": [response],
         "step_count": step + 1,
-        "findings": findings,
         "research_context": ctx.to_dict(),
         "progress": tracker.to_dict(),
     }
@@ -303,19 +296,22 @@ async def research_tools(state: ResearchState) -> dict:
 
 
 def research_finish(state: ResearchState) -> dict:
-    fallback = normalize_markdown_report(extract_text_content(state.get("findings", "")))
+    # Try to find a textual AIMessage (LLM's final answer)
     for msg in reversed(state["messages"]):
         if not isinstance(msg, AIMessage):
             continue
         text = normalize_markdown_report(extract_text_content(msg))
         if text:
-            return {"findings": text}
+            return {"research_context": state.get("research_context", {}), "_final_text": text}
 
+    # Fallback: build from ResearchContext
+    ctx = ResearchContext.from_dict(state.get("research_context", {}))
+    fallback = ctx.build_final_context()
     if fallback:
-        log.warning("deep_research finish found no textual AIMessage content; falling back to accumulated findings")
+        log.warning("research_finish: no textual AIMessage, using ResearchContext fallback")
     else:
-        log.warning("deep_research finish found no textual AIMessage content or accumulated findings")
-    return {"findings": fallback}
+        log.warning("research_finish: no content found")
+    return {"research_context": state.get("research_context", {}), "_final_text": normalize_markdown_report(fallback)}
 
 
 def research_should_continue(state: ResearchState) -> Literal["tools", "finish"]:
@@ -472,7 +468,6 @@ def build_research_graph(config: ResearchConfig | None = None):
                     memory.save_checkpoint(step, {
                         "research_context": ctx.to_dict(),
                         "step_count": step,
-                        "findings": state.get("findings", ""),
                         "progress": tracker.to_dict(),
                     })
             except Exception:
@@ -500,14 +495,9 @@ def build_research_graph(config: ResearchConfig | None = None):
         else:
             set_research_context(None, step)
 
-        # --- backward-compatible findings ---
-        findings = _merge_findings(
-            state.get("findings", ""),
-            _summarize_tool_messages(tool_msgs),
-        )
         messages = _build_research_messages(
             state["query"],
-            prompt_context or findings,
+            prompt_context,
             state.get("report_profile", DEFAULT_REPORT_PROFILE),
             attention_block=attention_block,
         )
@@ -537,7 +527,6 @@ def build_research_graph(config: ResearchConfig | None = None):
         return {
             "messages": [response],
             "step_count": step + 1,
-            "findings": findings,
             "research_context": ctx.to_dict(),
             "progress": tracker.to_dict(),
         }
@@ -641,7 +630,8 @@ def build_hierarchical_research_graph():
         for st in plan.subtasks:
             if st.id == subtask_id:
                 st.status = "completed"
-                st.findings_summary = state.get("findings", "")[-2000:]
+                ctx = ResearchContext.from_dict(state.get("research_context", {}))
+                st.findings_summary = ctx.build_final_context()[:2000]
                 break
 
         tracker = ProgressTracker.from_dict(state.get("progress", {})) if state.get("progress") else ProgressTracker(original_query=state["query"])
@@ -692,13 +682,9 @@ def build_hierarchical_research_graph():
         await ctx.trigger_compression(step)
         prompt_context = ctx.build_prompt_context()
 
-        findings = _merge_findings(
-            state.get("findings", ""),
-            _summarize_tool_messages(tool_msgs),
-        )
         messages = _build_research_messages(
             state["query"],
-            prompt_context or findings,
+            prompt_context,
             state.get("report_profile", DEFAULT_REPORT_PROFILE),
             attention_block=attention_block,
         )
@@ -706,7 +692,6 @@ def build_hierarchical_research_graph():
         return {
             "messages": [response],
             "step_count": step + 1,
-            "findings": findings,
             "research_context": ctx.to_dict(),
             "progress": tracker.to_dict(),
         }
@@ -780,6 +765,7 @@ def build_parallel_research_graph():
     async def parallel_research_node(state: ResearchState) -> dict:
         """Run all subtasks in parallel waves."""
         from agents.research_worker import coordinate_research
+        from context_manager import FindingEntry
 
         plan = ResearchPlan.from_dict(state.get("research_plan", {}))
         task_id = state.get("task_id", "")
@@ -787,19 +773,27 @@ def build_parallel_research_graph():
 
         results = await coordinate_research(plan, all_tools, memory)
 
-        # Synthesize findings using LLM with fallback to concatenation
+        # Build ResearchContext from parallel results
+        ctx = ResearchContext.from_dict(state.get("research_context", {})) if state.get("research_context") else ResearchContext()
+        for sid, worker_findings in results.items():
+            if worker_findings:
+                ctx.add_entry(FindingEntry(
+                    step=0, tool_name=f"worker_{sid}", query=sid,
+                    raw_content=worker_findings,
+                ))
+
+        # Try LLM synthesis for the summary
         try:
-            merged_findings = await _synthesize_parallel_findings(
+            synthesis = await _synthesize_parallel_findings(
                 state["query"], results,
                 state.get("report_profile", DEFAULT_REPORT_PROFILE),
             )
+            ctx.update_summary(synthesis)
         except Exception:
-            log.warning("parallel synthesis failed, falling back to concatenation", exc_info=True)
-            all_findings = [f"### {sid}\n{f}" for sid, f in results.items() if f]
-            merged_findings = "\n\n".join(all_findings) if all_findings else state.get("findings", "")
+            log.warning("parallel synthesis failed", exc_info=True)
 
         return {
-            "findings": merged_findings,
+            "research_context": ctx.to_dict(),
             "research_plan": plan.to_dict(),
         }
 
@@ -886,7 +880,6 @@ async def run(input_data) -> dict:
                     report_profile = (meta or {}).get("report_profile", report_profile)
                 resumed_state = {
                     "step_count": checkpoint.get("step_count", 0),
-                    "findings": checkpoint.get("findings", ""),
                     "research_context": checkpoint.get("research_context", {}),
                     "progress": checkpoint.get("progress", {}),
                 }
@@ -920,7 +913,6 @@ async def run(input_data) -> dict:
         "messages": [HumanMessage(content=task_prompt)],
         "query": query,
         "step_count": resumed_state["step_count"] if resumed_state else 0,
-        "findings": resumed_state["findings"] if resumed_state else "",
         "report_profile": report_profile,
         "research_context": resumed_state["research_context"] if resumed_state else {},
         "task_id": task_id,
@@ -929,22 +921,27 @@ async def run(input_data) -> dict:
         "current_subtask": {},
     }
     result = await graph.ainvoke(state)
-    findings = extract_result_text(result.get("findings", ""))
-    if findings:
-        findings = await _rewrite_final_report(query, findings, report_profile)
+    # Extract final text from result
+    final_text = result.get("_final_text", "")
+    if not final_text:
+        ctx = ResearchContext.from_dict(result.get("research_context", {}))
+        final_text = ctx.build_final_context()
+    final_text = extract_result_text(final_text)
+    if final_text:
+        final_text = await _rewrite_final_report(query, final_text, report_profile)
 
     # --- persist final report ---
     if task_id:
         try:
-            ResearchMemory(task_id).save_final_report(findings)
+            ResearchMemory(task_id).save_final_report(final_text)
         except Exception:
             log.warning("research_memory save_final_report failed", exc_info=True)
 
-    return {"status": "ok", "result": findings}
+    return {"status": "ok", "result": final_text}
 
 
-def _build_research_messages(query: str, findings: str, report_profile: str = DEFAULT_REPORT_PROFILE, attention_block: str = "") -> list[BaseMessage]:
-    notes = findings or "(暂无研究笔记)"
+def _build_research_messages(query: str, context: str, report_profile: str = DEFAULT_REPORT_PROFILE, attention_block: str = "") -> list[BaseMessage]:
+    notes = context or "(暂无研究笔记)"
     profile = _get_report_profile(report_profile)
     section_requirements = "\n".join(f"   `{section}`" for section in profile.final_sections)
     prompt = (
@@ -1016,30 +1013,6 @@ def _build_research_system(report_profile: str) -> str:
 def _build_final_report_system(report_profile: str) -> str:
     profile = _get_report_profile(report_profile)
     return f"{BASE_FINAL_REPORT_SYSTEM}\n\n附加模板要求（{profile.name}）：\n{profile.final_addendum}"
-
-
-def _summarize_tool_messages(messages: list[ToolMessage]) -> str:
-    if not messages:
-        return ""
-
-    sections: list[str] = []
-    for message in messages:
-        tool_name = str(getattr(message, "name", "") or "tool")
-        text = _truncate_text(_message_text(message), 700)
-        if not text:
-            continue
-        sections.append(f"### {tool_name}\n{text}")
-    return "\n\n".join(sections[:2])
-
-
-def _merge_findings(existing: str, incoming: str, max_chars: int = 6000) -> str:
-    parts = [part.strip() for part in (existing, incoming) if part and part.strip()]
-    if not parts:
-        return ""
-    merged = "\n\n".join(parts)
-    if len(merged) <= max_chars:
-        return merged
-    return merged[-max_chars:]
 
 
 def _message_text(message: BaseMessage) -> str:
