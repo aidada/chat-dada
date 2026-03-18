@@ -12,6 +12,7 @@ dependencies = [
     "langchain-core>=0.2.0",
     "langgraph>=0.2.0",
     "langchain-openai>=0.1.0",
+    "langchain_google_genai>=4.0.0",
     "playwright>=1.44.0",
     "python-dotenv>=1.0.0",
     "tavily-python>=0.3.0",
