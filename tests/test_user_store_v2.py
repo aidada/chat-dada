@@ -168,5 +168,81 @@ class RememberTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mem.projects[0].name, "GNSS NLOS 检测论文")
 
 
+class MergeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.store = MemoryStoreV2(root=self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    async def test_merge_triggered_when_pending_exceeds_threshold(self) -> None:
+        from unittest.mock import patch
+        from langchain_core.messages import AIMessage
+
+        user_dir = self.root / "test_user"
+        mem = UserMemoryData()
+        # Add 9 pending facts (over threshold of 8)
+        for i in range(9):
+            mem.pending_facts.append(UserFact(id=f"f{i}", category="identity", content=f"fact {i}"))
+        mem.meta["last_seen"] = datetime.now(timezone.utc).isoformat()
+        mem.save(user_dir)
+
+        # LLM should be called to merge
+        class _MergeLLM:
+            async def ainvoke(self, prompt):
+                return AIMessage(content='[{"id": "merged_1", "category": "identity", "content": "merged fact", "confidence": 0.8}]')
+
+        with patch("storage.user_store_v2.get_llm", return_value=_MergeLLM()):
+            recall = await self.store.recall_with_merge("test_user", "test")
+
+        # After merge, pending should be cleared
+        mem_after = UserMemoryData.load(user_dir)
+        self.assertEqual(len(mem_after.pending_facts), 0)
+        self.assertTrue(len(mem_after.facts) > 0)
+
+
+class TimelineArchiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.store = MemoryStoreV2(root=self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_archive_old_timeline_to_warm(self) -> None:
+        user_dir = self.root / "test_user"
+        hot_dir = user_dir / "timeline" / "hot"
+        hot_dir.mkdir(parents=True)
+
+        # Create an 8-day old file
+        old_date = datetime.now(timezone.utc) - timedelta(days=8)
+        old_file = hot_dir / f"{old_date.strftime('%Y-%m-%d')}.md"
+        old_file.write_text(
+            f"# Timeline {old_date.strftime('%Y-%m-%d')}\n\n"
+            f"## {old_date.isoformat()}\n- intent: research\n\n### User\nGNSS研究\n\n### Assistant\n结果\n\n"
+            f"## {old_date.isoformat()}\n- intent: chat\n\n### User\n你好\n\n### Assistant\n你好\n\n",
+            encoding="utf-8",
+        )
+
+        # Create a recent file (should not be archived)
+        today = datetime.now(timezone.utc)
+        today_file = hot_dir / f"{today.strftime('%Y-%m-%d')}.md"
+        today_file.write_text("# Today\n\n## entry\nrecent\n", encoding="utf-8")
+
+        self.store._archive_old_timeline(user_dir)
+
+        # Old file should be removed
+        self.assertFalse(old_file.exists())
+        # Today file should remain
+        self.assertTrue(today_file.exists())
+        # Warm file should exist
+        warm_dir = user_dir / "timeline" / "warm"
+        warm_files = list(warm_dir.glob("*.md"))
+        self.assertTrue(len(warm_files) > 0)
+
+
 if __name__ == "__main__":
     unittest.main()

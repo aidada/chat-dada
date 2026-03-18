@@ -14,6 +14,8 @@ from storage.user_models import UserFact, Project, UserMemoryData
 OFFLINE_THRESHOLD_DAYS = 14
 CONFIDENCE_DECAY = 0.7
 MAX_RECALL_FACTS = 10
+PENDING_MERGE_THRESHOLD = 8
+HOT_RETENTION_DAYS = 7
 
 
 @dataclass
@@ -223,3 +225,104 @@ class MemoryStoreV2:
             if header:
                 f.write(header)
             f.write(entry)
+
+    async def recall_with_merge(self, user_id: str, query: str) -> MemoryRecallV2:
+        """Recall with lazy merge of pending facts when threshold exceeded."""
+        user = self._sanitize(user_id)
+        user_dir = self.root / user
+        if not user_dir.exists():
+            return MemoryRecallV2(user_id=user)
+
+        mem = UserMemoryData.load(user_dir)
+
+        # Lazy merge if pending exceeds threshold
+        if len(mem.pending_facts) > PENDING_MERGE_THRESHOLD:
+            await self._merge_pending_facts(mem)
+            mem.save(user_dir)
+
+        # Archive old timeline
+        self._archive_old_timeline(user_dir)
+
+        # Delegate to regular recall
+        return self.recall(user_id, query)
+
+    async def _merge_pending_facts(self, mem: UserMemoryData) -> None:
+        """Use LLM to semantically merge pending facts into confirmed facts."""
+        existing_desc = "\n".join(f"- [{f.id}] {f.category}: {f.content}" for f in mem.facts if f.is_active())
+        pending_desc = "\n".join(f"- {f.category}: {f.content}" for f in mem.pending_facts)
+
+        llm = get_llm("orchestrator", temperature=0)
+        prompt = f"""请合并用户记忆。规则：
+1. 语义相同的条目合并为一条，保留信息量最大的表述
+2. 同主题的更新版本替代旧版本
+3. 全新信息保留
+4. 返回合并后的完整 fact 列表（JSON 数组）
+
+已确认的记忆：
+{existing_desc or '(空)'}
+
+待合并的新记忆：
+{pending_desc}
+
+返回格式：[{{"id": "保留原id或新id", "category": "...", "content": "...", "confidence": 0.0-1.0}}]"""
+
+        try:
+            response = await llm.ainvoke(prompt)
+            content = response_text(response).strip()
+            if "```json" in content:
+                content = content.split("```json", 1)[1].split("```", 1)[0]
+            elif "```" in content:
+                content = content.split("```", 1)[1].split("```", 1)[0]
+            merged = json.loads(content.strip())
+            if isinstance(merged, list):
+                mem.facts = [UserFact.from_dict(d) for d in merged if isinstance(d, dict)]
+                mem.pending_facts = []
+        except Exception:
+            # Fallback: just move pending to confirmed without LLM merge
+            mem.facts.extend(mem.pending_facts)
+            mem.pending_facts = []
+
+    def _archive_old_timeline(self, user_dir: Path) -> None:
+        """Move hot timeline files older than HOT_RETENTION_DAYS to warm summaries."""
+        hot_dir = user_dir / "timeline" / "hot"
+        if not hot_dir.exists():
+            return
+
+        today = datetime.now(timezone.utc).date()
+        for day_file in list(hot_dir.glob("*.md")):
+            try:
+                file_date = datetime.strptime(day_file.stem, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            age = (today - file_date).days
+            if age <= HOT_RETENTION_DAYS:
+                continue
+
+            summary = self._summarize_day_file(day_file)
+            if summary:
+                self._append_warm_timeline(user_dir, day_file.stem, summary)
+            day_file.unlink()
+
+    def _summarize_day_file(self, path: Path) -> str:
+        """Rule-based day summary: count interactions, list intents."""
+        text = path.read_text(encoding="utf-8")
+        blocks = re.split(r"(?m)^## ", text)[1:]
+        intents: list[str] = []
+        for block in blocks:
+            intent_match = re.search(r"intent:\s*(\S+)", block)
+            if intent_match:
+                intents.append(intent_match.group(1))
+        if not intents:
+            return ""
+        unique_intents = ", ".join(sorted(set(intents)))
+        return f"{path.stem}: {unique_intents} ({len(blocks)}次交互)"
+
+    def _append_warm_timeline(self, user_dir: Path, date_str: str, summary: str) -> None:
+        warm_dir = user_dir / "timeline" / "warm"
+        warm_dir.mkdir(parents=True, exist_ok=True)
+        month = date_str[:7]  # YYYY-MM
+        warm_file = warm_dir / f"{month}.md"
+        if not warm_file.exists():
+            warm_file.write_text(f"# Warm Timeline {month}\n\n", encoding="utf-8")
+        with warm_file.open("a", encoding="utf-8") as f:
+            f.write(f"- {summary}\n")
