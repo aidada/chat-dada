@@ -480,7 +480,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
 
     def test_hierarchical_graph_compiles(self) -> None:
         """Verify the hierarchical graph compiles without errors."""
-        with patch("registry.get_tools_for_agent", return_value=[]):
+        with patch("core.registry.get_tools_for_agent", return_value=[]):
             graph = deep_research.build_hierarchical_research_graph()
         self.assertIsNotNone(graph)
 
@@ -511,7 +511,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
 
     def test_parallel_graph_compiles(self) -> None:
         """Verify the parallel graph compiles without errors."""
-        with patch("registry.get_tools_for_agent", return_value=[]):
+        with patch("core.registry.get_tools_for_agent", return_value=[]):
             graph = deep_research.build_parallel_research_graph()
         self.assertIsNotNone(graph)
 
