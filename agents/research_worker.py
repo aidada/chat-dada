@@ -181,7 +181,7 @@ async def coordinate_research(plan, tools: list, memory=None) -> dict[str, str]:
 
     Returns {subtask_id: findings_text}.
     """
-    from research_planner import get_next_subtask
+    from capabilities.planner import get_next_subtask
 
     results: dict[str, str] = {}
     semaphore = asyncio.Semaphore(MAX_PARALLEL_WORKERS)

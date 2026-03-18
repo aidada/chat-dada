@@ -121,13 +121,13 @@ Done."""
             await generate_research_plan("")
 
     def test_plan_to_dict_includes_version(self) -> None:
-        from research_planner import PLAN_VERSION
+        from capabilities.planner import PLAN_VERSION
         plan = ResearchPlan(original_query="test")
         data = plan.to_dict()
         self.assertEqual(data["_version"], PLAN_VERSION)
 
     def test_subtask_to_dict_includes_version(self) -> None:
-        from research_planner import SUBTASK_VERSION
+        from capabilities.planner import SUBTASK_VERSION
         st = ResearchSubtask(id="sub_1", topic="test")
         data = st.to_dict()
         self.assertEqual(data["_version"], SUBTASK_VERSION)

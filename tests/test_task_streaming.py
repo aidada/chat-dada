@@ -9,9 +9,9 @@ import unittest
 from fastapi.testclient import TestClient
 
 import main
-from task_dispatcher import RouteDecision, route_task_request
-from task_interaction import ask_user
-from task_runtime import TaskService
+from runtime.task_dispatcher import RouteDecision, route_task_request
+from runtime.task_interaction import ask_user
+from runtime.task_runtime import TaskService
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql://chatdada:chatdada@localhost:5432/chatdada"

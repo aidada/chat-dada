@@ -17,13 +17,13 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from core.content_utils import extract_result_text, extract_text_content, normalize_markdown_report
-from context_manager import ResearchContext
+from capabilities.context_manager import ResearchContext
 from core.logger import log_async
 from core.models import get_browser_use_llm, get_llm, response_text
-from progress_tracker import ProgressTracker, extract_gaps_from_summary, extract_progress_from_tool_results
-from research_memory import ResearchMemory
-from research_planner import ResearchPlan, generate_research_plan, get_next_subtask, is_plan_complete
-from task_interaction import ask_user
+from capabilities.progress_tracker import ProgressTracker, extract_gaps_from_summary, extract_progress_from_tool_results
+from capabilities.memory import ResearchMemory
+from capabilities.planner import ResearchPlan, generate_research_plan, get_next_subtask, is_plan_complete
+from runtime.task_interaction import ask_user
 from tools.research_notes import save_research_note, recall_research_notes, set_research_context
 
 log = logging.getLogger("chatdada.agent")
@@ -577,7 +577,7 @@ def build_hierarchical_research_graph():
             plan = ResearchPlan(
                 original_query=state["query"],
                 clarified_goal=state["query"],
-                subtasks=[__import__("research_planner").ResearchSubtask(
+                subtasks=[__import__("capabilities.planner", fromlist=["ResearchSubtask"]).ResearchSubtask(
                     id="sub_1", topic=state["query"], search_angles=[state["query"]],
                     priority=1, max_rounds=5, completion_criteria="信息足够回答原始问题",
                 )],
@@ -748,7 +748,7 @@ def build_parallel_research_graph():
                 tracker.update_subtask(st.id, st.status)
         except Exception:
             log.warning("plan generation failed, creating single-task plan", exc_info=True)
-            from research_planner import ResearchSubtask as _RS
+            from capabilities.planner import ResearchSubtask as _RS
             plan = ResearchPlan(
                 original_query=state["query"],
                 clarified_goal=state["query"],
@@ -765,7 +765,7 @@ def build_parallel_research_graph():
     async def parallel_research_node(state: ResearchState) -> dict:
         """Run all subtasks in parallel waves."""
         from agents.research_worker import coordinate_research
-        from context_manager import FindingEntry
+        from capabilities.context_manager import FindingEntry
 
         plan = ResearchPlan.from_dict(state.get("research_plan", {}))
         task_id = state.get("task_id", "")

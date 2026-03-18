@@ -168,7 +168,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["_final_text"], "## 直接结论\n\n前一轮已经给出结论。")
 
     async def test_research_finish_falls_back_to_research_context(self) -> None:
-        from context_manager import FindingEntry, ResearchContext
+        from capabilities.context_manager import FindingEntry, ResearchContext
         ctx = ResearchContext()
         ctx.add_entry(FindingEntry(step=1, tool_name="web_search", query="q",
                                    raw_content="已有检索笔记。"))
@@ -454,8 +454,8 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, messages):
                 return AIMessage(content="Summary of research progress")
 
-        from context_manager import ResearchContext
-        from progress_tracker import ProgressTracker
+        from capabilities.context_manager import ResearchContext
+        from capabilities.progress_tracker import ProgressTracker
         ctx = ResearchContext()
         tracker = ProgressTracker(original_query="test")
         tracker.record_search("q1", success=True)

@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from core.logger import is_verbose, set_log_level, set_verbose, setup_logging
-from task_runtime import HEARTBEAT_INTERVAL_SECONDS, TaskService, format_sse, task_is_terminal
+from runtime.task_runtime import HEARTBEAT_INTERVAL_SECONDS, TaskService, format_sse, task_is_terminal
 
 load_dotenv()
 

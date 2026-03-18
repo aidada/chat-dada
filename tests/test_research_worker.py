@@ -10,7 +10,7 @@ from agents.research_worker import (
     run_worker,
     coordinate_research,
 )
-from research_planner import ResearchPlan, ResearchSubtask
+from capabilities.planner import ResearchPlan, ResearchSubtask
 
 
 class _FakeBoundLLM:
