@@ -79,7 +79,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             patch.object(browser_use, "Agent", _FakeBrowserAgent),
             patch.object(browser_use, "BrowserSession", _FakeBrowserSession),
             patch.object(browser_use, "BrowserProfile", _FakeBrowserProfile),
-            patch("agents.deep_research.get_browser_use_llm", return_value="mock-llm") as mocked_get_llm,
+            patch("agents.deep_research.run.get_browser_use_llm", return_value="mock-llm") as mocked_get_llm,
         ):
             result = await deep_research.browser_navigate.ainvoke(
                 {"task_description": "Open example.com"}
@@ -91,7 +91,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_research_planner_uses_deep_research_role(self) -> None:
         state = {"messages": [], "query": "GNSS", "step_count": 0}
 
-        with patch("agents.deep_research.get_llm", return_value=_FakeLLM()) as mocked_get_llm:
+        with patch("agents.deep_research.graphs.get_llm", return_value=_FakeLLM()) as mocked_get_llm:
             result = await deep_research.research_planner(state)
 
         mocked_get_llm.assert_called_once_with("deep_research")
@@ -122,7 +122,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             "step_count": 1,
         }
 
-        with patch("agents.deep_research.get_llm", return_value=_InspectLLM()):
+        with patch("agents.deep_research.graphs.get_llm", return_value=_InspectLLM()):
             result = await deep_research.research_planner(state)
 
         prompt_messages = captured["messages"]
@@ -200,8 +200,8 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         with (
-            patch("agents.deep_research.build_research_graph", return_value=_FakeGraph()),
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.graphs.build_research_graph", return_value=_FakeGraph()),
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
         ):
             result = await deep_research.run("GNSS NLOS")
 
@@ -221,8 +221,8 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
                 return AIMessage(content="## 文献综述正文\n\n聚焦论文写作建议。")
 
         with (
-            patch("agents.deep_research.build_research_graph", return_value=_FakeGraph()),
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.graphs.build_research_graph", return_value=_FakeGraph()),
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
         ):
             result = await deep_research.run(
                 {
@@ -248,7 +248,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
                 captured["messages"] = messages
                 return AIMessage(content="## 文献综述正文\n\nAcademic draft.")
 
-        with patch("agents.deep_research.get_llm", return_value=_InspectRewriteLLM()):
+        with patch("agents.deep_research.utils.get_llm", return_value=_InspectRewriteLLM()):
             result = await deep_research._rewrite_final_report(
                 "请帮我做后续论文写作指导",
                 "raw notes",
@@ -284,7 +284,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             "task_id": "",
         }
 
-        with patch("agents.deep_research.get_llm", return_value=_InspectLLM()):
+        with patch("agents.deep_research.graphs.get_llm", return_value=_InspectLLM()):
             result = await deep_research.research_planner(state)
 
         self.assertIn("research_context", result)
@@ -304,9 +304,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
                 return AIMessage(content="## 直接结论\n\nRewritten.")
 
         with (
-            patch("agents.deep_research.build_research_graph", return_value=_FakeGraph()),
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.ResearchMemory") as MockMemory,
+            patch("agents.deep_research.graphs.build_research_graph", return_value=_FakeGraph()),
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
         ):
             mock_instance = MagicMock()
             MockMemory.return_value = mock_instance
@@ -332,9 +332,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.ResearchMemory") as MockMemory,
+            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
         ):
             MockMemory.return_value = MagicMock()
             result = await deep_research.run("simple question")
@@ -371,7 +371,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             "progress": {},
         }
 
-        with patch("agents.deep_research.get_llm", return_value=_InspectLLM()):
+        with patch("agents.deep_research.graphs.get_llm", return_value=_InspectLLM()):
             result = await deep_research.research_planner(state)
 
         self.assertIn("progress", result)
@@ -401,9 +401,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.ResearchMemory") as MockMemory,
+            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
         ):
             mock_instance = MagicMock()
             mock_instance.load_checkpoint.return_value = {
@@ -433,9 +433,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.ResearchMemory") as MockMemory,
+            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
         ):
             mock_instance = MagicMock()
             mock_instance.load_checkpoint.return_value = None
@@ -460,7 +460,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         tracker = ProgressTracker(original_query="test")
         tracker.record_search("q1", success=True)
 
-        with patch("agents.deep_research.get_llm", return_value=_SummaryLLM()):
+        with patch("agents.deep_research.utils.get_llm", return_value=_SummaryLLM()):
             summary = await deep_research._generate_structured_summary("test query", ctx, tracker)
         self.assertIn("Summary", summary)
 
@@ -498,9 +498,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.build_hierarchical_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.ResearchMemory") as MockMemory,
+            patch("agents.deep_research.graphs.build_hierarchical_research_graph", return_value=fake_graph),
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
         ):
             MockMemory.return_value = MagicMock()
             result = await deep_research.run({"query": "test", "hierarchical": True})
@@ -529,9 +529,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.build_parallel_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.ResearchMemory") as MockMemory,
+            patch("agents.deep_research.graphs.build_parallel_research_graph", return_value=fake_graph),
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
         ):
             MockMemory.return_value = MagicMock()
             result = await deep_research.run({"query": "test", "parallel": True})
@@ -564,9 +564,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         long_query = "A" * 15000
 
         with (
-            patch("agents.deep_research.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.ResearchMemory") as MockMemory,
+            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
         ):
             MockMemory.return_value = MagicMock()
             result = await deep_research.run(long_query)
@@ -579,7 +579,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, messages):
                 return AIMessage(content="合并后的发现报告")
 
-        with patch("agents.deep_research.get_llm", return_value=_SynthLLM()):
+        with patch("agents.deep_research.utils.get_llm", return_value=_SynthLLM()):
             result = await deep_research._synthesize_parallel_findings(
                 "test query",
                 {"sub_1": "发现1", "sub_2": "发现2"},
@@ -593,7 +593,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, messages):
                 raise ConnectionError("LLM unavailable")
 
-        with patch("agents.deep_research.get_llm", return_value=_FailLLM()):
+        with patch("agents.deep_research.utils.get_llm", return_value=_FailLLM()):
             with self.assertRaises((ConnectionError, OSError)):
                 await deep_research._synthesize_parallel_findings(
                     "test query", {"sub_1": "f1"}, "default",
@@ -667,9 +667,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.build_research_graph", return_value=fake_graph) as mock_build,
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.ResearchMemory") as MockMemory,
+            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph) as mock_build,
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
         ):
             MockMemory.return_value = MagicMock()
             result = await deep_research.run({"query": "test", "config": {"max_steps": 3}})
@@ -706,9 +706,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.ResearchMemory") as MockMemory,
+            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
+            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
         ):
             mock_instance = MagicMock()
             mock_instance.init.side_effect = OSError("disk full")
