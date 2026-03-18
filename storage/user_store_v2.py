@@ -80,6 +80,9 @@ class MemoryStoreV2:
         if not user_dir.exists():
             return recall
 
+        # Auto-migrate on first access
+        self._migrate_if_needed(user_dir)
+
         mem = UserMemoryData.load(user_dir)
 
         # --- offline return detection ---
@@ -326,3 +329,56 @@ class MemoryStoreV2:
             warm_file.write_text(f"# Warm Timeline {month}\n\n", encoding="utf-8")
         with warm_file.open("a", encoding="utf-8") as f:
             f.write(f"- {summary}\n")
+
+    CATEGORY_MAP = {
+        "Identity": "identity",
+        "Preferences": "preference",
+        "Working Style": "working_style",
+        "Constraints": "constraint",
+        "Open Loops": "constraint",
+    }
+
+    def _migrate_if_needed(self, user_dir: Path) -> None:
+        """Migrate from old profile.md format to new structured format."""
+        profile_path = user_dir / "profile.md"
+        facts_path = user_dir / "facts.json"
+
+        if not profile_path.exists() or facts_path.exists():
+            return  # Already migrated or no old data
+
+        mem = UserMemoryData()
+
+        # Parse old profile.md
+        current_section: str | None = None
+        for line in profile_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                current_section = stripped[3:].strip()
+                continue
+            if current_section and stripped.startswith("- ") and stripped != "-":
+                content = stripped[2:].strip()
+                if not content:
+                    continue
+
+                if current_section == "Projects":
+                    self._upsert_project(mem, content, datetime.now(timezone.utc))
+                elif current_section in self.CATEGORY_MAP:
+                    mem.pending_facts.append(UserFact(
+                        category=self.CATEGORY_MAP[current_section],
+                        content=content,
+                    ))
+
+        # Move old timeline to hot/
+        old_timeline = user_dir / "timeline"
+        if old_timeline.exists():
+            hot_dir = user_dir / "timeline" / "hot"
+            hot_dir.mkdir(parents=True, exist_ok=True)
+            for year_dir in old_timeline.iterdir():
+                if year_dir.is_dir() and year_dir.name not in ("hot", "warm"):
+                    for month_dir in year_dir.iterdir():
+                        if month_dir.is_dir():
+                            for md_file in month_dir.glob("*.md"):
+                                md_file.rename(hot_dir / md_file.name)
+
+        mem.save(user_dir)
+        profile_path.rename(user_dir / "profile.md.bak")

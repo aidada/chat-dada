@@ -244,5 +244,56 @@ class TimelineArchiveTests(unittest.TestCase):
         self.assertTrue(len(warm_files) > 0)
 
 
+class MigrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.store = MemoryStoreV2(root=self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_migrate_from_profile_md(self) -> None:
+        user_dir = self.root / "test_user"
+        user_dir.mkdir()
+        # Write old-format profile.md
+        (user_dir / "profile.md").write_text(
+            "# User Profile Memory\n\n"
+            "## Identity\n- 博士生\n\n"
+            "## Preferences\n- 喜欢简洁输出\n\n"
+            "## Projects\n- GNSS NLOS 检测论文\n- 正在做 GNSS 论文\n\n"
+            "## Working Style\n- 喜欢研究报告形式\n\n"
+            "## Constraints\n- 可用50个接收机数据\n\n"
+            "## Open Loops\n- 需要完成文献综述\n\n",
+            encoding="utf-8",
+        )
+
+        self.store._migrate_if_needed(user_dir)
+
+        mem = UserMemoryData.load(user_dir)
+        # Facts should be created from old sections
+        categories = [f.category for f in mem.pending_facts]
+        self.assertIn("identity", categories)
+        self.assertIn("preference", categories)
+        self.assertIn("working_style", categories)
+        self.assertIn("constraint", categories)
+        # Projects should be created
+        self.assertTrue(len(mem.projects) > 0)
+        # Old profile.md should be renamed to profile.md.bak
+        self.assertTrue((user_dir / "profile.md.bak").exists())
+
+    def test_no_migrate_if_already_migrated(self) -> None:
+        user_dir = self.root / "test_user"
+        user_dir.mkdir()
+        # Write both old profile.md and new facts.json
+        (user_dir / "profile.md").write_text("# old\n## Identity\n- test\n", encoding="utf-8")
+        (user_dir / "facts.json").write_text("[]", encoding="utf-8")
+
+        self.store._migrate_if_needed(user_dir)
+        # profile.md should NOT be renamed (already migrated)
+        self.assertTrue((user_dir / "profile.md").exists())
+        self.assertFalse((user_dir / "profile.md.bak").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

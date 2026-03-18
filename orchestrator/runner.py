@@ -18,7 +18,7 @@ from core.content_utils import extract_result_text
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.logger import log_async
-from storage.user_store import get_memory_store
+from storage.user_store_v2 import MemoryStoreV2
 from core.models import get_llm, response_text
 from orchestrator.planner import classify_and_plan
 
@@ -56,16 +56,16 @@ async def run_orchestrator(
     """
     await on_step("🧠 Orchestrator: 分析任务...")
 
-    memory_store = get_memory_store()
+    memory_store = MemoryStoreV2()
     memory_context = ""
     try:
-        memory_recall = memory_store.recall(user_id, task)
+        memory_recall = await memory_store.recall_with_merge(user_id, task)
         memory_context = memory_recall.to_prompt()
         if memory_recall.has_content():
             await on_step(
                 "🧠 Memory: 已召回 "
-                f"{len(memory_recall.snippets)} 条历史片段，"
-                f"{sum(1 for items in memory_recall.profile_sections.values() if items)} 个画像分组。"
+                f"{len(memory_recall.facts)} 条用户画像，"
+                f"{len(memory_recall.active_projects)} 个活跃项目。"
             )
     except Exception as exc:
         await on_step(f"⚠️ Memory recall failed: {exc}")
