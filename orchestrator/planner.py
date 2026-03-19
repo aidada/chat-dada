@@ -56,7 +56,7 @@ FREEFORM_SYSTEM = """你是一个任务编排器。用户给了一个任务，�
 
 
 @log_async("orchestrator", "classify_and_plan")
-async def classify_and_plan(task: str, memory_context: str = "") -> dict:
+async def classify_and_plan(task: str, memory_context: str = "", conversation_context: str = "") -> dict:
     """
     Classify user intent and return an execution plan.
 
@@ -75,6 +75,7 @@ async def classify_and_plan(task: str, memory_context: str = "") -> dict:
     messages = [
         SystemMessage(content=classify_prompt),
         *([SystemMessage(content=memory_context)] if memory_context else []),
+        *([SystemMessage(content=conversation_context)] if conversation_context else []),
         HumanMessage(content=task),
     ]
     response = await llm.ainvoke(messages)
@@ -116,6 +117,7 @@ async def classify_and_plan(task: str, memory_context: str = "") -> dict:
     messages = [
         SystemMessage(content=freeform_prompt),
         *([SystemMessage(content=memory_context)] if memory_context else []),
+        *([SystemMessage(content=conversation_context)] if conversation_context else []),
         HumanMessage(content=task),
     ]
     response = await llm.ainvoke(messages)

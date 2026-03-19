@@ -371,6 +371,7 @@ class TaskRunStore:
             "started_at": _ts(row["started_at"]),
             "finished_at": _ts(row["finished_at"]),
             "updated_at": _ts(row["updated_at"]),
+            "conversation_id": row["conversation_id"] or "",
             "last_seq": int(last_seq_row["last_seq"]) if last_seq_row else 0,
         }
 
@@ -525,6 +526,60 @@ class TaskRunStore:
             entries.append(entry)
         return entries
 
+    async def get_conversation_summary(self, conversation_id: str) -> tuple[str, int]:
+        """Return (context_summary, summary_through_seq) for a conversation."""
+        row = await self.pool.fetchrow(
+            "SELECT context_summary, summary_through_seq FROM conversations WHERE id = $1",
+            conversation_id,
+        )
+        if row is None:
+            return "", 0
+        return row["context_summary"] or "", row["summary_through_seq"] or 0
+
+    async def update_conversation_summary(
+        self, conversation_id: str, summary: str, through_seq: int
+    ) -> None:
+        """Cache the rolling summary and the seq it covers."""
+        await self.pool.execute(
+            """
+            UPDATE conversations
+            SET context_summary = $1, summary_through_seq = $2, updated_at = now()
+            WHERE id = $3
+            """,
+            summary,
+            through_seq,
+            conversation_id,
+        )
+
+    async def get_conversation_primary_events(
+        self, conversation_id: str, after_seq: int = 0
+    ) -> list[dict[str, Any]]:
+        """Fetch user/result/error events for a conversation, ordered chronologically."""
+        rows = await self.pool.fetch(
+            """
+            SELECT e.task_id, e.seq, e.event_type, e.payload, e.created_at
+            FROM task_events e
+            JOIN task_runs t ON t.task_id = e.task_id
+            WHERE t.conversation_id = $1
+              AND e.event_type IN ('user', 'result', 'error')
+              AND e.seq > $2
+            ORDER BY e.created_at ASC, e.seq ASC
+            """,
+            conversation_id,
+            after_seq,
+        )
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(row["payload"])
+            events.append({
+                "task_id": row["task_id"],
+                "seq": int(row["seq"]),
+                "event_type": row["event_type"],
+                "content": str(payload.get("content", "")),
+                "created_at": row["created_at"].isoformat(),
+            })
+        return events
+
 
 class TaskService:
     def __init__(
@@ -666,6 +721,7 @@ class TaskService:
         mode = snapshot["mode"]
         thinking_level = snapshot["thinking_level"]
         file_paths = snapshot.get("file_paths", [])
+        conversation_id = snapshot.get("conversation_id", "")
         execution_task = compose_task_text(task_text, file_paths)
         trace_id = new_trace_id()
 
@@ -686,6 +742,24 @@ class TaskService:
         )
         log.info("Task received user=%s task=%s", user_id, task_text[:80])
 
+        # Build conversation context
+        conversation_context = ""
+        if conversation_id:
+            try:
+                from runtime.conversation_context import ConversationContextBuilder
+
+                ctx = await ConversationContextBuilder(self._store.pool).build(
+                    conversation_id, task_text
+                )
+                conversation_context = ctx.text
+                if conversation_context:
+                    log.info(
+                        "Conversation context built: strategy=%s rounds=%d len=%d",
+                        ctx.strategy, ctx.round_count, len(conversation_context),
+                    )
+            except Exception as exc:
+                log.warning("Failed to build conversation context: %s", exc)
+
         async def on_step(step_info: str) -> None:
             event_type, payload = parse_step_payload(step_info)
             await self.record_event(task_id, event_type, payload)
@@ -696,7 +770,10 @@ class TaskService:
         interaction_token = set_task_interaction_handler(request_user_input)
         try:
             set_thinking_level(thinking_level)
-            result = await decision.executor(execution_task, on_step, user_id=user_id)
+            result = await decision.executor(
+                execution_task, on_step, user_id=user_id,
+                conversation_context=conversation_context,
+            )
             await self._store.set_result_text(task_id, result)
             await self.record_event(task_id, "result", {"content": result})
         except Exception as exc:
@@ -716,6 +793,20 @@ class TaskService:
         await self.record_event(task_id, "monitoring", {"content": summary})
         await self._store.finish_task(task_id, "succeeded")
         monitor.finalize(trace_id)
+
+        # Fire-and-forget: generate embeddings for future retrieval
+        if conversation_id and self._store.pool:
+            try:
+                from runtime.conversation_context import generate_embeddings_async
+
+                bg = asyncio.create_task(
+                    generate_embeddings_async(self._store.pool, task_id),
+                    name=f"embed-{task_id}",
+                )
+                self._background_tasks.add(bg)
+                bg.add_done_callback(self._background_tasks.discard)
+            except Exception as exc:
+                log.warning("Failed to schedule embedding generation: %s", exc)
 
 
 def format_sse(event: dict[str, Any]) -> str:

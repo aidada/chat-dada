@@ -49,6 +49,7 @@ async def run_orchestrator(
     task: str,
     on_step: Callable[[str], Awaitable[None]],
     user_id: str = "anonymous",
+    conversation_context: str = "",
 ) -> str:
     """
     Main entry point — replaces agents.orchestrator.run_agent().
@@ -71,7 +72,7 @@ async def run_orchestrator(
         await on_step(f"⚠️ Memory recall failed: {exc}")
 
     # Step 1: Classify and plan
-    plan = await classify_and_plan(task, memory_context=memory_context)
+    plan = await classify_and_plan(task, memory_context=memory_context, conversation_context=conversation_context)
     intent = plan["intent"]
     await on_step(f"📋 Intent: {intent}")
 
@@ -79,9 +80,9 @@ async def run_orchestrator(
     if intent == "ppt_report":
         result = await _handle_ppt_report(task, plan, on_step, memory_context=memory_context)
     elif intent == "quick_question":
-        result = await _handle_quick_question(task, on_step, memory_context=memory_context)
+        result = await _handle_quick_question(task, on_step, memory_context=memory_context, conversation_context=conversation_context)
     else:
-        result = await _handle_generic(task, plan, on_step, memory_context=memory_context)
+        result = await _handle_generic(task, plan, on_step, memory_context=memory_context, conversation_context=conversation_context)
 
     try:
         await memory_store.remember(user_id, task, result, intent=intent)
@@ -198,6 +199,7 @@ async def _handle_quick_question(
     on_step: Callable,
     *,
     memory_context: str = "",
+    conversation_context: str = "",
 ) -> str:
     """Handle direct Q&A — single LLM call, no tools."""
     from agents.general_chat import generate_reply
@@ -209,7 +211,12 @@ async def _handle_quick_question(
             return
         await on_step(json.dumps({"type": "result_delta", "content": content}, ensure_ascii=False))
 
-    return await generate_reply(task, memory_context=memory_context, on_chunk=on_chunk)
+    return await generate_reply(
+        task,
+        memory_context=memory_context,
+        conversation_context=conversation_context,
+        on_chunk=on_chunk,
+    )
 
 
 @log_async("orchestrator", "_handle_generic")
@@ -219,6 +226,7 @@ async def _handle_generic(
     on_step: Callable,
     *,
     memory_context: str = "",
+    conversation_context: str = "",
 ) -> str:
     """Handle generic tasks — use scheduler for dependency-based execution."""
     from orchestrator.scheduler import execute_plan
@@ -227,7 +235,9 @@ async def _handle_generic(
     context = _inject_memory_context(plan.get("context", {"task": task}), memory_context)
 
     if not steps:
-        return await _handle_quick_question(task, on_step, memory_context=memory_context)
+        return await _handle_quick_question(
+            task, on_step, memory_context=memory_context, conversation_context=conversation_context
+        )
 
     await on_step(f"🚀 Executing {len(steps)} steps...")
     result_ctx = await execute_plan(steps, context, on_step)

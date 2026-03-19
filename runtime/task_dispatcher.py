@@ -126,6 +126,7 @@ async def run_general_chat_task(
     task: str,
     on_step: Callable[[str], Awaitable[None]],
     user_id: str = "anonymous",
+    conversation_context: str = "",
 ) -> str:
     await on_step("💬 General Chat: 直接回答用户问题...")
 
@@ -134,7 +135,10 @@ async def run_general_chat_task(
             return
         await on_step(json.dumps({"type": "result_delta", "content": content}, ensure_ascii=False))
 
-    result = await run_general_chat({"query": task}, on_chunk=on_chunk)
+    result = await run_general_chat(
+        {"query": task, "conversation_context": conversation_context},
+        on_chunk=on_chunk,
+    )
     if isinstance(result, dict):
         return str(result.get("result", result))
     return str(result)
