@@ -3,6 +3,7 @@ Image Generation Tool — generates images from text prompts via Nano Banana2 AP
 Saves generated images to outputs/ directory.
 """
 import os
+import re
 import json
 import uuid
 import base64
@@ -134,10 +135,10 @@ async def _stream_image(client: httpx.AsyncClient, prompt: str) -> list[str]:
                             inline = part.get("inlineData")
                             if inline and inline.get("data"):
                                 files.extend(_save_inline(inline))
-        # If all chunks were plain text, check if it's base64 image data
+        # If all chunks were plain text, check if it contains image URLs
         if not files and b64_parts:
             full_text = "".join(b64_parts)
-            log.info(f"image_gen stream text preview: {full_text[:200]}")
+            files.extend(await _download_image_urls(client, full_text))
 
     return files
 
@@ -151,3 +152,40 @@ def _save_inline(inline: dict) -> list[str]:
     with open(filepath, "wb") as f:
         f.write(base64.b64decode(inline["data"]))
     return [filepath]
+
+
+# Matches markdown image links and bare https URLs ending with image-like paths
+_IMAGE_URL_RE = re.compile(
+    r'!\[[^\]]*\]\((https?://[^\s\)]+)\)'  # ![alt](url)
+    r'|'
+    r'(https?://storage\.googleapis\.com/[^\s\)\"\']+)'  # bare GCS URL
+)
+
+
+async def _download_image_urls(client: httpx.AsyncClient, text: str) -> list[str]:
+    """Extract image URLs from text and download them."""
+    urls = [m.group(1) or m.group(2) for m in _IMAGE_URL_RE.finditer(text)]
+    if not urls:
+        log.info(f"image_gen: no image URLs found in text: {text[:200]}")
+        return []
+
+    files = []
+    for url in urls:
+        try:
+            resp = await client.get(url, follow_redirects=True)
+            resp.raise_for_status()
+            ct = resp.headers.get("content-type", "image/png")
+            ext = "png"
+            if "jpeg" in ct or "jpg" in ct:
+                ext = "jpg"
+            elif "webp" in ct:
+                ext = "webp"
+            file_id = uuid.uuid4().hex[:8]
+            filepath = f"outputs/image_{file_id}.{ext}"
+            with open(filepath, "wb") as f:
+                f.write(resp.content)
+            files.append(filepath)
+            log.info(f"image_gen: downloaded {url[:80]}... -> {filepath}")
+        except Exception as e:
+            log.warning(f"image_gen: failed to download {url[:80]}...: {e}")
+    return files
