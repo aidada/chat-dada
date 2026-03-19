@@ -17,7 +17,7 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -70,6 +70,7 @@ class TaskCreateRequest(BaseModel):
     mode: str = "auto"
     thinking_level: str = "medium"
     file_paths: list[str] = Field(default_factory=list)
+    conversation_id: str = ""
 
 
 class TaskReplyRequest(BaseModel):
@@ -82,6 +83,16 @@ class VerboseRequest(BaseModel):
 
 class LogLevelRequest(BaseModel):
     level: str
+
+
+class ConversationCreateRequest(BaseModel):
+    user_id: str = "anonymous"
+    title: str = "新对话"
+
+
+class ConversationUpdateRequest(BaseModel):
+    title: str | None = None
+    pinned: bool | None = None
 
 
 def _normalize_task_request(
@@ -244,6 +255,7 @@ async def create_task(payload: TaskCreateRequest):
         mode=mode,
         thinking_level=thinking_level,
         file_paths=file_paths,
+        conversation_id=payload.conversation_id,
     )
     return JSONResponse(
         {
@@ -380,6 +392,55 @@ async def toggle_verbose(req: VerboseRequest):
     set_verbose(req.enabled)
     log.info("Verbose mode set to %s", req.enabled)
     return {"verbose": req.enabled}
+
+
+# ── Conversations ──
+
+
+@app.get("/conversations")
+async def list_conversations(user_id: str = Query(default="anonymous")):
+    items = await task_service.store.list_conversations(user_id)
+    return items
+
+
+@app.post("/conversations")
+async def create_conversation(payload: ConversationCreateRequest):
+    conv_id = f"conv_{uuid.uuid4().hex[:12]}"
+    conv = await task_service.store.create_conversation(
+        conversation_id=conv_id,
+        user_id=payload.user_id,
+        title=payload.title,
+    )
+    return JSONResponse(conv, status_code=201)
+
+
+@app.patch("/conversations/{conversation_id}")
+async def update_conversation(conversation_id: str, payload: ConversationUpdateRequest):
+    fields: dict[str, Any] = {}
+    if payload.title is not None:
+        fields["title"] = payload.title
+    if payload.pinned is not None:
+        fields["pinned"] = payload.pinned
+    if not fields:
+        raise HTTPException(status_code=400, detail="没有可更新的字段")
+    result = await task_service.store.update_conversation(conversation_id, **fields)
+    if result is None:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    return result
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    deleted = await task_service.store.delete_conversation(conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    return Response(status_code=204)
+
+
+@app.get("/conversations/{conversation_id}/entries")
+async def get_conversation_entries(conversation_id: str):
+    entries = await task_service.store.get_conversation_entries(conversation_id)
+    return entries
 
 
 @app.get("/api/verbose")
