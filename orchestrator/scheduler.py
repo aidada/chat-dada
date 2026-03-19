@@ -9,9 +9,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
-from content_utils import extract_result_text
-from logger import log_async
-from registry import resolve_fn
+from core.content_utils import extract_result_text
+from core.logger import log_async
+from core.registry import resolve_fn
 
 log = logging.getLogger("chatdada.orchestrator")
 

@@ -23,8 +23,8 @@
     --shadow:  rgba(200,120,80,0.10);
     --shell-width: 1240px;
     --page-gutter: 24px;
-    --top-bar-height: 124px;
-    --bottom-stage-space: 140px;
+    --top-bar-height: 40px;
+    --bottom-stage-space: 0px;
   }
   *{ margin:0; padding:0; box-sizing:border-box; }
   html,body{ height:100%; background:var(--cream); color:var(--text); font-family:'Nunito',sans-serif; overflow:hidden; }
@@ -32,9 +32,8 @@
   body::before{
     content:''; position:fixed; inset:0; pointer-events:none; z-index:0;
     background:
-      radial-gradient(ellipse 60% 50% at 10% 20%, rgba(246,169,122,.13) 0%,transparent 70%),
-      radial-gradient(ellipse 50% 60% at 90% 80%, rgba(238,139,123,.10) 0%,transparent 70%),
-      radial-gradient(ellipse 40% 40% at 50% 50%, rgba(253,220,196,.18) 0%,transparent 80%);
+      radial-gradient(ellipse 60% 50% at 10% 20%, rgba(246,169,122,.06) 0%,transparent 70%),
+      radial-gradient(ellipse 50% 60% at 90% 80%, rgba(238,139,123,.04) 0%,transparent 70%);
   }
   body::after{
     content:''; position:fixed; inset:0; pointer-events:none; z-index:0; opacity:.45;
@@ -45,46 +44,28 @@
   /* ── Header ── */
   header{
     position:fixed;
-    top:20px;
-    left:50%;
-    transform:translateX(-50%);
+    top:14px;
+    left:var(--page-gutter);
     z-index:40;
-    width:min(var(--shell-width), calc(100vw - (var(--page-gutter) * 2)));
-    padding:18px 24px;
-    display:grid;
-    grid-template-columns:280px minmax(0, 1fr) auto;
-    gap:24px;
-    align-items:center;
-    background:rgba(255,250,245,.86);
-    border:1.5px solid rgba(240,216,202,.9);
-    border-radius:30px;
-    box-shadow:0 18px 38px rgba(200,120,80,.12);
-    backdrop-filter:blur(16px);
-  }
-  .logo{ display:flex; align-items:center; gap:10px; }
-  .logo-icon{
-    width:36px; height:36px; border-radius:12px;
-    background:linear-gradient(135deg,var(--peach),var(--rose));
-    display:grid; place-items:center;
-    font-family:'Pacifico',cursive; font-size:15px; color:#fff;
-    box-shadow:0 4px 14px rgba(238,139,123,.35);
-  }
-  .logo-name{ font-family:'Pacifico',cursive; font-size:22px; color:var(--rose); text-shadow:0 2px 8px rgba(238,139,123,.2); }
-  .ws-badge{
-    justify-self:end;
+    width:fit-content;
+    padding:0;
     display:flex;
     align-items:center;
-    gap:10px;
-    min-width:max-content;
-    background:rgba(255,255,255,.72);
-    border:1.5px solid var(--border);
-    border-radius:999px;
-    padding:6px 8px 6px 14px;
-    font-size:12px;
-    font-weight:700;
-    color:var(--mid);
-    box-shadow:0 8px 20px rgba(200,120,80,.08);
+    background:none;
+    border:none;
+    border-radius:0;
+    box-shadow:none;
   }
+  .logo{ display:flex; align-items:center; gap:8px; }
+  .logo-icon{
+    width:32px; height:32px; border-radius:10px;
+    background:linear-gradient(135deg,var(--peach),var(--rose));
+    display:grid; place-items:center;
+    font-family:'Pacifico',cursive; font-size:13px; color:#fff;
+    box-shadow:0 2px 8px rgba(238,139,123,.25);
+  }
+  .logo-name{ font-family:'Pacifico',cursive; font-size:18px; color:var(--rose); }
+  .ws-badge{ display:none; }
   .ws-dot{ width:7px; height:7px; border-radius:50%; background:var(--dim); transition:all .4s; }
   .ws-dot.on { background:#7EC98F; box-shadow:0 0 0 3px rgba(126,201,143,.25); animation:dpulse 2s ease-in-out infinite; }
   .ws-dot.err{ background:#E88080; box-shadow:0 0 0 3px rgba(220,80,80,.2); }
@@ -96,13 +77,15 @@
     width:min(var(--shell-width), calc(100vw - (var(--page-gutter) * 2)));
     height:100vh;
     margin:0 auto;
-    padding:calc(var(--top-bar-height) + 20px) 0 var(--bottom-stage-space);
+    padding:calc(var(--top-bar-height) + 14px) 0 12px;
     display:grid;
     grid-template-columns:280px minmax(0, 1fr);
     gap:28px;
     align-items:stretch;
     overflow:hidden;
+    pointer-events:none;
   }
+  .app-shell > *{ pointer-events:auto; }
   main{
     min-width:0;
     min-height:0;
@@ -124,6 +107,7 @@
     min-width:0;
     text-align:center;
     animation:fadeup .7s ease both;
+    display:none;
   }
   .welcome h1{
     font-family:'Playfair Display',serif;
@@ -148,8 +132,7 @@
     min-height:0;
     display:flex;
     flex-direction:column;
-    gap:18px;
-  }
+    gap:10px;}
 
   /* ── History ── */
   .history-panel{
@@ -284,10 +267,42 @@
     word-break:break-word;
   }
 
+  /* 搜索框 */
+  .history-search{ padding:8px 16px 0; }
+  .history-search input{
+    width:100%; padding:6px 10px; border-radius:10px;
+    border:1px solid var(--border); background:var(--surface);
+    font-size:12px; outline:none; font-family:inherit; color:var(--text);
+  }
+  .history-search input:focus{ border-color:var(--peach); }
+
+  /* 操作按钮 */
+  .history-item-actions{
+    display:none; gap:4px; margin-left:auto; flex-shrink:0;
+  }
+  .history-item:hover .history-item-actions{ display:flex; }
+  .history-item:hover .history-item-time{ display:none; }
+  .hi-action{
+    cursor:pointer; font-size:12px; opacity:0.5;
+    padding:2px; border-radius:4px;
+  }
+  .hi-action:hover{ opacity:1; background:rgba(246,169,122,.15); }
+
+  /* 置顶样式 */
+  .history-item.pinned{ border-color:rgba(246,169,122,.4); }
+  .history-item.pinned .hi-action[data-action="pin"]{ opacity:1; }
+
+  /* 重命名编辑态 */
+  .history-item-title-input{
+    flex:1; min-width:0; font-size:13px; font-weight:800;
+    border:1px solid var(--peach); border-radius:6px; padding:1px 4px;
+    background:var(--surface); outline:none; font-family:inherit; color:var(--text);
+  }
+
   /* ── 日志 ── */
   .log-wrap{
-    background:var(--surface); border:1.5px solid var(--border); border-radius:24px;
-    box-shadow:0 8px 32px var(--shadow); overflow:hidden;
+    background:var(--surface); border:1px solid rgba(240,216,202,.5); border-radius:20px;
+    box-shadow:0 2px 8px rgba(200,120,80,.06); overflow:hidden;
     flex:1;
     min-height:0;
     display:flex; flex-direction:column;
@@ -295,9 +310,9 @@
     position:relative;
   }
   .log-top{
-    padding:16px 26px 13px; border-bottom:1.5px solid var(--border);
-    display:flex; align-items:center; justify-content:space-between; gap:16px;
-    background:linear-gradient(to right,rgba(253,220,196,.3),transparent);
+    padding:10px 26px 8px; border-bottom:1px solid rgba(240,216,202,.4);
+    display:none; align-items:center; justify-content:space-between; gap:16px;
+    background:transparent;
   }
   .log-top-left{ display:flex; align-items:center; gap:10px; min-width:0; }
   .dots{ display:flex; gap:6px; }
@@ -311,7 +326,7 @@
     white-space:nowrap;
   }
   .log-body{
-    flex:1; min-height:0; padding:28px 28px 26px; overflow-y:auto;
+    flex:1; min-height:0; padding:16px 20px 14px; overflow-y:auto;
     display:flex; flex-direction:column; gap:14px;
     scroll-padding-bottom:18px;
   }
@@ -457,6 +472,19 @@
     border-top:1px solid rgba(107,64,51,.16);
     margin:12px 0;
   }
+  .md-content table{
+    width:100%;border-collapse:collapse;margin:8px 0;font-size:13px;
+  }
+  .md-content th,.md-content td{
+    border:1px solid var(--border);padding:6px 10px;text-align:left;
+  }
+  .md-content th{
+    background:var(--warm0);font-weight:700;color:var(--text);font-size:12px;
+  }
+  .md-content td{
+    color:var(--mid);
+  }
+  .md-content tr:nth-child(even) td{background:rgba(254,246,237,.5);}
 
   /* ── 背景滚动卡片 ── */
   .bg-cards{
@@ -499,29 +527,29 @@
 
   /* ── 输入 ── */
   .input-card{
-    background:var(--surface); border:1.5px solid var(--border); border-radius:24px;
-    padding:6px 6px 6px 6px; display:flex; flex-direction:column;
-    box-shadow:0 8px 32px var(--shadow); transition:border-color .25s,box-shadow .25s;
+    background:var(--surface); border:1px solid rgba(240,216,202,.5); border-radius:18px;
+    padding:4px 4px 4px 4px; display:flex; flex-direction:column;
+    box-shadow:0 2px 8px rgba(200,120,80,.06); transition:border-color .25s,box-shadow .25s;
     animation:fadeup .7s .22s ease both;
     position:relative;
     z-index:8;
   }
   .input-card:focus-within{
     border-color:var(--peach);
-    box-shadow:0 8px 32px rgba(246,169,122,.2),0 0 0 3px rgba(246,169,122,.1);
+    box-shadow:0 2px 12px rgba(246,169,122,.15),0 0 0 2px rgba(246,169,122,.08);
   }
   .input-main{
-    display:flex; align-items:flex-end; gap:12px; padding-left:18px;
+    display:flex; align-items:flex-end; gap:8px; padding-left:14px;
   }
   #task-input{
     flex:1; background:transparent; border:none; outline:none;
-    font-family:'Nunito',sans-serif; font-size:14.5px; font-weight:500; color:var(--text);
-    resize:none; min-height:54px; max-height:140px; padding:16px 0; line-height:1.6;
+    font-family:'Nunito',sans-serif; font-size:14px; font-weight:500; color:var(--text);
+    resize:none; min-height:38px; max-height:100px; padding:10px 0; line-height:1.5;
   }
   #task-input::placeholder{ color:var(--dim); }
   .send-wrap{ display:flex; flex-direction:column; align-items:flex-end; gap:4px; padding-bottom:4px; }
   #send-btn{
-    width:48px; height:48px; border-radius:18px;
+    width:38px; height:38px; border-radius:14px;
     background:linear-gradient(135deg,var(--peach),var(--rose));
     border:none; cursor:pointer; display:grid; place-items:center;
     font-size:20px; color:#fff;
@@ -533,13 +561,15 @@
 
   /* ── Thinking level bar ── */
   .thinking-bar{
-    display:flex; align-items:center; gap:14px;
-    justify-content:space-between;
-    padding:10px 18px 14px;
+    display:flex; align-items:center; gap:10px;
+    padding:0;
+    position:absolute;
+    right:14px;
+    bottom:8px;
   }
   .mode-bar{
-    display:flex; align-items:center; gap:12px;
-    padding:10px 18px 0;
+    display:flex; align-items:center; gap:8px;
+    padding:4px 14px 6px;
     flex-wrap:wrap;
   }
   .thinking-label{
@@ -560,10 +590,10 @@
   }
   .thinking-btn{
     position:relative;
-    width:46px;
-    height:46px;
+    width:32px;
+    height:32px;
     padding:0;
-    border-radius:16px;
+    border-radius:10px;
     border:1.5px solid rgba(246,169,122,.22);
     background:linear-gradient(180deg,rgba(255,251,247,.98),rgba(255,239,228,.92));
     color:#b06f49;
@@ -1123,6 +1153,44 @@
       padding-right:18px;
     }
   }
+
+  /* ── Agent Progress Card ── */
+  .agent-progress{
+    display:flex;
+    align-items:flex-start;
+    gap:12px;
+    animation:ein .3s ease both;
+    transition:opacity .4s ease,max-height .5s ease;
+    max-height:300px;
+    overflow:hidden;
+  }
+  .agent-progress.fade-out{
+    opacity:0;max-height:0;pointer-events:none;
+  }
+  .agent-progress .eicon{
+    width:30px;height:30px;border-radius:10px;flex-shrink:0;
+    display:grid;place-items:center;font-size:16px;
+  }
+  .agent-progress .ebubble{
+    flex:1;min-width:0;
+    padding:8px 14px;
+    border-radius:14px;
+    background:var(--warm0);
+    font-size:12px;
+    color:var(--mid);
+  }
+  .progress-body{margin:0;}
+  .agent-progress.collapsed .progress-body{max-height:0;overflow:hidden;}
+  .progress-step{
+    padding:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    font-size:12px;line-height:1.6;
+  }
+  .progress-step.done{color:var(--dim);}
+  .progress-step.done::before{content:"✓ ";color:var(--peach);}
+  .progress-step.active{color:var(--text);}
+  .progress-step.active::before{content:"→ ";color:var(--rose);}
+  @keyframes progressPulse{0%,100%{opacity:1}50%{opacity:.5}}
+  .progress-step.active{animation:progressPulse 1.5s ease-in-out infinite;}
 </style>
 </head>
 <body>
@@ -1154,6 +1222,9 @@
       <div class="history-sub">连续问答会保留在同一个会话里</div>
     </div>
     <button class="new-chat-btn" id="new-chat-btn" type="button">+ 新对话</button>
+  </div>
+  <div class="history-search">
+    <input type="text" id="history-search-input" placeholder="搜索对话..." />
   </div>
   <div class="history-list" id="history-list"></div>
 </aside>
@@ -1309,7 +1380,6 @@ const TASK_SEQ_PREFIX = 'chat-dada-task-seq:';
 const TASK_EVENTS_PREFIX = 'chat-dada-task-events:';
 const DEFAULT_TASK_PLACEHOLDER = '描述你的任务，比如：帮我搜索今天 AI 新闻，整理成要点保存到桌面…';
 const MAX_CACHED_EVENTS = 800;
-const MAX_CONVERSATIONS = 24;
 const MAX_CONVERSATION_ENTRIES = 240;
 const EMPTY_LOG_TEMPLATE = document.getElementById('log-body').innerHTML;
 const EMPTY_ACTIVITY_TEMPLATE = document.getElementById('activity-body').innerHTML;
@@ -1326,7 +1396,7 @@ let thinkingLevel = 'medium';
 let pendingFiles = [];
 let verboseOn = false;
 let activeTaskId = sessionStorage.getItem(ACTIVE_TASK_KEY) || '';
-let conversations = loadConversations();
+let conversations = [];
 let activeConversationId = localStorage.getItem(ACTIVE_CONVERSATION_KEY) || '';
 let reconnectNoticeShown = false;
 let terminalEventSeen = false;
@@ -1445,47 +1515,77 @@ function normalizeConversationEntry(entry) {
     type: String(entry?.type || 'step'),
     content: String(entry?.content || ''),
     render: entry?.render === 'markdown' ? 'markdown' : 'text',
-    taskId: entry?.taskId ? String(entry.taskId) : '',
+    taskId: entry?.taskId || entry?.task_id || '',
     name: entry?.name ? String(entry.name) : '',
     url: entry?.url ? String(entry.url) : '',
-    createdAt: entry?.createdAt ? String(entry.createdAt) : nowIso(),
+    createdAt: entry?.createdAt || entry?.created_at || nowIso(),
   };
 }
 
-function normalizeConversation(conversation) {
-  const createdAt = conversation?.createdAt ? String(conversation.createdAt) : nowIso();
-  const entries = Array.isArray(conversation?.entries)
-    ? conversation.entries.map(normalizeConversationEntry).slice(-MAX_CONVERSATION_ENTRIES)
-    : [];
+function normalizeConversation(conv) {
   return {
-    id: String(conversation?.id || makeId('conv')),
-    title: String(conversation?.title || '新对话'),
-    createdAt,
-    updatedAt: conversation?.updatedAt ? String(conversation.updatedAt) : createdAt,
-    lastTaskId: conversation?.lastTaskId ? String(conversation.lastTaskId) : '',
-    entries,
+    id: String(conv?.id || ''),
+    title: String(conv?.title || '新对话'),
+    pinned: conv?.pinned || false,
+    createdAt: conv?.created_at || conv?.createdAt || nowIso(),
+    updatedAt: conv?.updated_at || conv?.updatedAt || nowIso(),
+    lastTaskId: conv?.last_task_id || conv?.lastTaskId || '',
+    preview: conv?.preview || '',
+    entries: [],
   };
 }
 
-function loadConversations() {
+async function fetchConversations() {
   try {
-    const raw = localStorage.getItem(CONVERSATIONS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.map(normalizeConversation) : [];
-  } catch {
+    const res = await fetch(apiUrl(`/conversations?user_id=${encodeURIComponent(getUserId())}`));
+    if (!res.ok) throw new Error('加载对话列表失败');
+    const data = await res.json();
+    conversations = Array.isArray(data) ? data.map(normalizeConversation) : [];
+  } catch (err) {
+    console.error('fetchConversations:', err);
+    conversations = [];
+  }
+}
+
+async function fetchConversationEntries(conversationId) {
+  try {
+    const res = await fetch(apiUrl(`/conversations/${encodeURIComponent(conversationId)}/entries`));
+    if (!res.ok) throw new Error('加载对话消息失败');
+    const data = await res.json();
+    return Array.isArray(data) ? data.map(normalizeConversationEntry) : [];
+  } catch (err) {
+    console.error('fetchConversationEntries:', err);
     return [];
   }
 }
 
-function sortConversations() {
-  conversations.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+async function apiCreateConversation(title = '新对话') {
+  const res = await fetch(apiUrl('/conversations'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: getUserId(), title }),
+  });
+  if (!res.ok) throw new Error('创建对话失败');
+  const data = await res.json();
+  return normalizeConversation(data);
 }
 
-function saveConversations() {
-  sortConversations();
-  conversations = conversations.slice(0, MAX_CONVERSATIONS);
-  localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(conversations));
+async function apiUpdateConversation(conversationId, fields) {
+  const res = await fetch(apiUrl(`/conversations/${encodeURIComponent(conversationId)}`), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw new Error('更新对话失败');
+  const data = await res.json();
+  return normalizeConversation(data);
+}
+
+async function apiDeleteConversation(conversationId) {
+  const res = await fetch(apiUrl(`/conversations/${encodeURIComponent(conversationId)}`), {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 404) throw new Error('删除对话失败');
 }
 
 function getConversationIndex(conversationId) {
@@ -1497,24 +1597,15 @@ function getConversation(conversationId = activeConversationId) {
   return index >= 0 ? conversations[index] : null;
 }
 
-function createConversation(title = '新对话') {
-  const createdAt = nowIso();
-  const conversation = normalizeConversation({
-    id: makeId('conv'),
-    title,
-    createdAt,
-    updatedAt: createdAt,
-    lastTaskId: '',
-    entries: [],
-  });
+async function createConversation(title = '新对话') {
+  const conversation = await apiCreateConversation(title);
   conversations.unshift(conversation);
-  saveConversations();
   return conversation;
 }
 
-function ensureActiveConversation() {
+async function ensureActiveConversation() {
   if (!conversations.length) {
-    const conversation = createConversation();
+    const conversation = await createConversation();
     activeConversationId = conversation.id;
     localStorage.setItem(ACTIVE_CONVERSATION_KEY, activeConversationId);
     return conversation;
@@ -1530,6 +1621,8 @@ function ensureActiveConversation() {
 }
 
 function conversationPreview(conversation) {
+  if (conversation.preview) return truncateText(conversation.preview, 44);
+
   const meaningful = [...conversation.entries].reverse().find(entry =>
     ['user', 'user_reply', 'question', 'result', 'error', 'file'].includes(entry.type) && (entry.content || entry.name)
   ) || conversation.entries[conversation.entries.length - 1];
@@ -1585,6 +1678,9 @@ function touchConversation(conversation, updates = {}) {
   Object.assign(conversation, rest);
   if (shouldUpdateTitle) {
     conversation.title = String(nextTitle);
+    apiUpdateConversation(conversation.id, { title: conversation.title }).catch(err =>
+      console.error('auto-title update failed:', err)
+    );
   }
   conversation.updatedAt = nowIso();
 }
@@ -1613,7 +1709,6 @@ function addOrUpdateConversationEntry(entry, conversationId = activeConversation
     updates.title = deriveConversationTitle(normalized.content);
   }
   touchConversation(conversation, updates);
-  saveConversations();
   renderConversationList();
   return normalized;
 }
@@ -1699,6 +1794,7 @@ function renderMarkdown(text) {
   let blockquote = [];
   let listType = '';
   let listItems = [];
+  let tableRows = [];
 
   const flushParagraph = () => {
     if (!paragraph.length) return;
@@ -1720,7 +1816,44 @@ function renderMarkdown(text) {
     listItems = [];
   };
 
+  const parseTableRow = (line) => {
+    return line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+  };
+
+  const flushTable = () => {
+    if (tableRows.length < 2) {
+      tableRows.forEach(r => paragraph.push(r));
+      tableRows = [];
+      return;
+    }
+    let sepIdx = -1;
+    for (let i = 0; i < tableRows.length; i++) {
+      if (/^\|[\s:]*[-]+[\s:]*(\|[\s:]*[-]+[\s:]*)+\|?$/.test(tableRows[i])) { sepIdx = i; break; }
+    }
+    const headerRows = sepIdx > 0 ? tableRows.slice(0, sepIdx) : [];
+    const bodyRows = tableRows.slice(sepIdx > 0 ? sepIdx + 1 : 0);
+    let t = '<table>';
+    if (headerRows.length) {
+      t += '<thead>';
+      for (const r of headerRows) {
+        t += '<tr>' + parseTableRow(r).map(c => `<th>${renderInlineMarkdown(c)}</th>`).join('') + '</tr>';
+      }
+      t += '</thead>';
+    }
+    if (bodyRows.length) {
+      t += '<tbody>';
+      for (const r of bodyRows) {
+        t += '<tr>' + parseTableRow(r).map(c => `<td>${renderInlineMarkdown(c)}</td>`).join('') + '</tr>';
+      }
+      t += '</tbody>';
+    }
+    t += '</table>';
+    html.push(t);
+    tableRows = [];
+  };
+
   const flushAll = () => {
+    flushTable();
     flushParagraph();
     flushBlockquote();
     flushList();
@@ -1754,6 +1887,15 @@ function renderMarkdown(text) {
       html.push('<hr>');
       continue;
     }
+
+    if (/^\|.+\|/.test(trimmed)) {
+      flushParagraph();
+      flushBlockquote();
+      flushList();
+      tableRows.push(trimmed);
+      continue;
+    }
+    flushTable();
 
     const quoteMatch = trimmed.match(/^>\s?(.*)$/);
     if (quoteMatch) {
@@ -2096,24 +2238,33 @@ function upsertRenderedConversationEntry(entry, options = {}) {
   return existing;
 }
 
+let historySearchQuery = '';
+
 function renderConversationList() {
   const list = document.getElementById('history-list');
-  const items = [...conversations];
+  let items = [...conversations];
+  if (historySearchQuery) {
+    items = items.filter(c => (c.title || '').toLowerCase().includes(historySearchQuery));
+  }
   list.innerHTML = '';
 
   if (!items.length) {
-    list.innerHTML = '<div class="history-empty">还没有历史对话，先发起一轮新聊天吧。</div>';
+    list.innerHTML = `<div class="history-empty">${historySearchQuery ? '没有找到匹配的对话' : '还没有历史对话，先发起一轮新聊天吧。'}</div>`;
     return;
   }
 
   for (const conversation of items) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = `history-item${conversation.id === activeConversationId ? ' active' : ''}`;
+    button.className = `history-item${conversation.id === activeConversationId ? ' active' : ''}${conversation.pinned ? ' pinned' : ''}`;
     button.dataset.conversationId = conversation.id;
     button.innerHTML = `
       <div class="history-item-head">
         <span class="history-item-title">${esc(conversation.title || '新对话')}</span>
+        <span class="history-item-actions">
+          <span class="hi-action" data-action="pin" title="置顶/取消置顶">📌</span>
+          <span class="hi-action" data-action="rename" title="重命名">✏️</span>
+        </span>
         <span class="history-item-time">${esc(formatConversationTime(conversation.updatedAt))}</span>
       </div>
       <div class="history-item-preview">${esc(conversationPreview(conversation))}</div>
@@ -2122,16 +2273,25 @@ function renderConversationList() {
   }
 }
 
-function renderActiveConversation() {
+async function renderActiveConversation() {
   clearLog();
   const conversation = getConversation();
-  if (!conversation || !conversation.entries.length) {
+  if (!conversation) {
     showEmptyStateIfNeeded();
     scrollLogToBottom(false, true);
     return;
   }
 
-  for (const entry of conversation.entries) {
+  const entries = await fetchConversationEntries(conversation.id);
+  conversation.entries = entries;
+
+  if (!entries.length) {
+    showEmptyStateIfNeeded();
+    scrollLogToBottom(false, true);
+    return;
+  }
+
+  for (const entry of entries) {
     if (!isPrimaryConversationEntryType(entry.type)) continue;
     renderConversationEntry(entry, { autoscroll: false });
   }
@@ -2151,7 +2311,7 @@ function setSelectedTask(taskId) {
   refreshTaskStateUi();
 }
 
-function setActiveConversation(conversationId) {
+async function setActiveConversation(conversationId) {
   const conversation = getConversation(conversationId);
   if (!conversation) return;
 
@@ -2163,17 +2323,17 @@ function setActiveConversation(conversationId) {
   setDot('idle');
   refreshTaskStateUi();
   renderConversationList();
-  renderActiveConversation();
+  await renderActiveConversation();
   renderTaskPanelsFromCache(conversation.lastTaskId || '');
   if (conversation.lastTaskId) {
     restoreActiveTask();
   }
 }
 
-function startNewConversation() {
+async function startNewConversation() {
   if (running) return;
-  const conversation = createConversation();
-  setActiveConversation(conversation.id);
+  const conversation = await createConversation();
+  await setActiveConversation(conversation.id);
 }
 
 function ensureActiveResultEntry(taskId) {
@@ -2361,6 +2521,56 @@ function eventEntryId(event) {
   return `evt-${event.task_id}-${event.seq}`;
 }
 
+/* ── Agent Progress Card ── */
+const PROGRESS_MAX_VISIBLE = 5;
+
+function createProgressCard(taskId) {
+  removeProgressCard(taskId);
+  const card = document.createElement('div');
+  card.className = 'agent-progress';
+  card.dataset.taskId = taskId;
+  card.innerHTML =
+    '<div class="eicon">🐱</div>' +
+    '<div class="ebubble">' +
+      '<div class="progress-body"></div>' +
+    '</div>';
+  const body = document.getElementById('log-body');
+  if (body) {
+    body.appendChild(card);
+    requestAnimationFrame(function() { scrollLogToBottom(true, true); });
+  }
+}
+
+function appendProgressStep(taskId, content) {
+  const card = document.querySelector('.agent-progress[data-task-id="' + taskId + '"]');
+  if (!card) return;
+  const body = card.querySelector('.progress-body');
+  if (!body) return;
+  const prev = body.querySelector('.progress-step.active');
+  if (prev) { prev.classList.replace('active', 'done'); }
+  const step = document.createElement('div');
+  step.className = 'progress-step active';
+  const clean = (content || '').replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{200D}]+\s*/u, '');
+  step.textContent = clean.length > 50 ? clean.slice(0, 50) + '…' : clean;
+  body.appendChild(step);
+  const steps = body.querySelectorAll('.progress-step');
+  for (let i = 0; i < steps.length; i++) {
+    steps[i].style.display = (i < steps.length - PROGRESS_MAX_VISIBLE) ? 'none' : '';
+  }
+  requestAnimationFrame(function() { scrollLogToBottom(true, true); });
+}
+
+function removeProgressCard(taskId) {
+  const card = document.querySelector('.agent-progress[data-task-id="' + taskId + '"]');
+  if (!card) return;
+  card.classList.add('fade-out');
+  setTimeout(function() { card.remove(); }, 400);
+}
+
+function toggleProgressCard(card) {
+  /* no-op: header removed in minimalist redesign */
+}
+
 function renderEvent(event, { fromCache = false } = {}) {
   if (event.type === 'monitoring') {
     renderMonitoring(event.content);
@@ -2369,9 +2579,19 @@ function renderEvent(event, { fromCache = false } = {}) {
 
   if (isActivityEventType(event.type)) {
     appendActivityEvent(event);
-    if (event.type === 'start' || event.type === 'step') {
+    if (event.type === 'start') {
+      if (!fromCache) createProgressCard(event.task_id);
       return;
     }
+    if (event.type === 'step') {
+      if (!fromCache) appendProgressStep(event.task_id, event.content || '');
+      return;
+    }
+  }
+
+  // Terminal events: remove progress card
+  if (!fromCache && (event.type === 'result_delta' || event.type === 'result' || event.type === 'error')) {
+    removeProgressCard(event.task_id);
   }
 
   if (event.type === 'result_delta') {
@@ -2592,7 +2812,6 @@ function prepareNewTask(taskId) {
   const conversation = getConversation();
   if (conversation) {
     touchConversation(conversation, { lastTaskId: taskId });
-    saveConversations();
     renderConversationList();
   }
   activeResultEntry = null;
@@ -2661,6 +2880,7 @@ async function sendTask() {
     setRunning(true);
     setDot('off');
 
+    const conversation = await ensureActiveConversation();
     const filePaths = await uploadPendingFiles();
     const res = await fetch(apiUrl('/tasks'), {
       method: 'POST',
@@ -2671,6 +2891,7 @@ async function sendTask() {
         mode: taskMode,
         thinking_level: thinkingLevel,
         file_paths: filePaths,
+        conversation_id: conversation.id,
       }),
     });
 
@@ -2775,12 +2996,87 @@ document.getElementById('new-chat-btn').addEventListener('click', () => {
 });
 
 document.getElementById('history-list').addEventListener('click', event => {
+  const actionEl = event.target.closest('.hi-action');
+  if (actionEl) {
+    event.stopPropagation();
+    const convId = actionEl.closest('.history-item').dataset.conversationId;
+    const action = actionEl.dataset.action;
+    if (action === 'pin') togglePin(convId);
+    if (action === 'rename') startRename(convId);
+    return;
+  }
   const button = event.target.closest('.history-item');
   if (!button) return;
   if (button.dataset.conversationId === activeConversationId) return;
   if (running) return;
+  clearHistorySearch();
   setActiveConversation(button.dataset.conversationId);
 });
+
+function clearHistorySearch() {
+  const input = document.getElementById('history-search-input');
+  input.value = '';
+  historySearchQuery = '';
+  renderConversationList();
+}
+
+document.getElementById('history-search-input').addEventListener('input', (e) => {
+  historySearchQuery = e.target.value.trim().toLowerCase();
+  renderConversationList();
+});
+
+document.getElementById('history-search-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const first = document.querySelector('#history-list .history-item');
+    if (!first) return;
+    const convId = first.dataset.conversationId;
+    if (convId && convId !== activeConversationId && !running) {
+      clearHistorySearch();
+      setActiveConversation(convId);
+    }
+  }
+});
+
+function togglePin(conversationId) {
+  const conv = getConversation(conversationId);
+  if (!conv) return;
+  conv.pinned = !conv.pinned;
+  renderConversationList();
+  apiUpdateConversation(conversationId, { pinned: conv.pinned }).catch(err =>
+    console.error('togglePin failed:', err)
+  );
+}
+
+function startRename(conversationId) {
+  const item = document.querySelector(`.history-item[data-conversation-id="${conversationId}"]`);
+  if (!item) return;
+  const titleEl = item.querySelector('.history-item-title');
+  const conv = getConversation(conversationId);
+  if (!titleEl || !conv) return;
+
+  const input = document.createElement('input');
+  input.className = 'history-item-title-input';
+  input.value = conv.title;
+  input.maxLength = 28;
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const finish = () => {
+    const newTitle = input.value.trim() || conv.title;
+    conv.title = newTitle.slice(0, 28);
+    renderConversationList();
+    apiUpdateConversation(conversationId, { title: conv.title }).catch(err =>
+      console.error('rename failed:', err)
+    );
+  };
+  input.addEventListener('blur', finish);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { input.value = conv.title; input.blur(); }
+  });
+}
 
 document.getElementById('log-body').addEventListener('scroll', () => {
   handleLogScroll();
@@ -2884,7 +3180,6 @@ async function restoreActiveTask() {
       const activeConversation = getConversation();
       if (activeConversation) {
         touchConversation(activeConversation, { lastTaskId: '' });
-        saveConversations();
         renderConversationList();
       }
       setSelectedTask('');
@@ -2932,7 +3227,8 @@ function taskIsTerminal(status) {
 }
 
 async function initApp() {
-  ensureActiveConversation();
+  await fetchConversations();
+  await ensureActiveConversation();
   applyTaskMode(taskMode);
   applyThinkingLevel(thinkingLevel);
   setThinkingDrawerOpen(false);
@@ -2940,7 +3236,7 @@ async function initApp() {
   setDot('idle');
   resetMonitoringPanel();
   renderConversationList();
-  renderActiveConversation();
+  await renderActiveConversation();
   refreshTaskStateUi();
   await loadVerboseState();
   await restoreActiveTask();

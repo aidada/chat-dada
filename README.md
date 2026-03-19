@@ -1,16 +1,17 @@
 # chat dada / Local Agent
 
-一个基于 FastAPI、LangGraph 和流式任务运行时的通用多智能体平台。当前代码库已经从早期的 WebSocket-only PPT 生成器，演进为支持聊天、深度研究、文件分析、翻译、图片生成、Markdown/Word/Excel/PPT 输出的任务系统。
+一个基于 FastAPI、LangGraph 和流式任务运行时的通用多智能体平台。支持聊天、深度研究（含层级分解与并行执行）、文件分析、翻译、图片生成、Markdown/Word/Excel/PPT 输出的任务系统。
 
 前端页面位于 [static/index.html](static/index.html)，后端入口位于 [main.py](main.py)。
 
 ## 当前能力概览
 
 - 任务提交采用 `POST /tasks`，事件流采用 `GET /tasks/{task_id}/events` 的 SSE 模式，支持断线重放。
-- 任务状态和事件持久化到 `data/task_runs.sqlite3`，不是纯内存队列。
-- 支持人机交互追问。任务运行中可进入 `waiting_for_user`，再通过 `POST /tasks/{task_id}/reply` 继续。
+- 任务状态和事件持久化到 **PostgreSQL**，跨实例事件广播通过 **Redis Pub/Sub**。
+- 支持人机交互追问。任务运行中可进入 `waiting_for_user`，再通过 `POST /tasks/{task_id}/reply` 继续。跨实例回复通过 Redis BLPOP/LPUSH 传递。
 - 编排链路支持用户记忆。`orchestrator` 路由会从 `data/memory/` 召回历史片段，并在任务结束后回写长期记忆。
-- 能力通过统一注册表维护，当前共 19 个已注册能力：6 个 agents、8 个 tools、5 个 renderers。
+- 能力通过统一注册表维护，当前共 20 个已注册能力：6 个 agents、9 个 tools、5 个 renderers。
+- 深度研究支持三种图模式：简单循环、层级分解、并行工作者，配合三层上下文管理、进度追踪与外部研究记忆。
 - 支持多种输出形态：直接回答、Markdown、Word、Excel、PPT、图片、占位版 Visio JSON。
 
 ## 架构
@@ -28,25 +29,34 @@ Browser / API Client
 FastAPI app (main.py)
         │
         ▼
-TaskService / TaskRunStore (task_runtime.py)
-        │              ├── SQLite: data/task_runs.sqlite3
-        │              └── SSE replay / live subscribers
+TaskService / TaskRunStore (runtime/task_runtime.py)
+        │              ├── PostgreSQL: task_runs + task_events
+        │              ├── Redis Pub/Sub: SSE 广播
+        │              └── Redis BLPOP/LPUSH: 跨实例用户回复
         ▼
-Task Dispatcher (task_dispatcher.py)
+Task Dispatcher (runtime/task_dispatcher.py)
         │
         ├── general_chat
         └── orchestrator
                 │
-                ├── memory recall / save
-                ├── planner
+                ├── memory recall / save  (storage/user_store.py)
+                ├── planner               (orchestrator/planner.py)
                 ├── template selection or free-form planning
-                └── scheduler
+                └── scheduler             (orchestrator/scheduler.py)
                         │
                         ▼
-                 registry.py
+                 core/registry.py
         ┌──────────────┼──────────────┐
         ▼              ▼              ▼
       agents         tools        renderers
+
+deep_research 内部结构:
+        │
+        ├── capabilities/planner     → 层级子任务分解 (2-5 subtasks)
+        ├── capabilities/context_manager → 三层上下文压缩 (raw → compact → summary)
+        ├── capabilities/progress_tracker → 进度/发现/缺口追踪
+        ├── capabilities/memory      → 外部文件记忆 (data/research/{task_id}/)
+        └── agents/research_worker   → 并行工作者 (wave-based, max 3)
 ```
 
 ## 任务模式
@@ -59,11 +69,11 @@ Task Dispatcher (task_dispatcher.py)
 | `chat` | 强制走直接对话，不允许附件 |
 | `agent` | 强制走编排器 |
 
-`thinking_level` 当前支持 `low` / `medium` / `high`，会通过 [models.py](models.py) 映射到底层模型的推理强度参数。
+`thinking_level` 当前支持 `low` / `medium` / `high`，会通过 [core/models.py](core/models.py) 映射到底层模型的推理强度参数。
 
 ## 已注册能力
 
-能力注册定义见 [registry.py](registry.py)。
+能力注册定义见 [core/registry.py](core/registry.py)。
 
 ### Agents
 
@@ -73,7 +83,7 @@ Task Dispatcher (task_dispatcher.py)
 | `search` | `agents.search_agent:run_search` | Web 搜索与页面抓取 |
 | `doc_analyst` | `agents.doc_agent:run_doc_analysis` | 读取并分析 PDF/文本/附件 |
 | `writer` | `agents.writer_agent:run_writer` | 生成写作内容或幻灯片 DSL |
-| `deep_research` | `agents.deep_research:run` | 多轮研究，支持 Web、学术检索、浏览器、追问 |
+| `deep_research` | `agents.deep_research:run` | 多轮深度研究，支持 Web、学术检索、浏览器、追问、研究笔记 |
 | `data_analyst` | `agents.data_analyst:run` | 数据分析与代码执行协同 |
 
 ### Tools
@@ -88,6 +98,7 @@ Task Dispatcher (task_dispatcher.py)
 | `code_executor` | `tools.code_executor:run` | Python 沙箱执行 |
 | `image_gen` | `tools.image_gen:run` | 文本生成图片 |
 | `image_to_diagram` | `tools.image_to_diagram:run` | 图片转结构化图表 |
+| `research_notes` | `tools.research_notes` | 研究笔记持久化存储与召回 |
 
 ### Renderers
 
@@ -98,6 +109,46 @@ Task Dispatcher (task_dispatcher.py)
 | `word_render` | `renderers.word_renderer:run` | `.docx` |
 | `excel_render` | `renderers.excel_renderer:run` | `.xlsx` |
 | `visio_render` | `renderers.visio_renderer:run` | 当前为占位 JSON 输出 |
+
+## 深度研究系统
+
+`deep_research` 是系统中最复杂的 agent，实现位于 `agents/deep_research/` 子包，支持三种图执行模式：
+
+| 模式 | 流程 | 适用场景 |
+| --- | --- | --- |
+| Simple | planner → tools loop → finish | 简单问题，单线研究 |
+| Hierarchical | plan → route subtasks → individual research → judge → synthesize | 复杂多维度问题 |
+| Parallel | plan → parallel workers → synthesis | 独立子问题可并行 |
+
+子包结构（`agents/deep_research/`）：
+
+| 文件 | 职责 |
+| --- | --- |
+| `config.py` | 状态定义、研究配置、报告模板（default / academic_paper_guidance） |
+| `graphs.py` | LangGraph 图构建（simple / hierarchical / parallel） |
+| `prompts.py` | 系统提示词与报告模板选择 |
+| `run.py` | 入口函数、工具定义（web_search / academic_search / browser / ask_user / research_notes） |
+| `utils.py` | 报告改写与辅助函数 |
+
+依赖的 capabilities 模块：
+
+| 模块 | 文件 | 职责 |
+| --- | --- | --- |
+| 研究规划器 | `capabilities/planner.py` | 将问题分解为 2-5 个带依赖的子任务 |
+| 上下文管理器 | `capabilities/context_manager.py` | 三层压缩：最近 2 步保留原文，旧步骤取 200 字摘要，全局研究摘要 |
+| 进度追踪器 | `capabilities/progress_tracker.py` | 记录已完成搜索、关键发现（FIFO, max 10）、剩余缺口 |
+| 研究记忆 | `capabilities/memory.py` | 文件系统外部记忆，支持发现/摘要/检查点/恢复 |
+
+并行工作者：`agents/research_worker.py`（Wave-based 并行执行，最多 3 个并发）。
+
+报告模板：
+
+| profile | 说明 |
+| --- | --- |
+| `default` | 问题导向报告，含 6 个必需章节（直接结论、证据链、机理与成立条件等） |
+| `academic_paper_guidance` | 期刊论文准备指南，含 8 个章节（文献综述正文、研究空白、写作建议等） |
+
+运行参数：最多 15 步，每 5 步保存检查点，每 6 步生成中间摘要。
 
 ## 编排模板
 
@@ -222,7 +273,7 @@ curl -O http://localhost:8000/download/your_file.docx
 
 ## 用户记忆
 
-记忆模块位于 [memory/store.py](memory/store.py)。
+记忆模块位于 [storage/user_store.py](storage/user_store.py)。
 
 默认存储路径：
 
@@ -245,33 +296,81 @@ data/memory/<user_id>/
 
 ```text
 .
-├── main.py                    # FastAPI 入口
-├── task_runtime.py            # 任务持久化、SSE、回复恢复
-├── task_dispatcher.py         # auto/chat/agent 路由判定
-├── task_interaction.py        # 任务内 ask_user 交互桥接
-├── models.py                  # 模型与 provider 配置中心
-├── registry.py                # 统一能力注册表
-├── logger.py                  # 结构化日志与监控汇总
-├── content_utils.py           # 输出文本提取与清洗
+├── main.py                        # FastAPI 入口（唯一根级模块）
 │
-├── orchestrator/
-│   ├── planner.py             # intent 分类与自由规划
-│   ├── runner.py              # 编排总入口
-│   ├── scheduler.py           # 依赖图执行
-│   └── templates.py           # 预设模板
+├── core/                          # 基础设施层
+│   ├── models.py                  # 模型与 provider 配置中心
+│   ├── registry.py                # 统一能力注册表
+│   ├── logger.py                  # 结构化日志与监控汇总
+│   └── content_utils.py           # 输出文本提取与清洗
 │
-├── agents/
-├── tools/
-├── renderers/
-├── ppt_engine/
+├── runtime/                       # 任务运行时
+│   ├── task_runtime.py            # 任务持久化 (PostgreSQL)、SSE (Redis Pub/Sub)
+│   ├── task_dispatcher.py         # auto/chat/agent 路由判定
+│   └── task_interaction.py        # 任务内 ask_user 交互桥接
 │
-├── memory/                    # 记忆模块
-├── static/index.html          # 当前前端页面
-├── old/                       # 旧版前端与单体 agent 备份
-├── uploads/                   # 上传文件
-├── outputs/                   # 生成文件
-├── data/                      # SQLite 与记忆数据
-└── tests/                     # 单元测试
+├── storage/                       # 持久化存储
+│   └── user_store.py              # 用户记忆 (Markdown 文件层级)
+│
+├── capabilities/                  # 深度研究能力模块
+│   ├── context_manager.py         # 三层上下文管理 (raw → compact → summary)
+│   ├── progress_tracker.py        # 研究进度与缺口追踪
+│   ├── memory.py                  # 研究外部文件记忆 (data/research/)
+│   └── planner.py                 # 研究子任务层级分解
+│
+├── orchestrator/                  # 编排层
+│   ├── planner.py                 # intent 分类与自由规划
+│   ├── runner.py                  # 编排总入口
+│   ├── scheduler.py               # 依赖图执行
+│   └── templates.py               # 预设模板
+│
+├── agents/                        # Agent 实现
+│   ├── general_chat.py            # 直接问答
+│   ├── deep_research/             # 多模式深度研究（子包）
+│   │   ├── config.py              # 状态、配置、报告模板
+│   │   ├── graphs.py              # LangGraph 图构建
+│   │   ├── prompts.py             # 系统提示词
+│   │   ├── run.py                 # 入口与工具定义
+│   │   └── utils.py               # 报告改写辅助
+│   ├── research_worker.py         # 并行研究工作者
+│   ├── search_agent.py            # Web 搜索
+│   ├── doc_agent.py               # 文档分析
+│   ├── writer_agent.py            # 写作与幻灯片
+│   └── data_analyst.py            # 数据分析
+│
+├── tools/                         # 工具实现
+│   ├── web_search.py              # Tavily 搜索
+│   ├── brave_search.py            # Brave 搜索
+│   ├── academic_search.py         # 学术检索 (Semantic Scholar + arXiv)
+│   ├── translator.py              # LLM 翻译
+│   ├── summarizer.py              # LLM 摘要
+│   ├── code_executor.py           # Python 沙箱
+│   ├── image_gen.py               # 图片生成
+│   ├── image_to_diagram.py        # 图片转图表
+│   └── research_notes.py          # 研究笔记持久化
+│
+├── renderers/                     # 输出渲染
+│   ├── word_renderer.py           # .docx
+│   ├── markdown_renderer.py       # .md
+│   ├── excel_renderer.py          # .xlsx
+│   └── visio_renderer.py          # .json (占位)
+│
+├── ppt_engine/                    # PPT 渲染引擎
+│   ├── dsl_schema.py              # 幻灯片 DSL 定义
+│   └── renderer.py                # PPTX 渲染
+│
+├── scripts/
+│   └── init.sql                   # PostgreSQL 建表脚本
+│
+├── static/index.html              # 当前前端页面
+├── old/                           # 旧版前端与单体 agent 备份
+├── uploads/                       # 上传文件
+├── outputs/                       # 生成文件
+├── data/                          # 运行时数据
+│   ├── memory/                    # 用户记忆
+│   └── research/                  # 研究任务外部记忆
+├── logs/                          # 日志输出
+└── tests/                         # 单元测试
 ```
 
 ## 安装与运行
@@ -279,7 +378,24 @@ data/memory/<user_id>/
 ### 环境要求
 
 - Python 3.13
+- PostgreSQL
+- Redis
 - `uv` 或 `pip`
+
+### 基础设施
+
+启动 PostgreSQL 和 Redis 后，执行建表脚本：
+
+```bash
+psql -U chatdada -d chatdada -f scripts/init.sql
+```
+
+默认连接地址（可通过环境变量覆盖）：
+
+```bash
+DATABASE_URL=postgresql://chatdada:chatdada@localhost:5432/chatdada
+REDIS_URL=redis://localhost:6379
+```
 
 ### 安装依赖
 
@@ -289,20 +405,19 @@ data/memory/<user_id>/
 uv venv .venv
 source .venv/bin/activate
 
-uv pip install -r requirements.txt
-uv pip install langchain-google-genai langchain-tavily
+uv pip install -e .
 
 playwright install chromium
 ```
 
 说明：
 
-- 当前代码直接 import `langchain_google_genai` 和 `langchain_tavily`，因此新环境建议显式安装。
-- 如果只做非浏览器能力开发，`playwright install chromium` 仍建议执行，因为 `deep_research` 会使用 `browser-use`。
+- 依赖已定义在 `pyproject.toml`，使用 `uv pip install -e .` 即可安装全部依赖。
+- `playwright install chromium` 建议执行，因为 `deep_research` 会使用 `browser-use`。
 
 ### 最小可用配置
 
-默认模型配置见 [models.py](models.py)。按当前仓库默认值，至少需要：
+默认模型配置见 [core/models.py](core/models.py)。按当前仓库默认值，至少需要：
 
 ```bash
 CO_API_KEY=your_proxy_key
@@ -324,8 +439,13 @@ MOONSHOT_API_KEY=your_moonshot_key
 ANTHROPIC_API_KEY=your_anthropic_key
 YESCODE_GEMINI_BASE_URL=https://co.yes.vg/gemini
 
+# 数据库
+DATABASE_URL=postgresql://chatdada:chatdada@localhost:5432/chatdada
+REDIS_URL=redis://localhost:6379
+
 # 运行时
 LOCAL_AGENT_MEMORY_DIR=data/memory
+RESEARCH_DATA_DIR=data/research
 LLM_TIMEOUT_SECONDS=7200
 LLM_MAX_RETRIES=2
 
@@ -346,7 +466,7 @@ uvicorn main:app --reload --port 8000
 
 ## 当前默认模型映射
 
-当前角色到模型的默认映射定义在 [models.py](models.py)：
+当前角色到模型的默认映射定义在 [core/models.py](core/models.py)：
 
 | role | provider | model |
 | --- | --- | --- |
@@ -359,6 +479,26 @@ uvicorn main:app --reload --port 8000
 
 如果要切换模型或 provider，直接修改 `PROVIDERS` 和 `MODEL_CONFIGS`。
 
+## 数据库 Schema
+
+任务持久化使用 PostgreSQL，建表脚本位于 [scripts/init.sql](scripts/init.sql)。
+
+```sql
+-- task_runs: 任务主表
+task_id, user_id, status, task_text, mode, thinking_level,
+route_name, route_reason, route_confidence,
+request_payload (JSONB), pending_question (JSONB),
+result_text, error_text,
+created_at, started_at, finished_at, updated_at
+
+-- task_events: 事件流表
+task_id, seq, event_type, payload (JSONB), created_at
+```
+
+索引：`task_runs(user_id)`、`task_runs(status)`、`task_runs(created_at DESC)`、`task_events(task_id, seq)`。
+
+服务启动时会自动标记中断的任务（queued/running/waiting_for_user）为 failed。
+
 ## 监控与调试
 
 除了业务事件流，后端还提供两个调试接口：
@@ -368,7 +508,7 @@ uvicorn main:app --reload --port 8000
 | `GET /api/verbose` / `POST /api/verbose` | 查看或切换 verbose 输出 |
 | `POST /api/log-level` | 动态调整日志级别 |
 
-任务结束时会追加一个 `monitoring` 事件，内容来自 [logger.py](logger.py) 的采集汇总，包括耗时、LLM 调用数、token 统计和错误信息。
+任务结束时会追加一个 `monitoring` 事件，内容来自 [core/logger.py](core/logger.py) 的采集汇总，包括耗时、LLM 调用数、token 统计和错误信息。
 
 ## 测试
 
@@ -377,7 +517,14 @@ uvicorn main:app --reload --port 8000
 - `test_task_streaming.py` 覆盖任务提交、SSE、追问回复、HTTP 接口
 - `test_models.py` 覆盖模型适配层
 - `test_scheduler.py`、`test_orchestrator_runner.py` 覆盖编排执行
-- `test_deep_research.py`、`test_word_renderer.py`、`test_markdown_renderer.py` 覆盖核心能力
+- `test_deep_research.py` 覆盖深度研究 agent
+- `test_context_manager.py` 覆盖三层上下文管理
+- `test_progress_tracker.py` 覆盖进度追踪
+- `test_research_memory.py` 覆盖研究外部记忆
+- `test_research_planner.py` 覆盖研究子任务分解
+- `test_research_worker.py` 覆盖并行研究工作者
+- `test_research_notes.py` 覆盖研究笔记工具
+- `test_word_renderer.py`、`test_markdown_renderer.py` 覆盖渲染器
 
 运行：
 
@@ -391,6 +538,6 @@ python -m unittest discover -s tests
 
 - [old/agent.py](old/agent.py)
 - [old/index.html](old/index.html)
-- [agents/orchestrator.py](agents/orchestrator.py)
+- [old/orchestrator.py](old/orchestrator.py)
 
-当前应以 [orchestrator/runner.py](orchestrator/runner.py) 和 [task_runtime.py](task_runtime.py) 为准。
+当前应以 [orchestrator/runner.py](orchestrator/runner.py) 和 [runtime/task_runtime.py](runtime/task_runtime.py) 为准。

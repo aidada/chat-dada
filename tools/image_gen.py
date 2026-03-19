@@ -8,7 +8,7 @@ import base64
 
 import httpx
 
-from logger import log_async
+from core.logger import log_async
 
 
 # Nano Banana2 API configuration

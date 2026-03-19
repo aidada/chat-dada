@@ -35,3 +35,28 @@ CREATE TABLE IF NOT EXISTS task_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events (task_id, seq);
+
+-- Conversations: lightweight metadata; messages live in task_events via task_runs.
+CREATE TABLE IF NOT EXISTS conversations (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    title       TEXT NOT NULL DEFAULT '新对话',
+    pinned      BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations (user_id);
+
+-- Link tasks to conversations
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'task_runs' AND column_name = 'conversation_id'
+    ) THEN
+        ALTER TABLE task_runs ADD COLUMN conversation_id TEXT;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_task_runs_conversation ON task_runs (conversation_id);

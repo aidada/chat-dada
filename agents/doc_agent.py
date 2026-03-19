@@ -12,9 +12,9 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from content_utils import extract_text_content, normalize_markdown_report
-from models import get_llm
-from logger import log_async
+from core.content_utils import extract_text_content, normalize_markdown_report
+from core.models import get_llm
+from core.logger import log_async
 
 
 # ── Tools ──
@@ -103,7 +103,7 @@ def doc_should_continue(state: DocState) -> Literal["tools", "finish"]:
 
 # ── Graph ──
 def build_doc_graph():
-    from registry import get_tools_for_agent
+    from core.registry import get_tools_for_agent
     core_names = {t.name for t in CORE_TOOLS}
     dynamic = get_tools_for_agent("doc_analyst", exclude_names=core_names)
     all_tools = CORE_TOOLS + dynamic

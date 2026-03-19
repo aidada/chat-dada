@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import os
 
-from logger import log_async
+from core.logger import log_async
 
 
 @log_async("tool", "code_executor")

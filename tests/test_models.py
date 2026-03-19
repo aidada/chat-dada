@@ -9,7 +9,7 @@ from unittest.mock import patch
 from browser_use.llm.messages import SystemMessage as BrowserSystemMessage
 from pydantic import BaseModel
 
-from models import (
+from core.models import (
     DEFAULT_LLM_MAX_RETRIES,
     DEFAULT_LLM_TIMEOUT_SECONDS,
     GeminiOpenAIAdapter,
@@ -161,8 +161,8 @@ class GeminiOpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
 class ModelDefaultsTests(unittest.TestCase):
     def test_get_llm_applies_default_timeout_and_retries(self) -> None:
         with patch.dict(os.environ, {"CO_API_KEY": "test-key"}, clear=False):
-            with patch("models._build_client", return_value=object()) as build_client:
-                with patch("logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+            with patch("core.models._build_client", return_value=object()) as build_client:
+                with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
                     client, role, model = get_llm("search")
 
         self.assertEqual(role, "search")
@@ -178,12 +178,12 @@ class ModelDefaultsTests(unittest.TestCase):
             clear=False,
         ):
             with patch.dict(
-                "models.MODEL_CONFIGS",
+                "core.models.MODEL_CONFIGS",
                 {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
                 clear=False,
             ):
-                with patch("models._build_client", return_value=object()) as build_client:
-                    with patch("logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                with patch("core.models._build_client", return_value=object()) as build_client:
+                    with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
                         client, role, model = get_llm("search")
 
         self.assertEqual(role, "search")
@@ -201,12 +201,12 @@ class ModelDefaultsTests(unittest.TestCase):
             clear=False,
         ):
             with patch.dict(
-                "models.MODEL_CONFIGS",
+                "core.models.MODEL_CONFIGS",
                 {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
                 clear=False,
             ):
-                with patch("models._build_client", return_value=object()) as build_client:
-                    with patch("logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                with patch("core.models._build_client", return_value=object()) as build_client:
+                    with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
                         get_llm("search", thinking_level="high")
 
         kwargs = build_client.call_args.kwargs
@@ -222,12 +222,12 @@ class ModelDefaultsTests(unittest.TestCase):
             clear=False,
         ):
             with patch.dict(
-                "models.MODEL_CONFIGS",
+                "core.models.MODEL_CONFIGS",
                 {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
                 clear=False,
             ):
-                with patch("models._build_client", return_value=object()) as build_client:
-                    with patch("logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                with patch("core.models._build_client", return_value=object()) as build_client:
+                    with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
                         get_llm("search", thinking_level="high")
 
         kwargs = build_client.call_args.kwargs
@@ -244,7 +244,7 @@ class ModelDefaultsTests(unittest.TestCase):
                 raise AssertionError("structured output should not be used in this test")
 
         fake_llm = _FakeLLM()
-        with patch("models.get_llm", return_value=fake_llm) as mocked_get_llm:
+        with patch("core.models.get_llm", return_value=fake_llm) as mocked_get_llm:
             adapter = get_browser_use_llm("search")
             result = self._run_async(adapter.ainvoke([BrowserSystemMessage(content="hello")], session_id="abc"))
 
@@ -266,11 +266,11 @@ class ModelDefaultsTests(unittest.TestCase):
 
         fake_llm = _FakeLLM()
         with patch.dict(
-            "models.MODEL_CONFIGS",
+            "core.models.MODEL_CONFIGS",
             {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
             clear=False,
         ):
-            with patch("models.get_llm", return_value=fake_llm) as mocked_get_llm:
+            with patch("core.models.get_llm", return_value=fake_llm) as mocked_get_llm:
                 adapter = get_browser_use_llm("search")
                 result = self._run_async(adapter.ainvoke([BrowserSystemMessage(content="hello")], session_id="abc"))
 
@@ -336,11 +336,11 @@ class ModelDefaultsTests(unittest.TestCase):
 
         fake_llm = _FakeLLM()
         with patch.dict(
-            "models.MODEL_CONFIGS",
+            "core.models.MODEL_CONFIGS",
             {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
             clear=False,
         ):
-            with patch("models.get_llm", return_value=fake_llm):
+            with patch("core.models.get_llm", return_value=fake_llm):
                 adapter = get_browser_use_llm("search")
                 result = self._run_async(
                     adapter.ainvoke([BrowserSystemMessage(content="hello")], output_format=_StructuredOut)

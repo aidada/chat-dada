@@ -13,10 +13,10 @@ from typing import Any, Awaitable
 import asyncpg
 import redis.asyncio as aioredis
 
-from logger import monitor, new_trace_id
-from models import set_thinking_level
-from task_dispatcher import RouteDecision, dispatch_task
-from task_interaction import reset_task_interaction_handler, set_task_interaction_handler
+from core.logger import monitor, new_trace_id
+from core.models import set_thinking_level
+from runtime.task_dispatcher import RouteDecision, dispatch_task
+from runtime.task_interaction import reset_task_interaction_handler, set_task_interaction_handler
 
 log = logging.getLogger("chatdada.tasks")
 
@@ -120,6 +120,7 @@ class TaskRunStore:
         mode: str,
         thinking_level: str,
         request_payload: dict[str, Any],
+        conversation_id: str = "",
     ) -> dict[str, Any]:
         task_id = f"task_{uuid.uuid4().hex[:12]}"
         now = datetime.now(UTC)
@@ -128,8 +129,8 @@ class TaskRunStore:
             """
             INSERT INTO task_runs (
                 task_id, user_id, status, task_text, mode, thinking_level,
-                request_payload, created_at, updated_at
-            ) VALUES ($1, $2, 'queued', $3, $4, $5, $6::jsonb, $7, $8)
+                request_payload, conversation_id, created_at, updated_at
+            ) VALUES ($1, $2, 'queued', $3, $4, $5, $6::jsonb, $7, $8, $9)
             """,
             task_id,
             user_id,
@@ -137,9 +138,18 @@ class TaskRunStore:
             mode,
             thinking_level,
             json.dumps(request_payload, ensure_ascii=False),
+            conversation_id or None,
             now,
             now,
         )
+
+        if conversation_id:
+            await self.pool.execute(
+                "UPDATE conversations SET updated_at = $1 WHERE id = $2",
+                now,
+                conversation_id,
+            )
+
         return await self.get_task(task_id) or {
             "task_id": task_id,
             "status": "queued",
@@ -314,6 +324,7 @@ class TaskRunStore:
                     pending_question,
                     result_text,
                     error_text,
+                    conversation_id,
                     created_at,
                     started_at,
                     finished_at,
@@ -387,6 +398,133 @@ class TaskRunStore:
             events.append(event)
         return events
 
+    # ── Conversation CRUD ──
+
+    async def create_conversation(
+        self, *, conversation_id: str, user_id: str, title: str = "新对话"
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        await self.pool.execute(
+            """
+            INSERT INTO conversations (id, user_id, title, pinned, created_at, updated_at)
+            VALUES ($1, $2, $3, FALSE, $4, $5)
+            """,
+            conversation_id,
+            user_id,
+            title,
+            now,
+            now,
+        )
+        return {
+            "id": conversation_id,
+            "user_id": user_id,
+            "title": title,
+            "pinned": False,
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+
+    async def list_conversations(self, user_id: str) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT
+                c.id,
+                c.title,
+                c.pinned,
+                c.created_at,
+                c.updated_at,
+                (
+                    SELECT t.task_id FROM task_runs t
+                    WHERE t.conversation_id = c.id
+                    ORDER BY t.created_at DESC LIMIT 1
+                ) AS last_task_id,
+                (
+                    SELECT LEFT(t.task_text, 60) FROM task_runs t
+                    WHERE t.conversation_id = c.id
+                    ORDER BY t.created_at DESC LIMIT 1
+                ) AS preview
+            FROM conversations c
+            WHERE c.user_id = $1
+            ORDER BY c.pinned DESC, c.updated_at DESC
+            """,
+            user_id,
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            result.append({
+                "id": row["id"],
+                "title": row["title"],
+                "pinned": row["pinned"],
+                "created_at": row["created_at"].isoformat(),
+                "updated_at": row["updated_at"].isoformat(),
+                "last_task_id": row["last_task_id"] or "",
+                "preview": row["preview"] or "",
+            })
+        return result
+
+    async def update_conversation(
+        self, conversation_id: str, **fields: Any
+    ) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            "SELECT id, user_id, title, pinned, created_at, updated_at FROM conversations WHERE id = $1",
+            conversation_id,
+        )
+        if row is None:
+            return None
+
+        title = fields.get("title", row["title"])
+        pinned = fields.get("pinned", row["pinned"])
+        now = datetime.now(UTC)
+
+        await self.pool.execute(
+            """
+            UPDATE conversations
+            SET title = $1, pinned = $2, updated_at = $3
+            WHERE id = $4
+            """,
+            title,
+            pinned,
+            now,
+            conversation_id,
+        )
+        return {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "title": title,
+            "pinned": pinned,
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": now.isoformat(),
+        }
+
+    async def delete_conversation(self, conversation_id: str) -> bool:
+        result = await self.pool.execute(
+            "DELETE FROM conversations WHERE id = $1", conversation_id
+        )
+        return result == "DELETE 1"
+
+    async def get_conversation_entries(self, conversation_id: str) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT e.task_id, e.seq, e.event_type, e.payload, e.created_at
+            FROM task_events e
+            JOIN task_runs t ON t.task_id = e.task_id
+            WHERE t.conversation_id = $1
+            ORDER BY e.created_at ASC, e.seq ASC
+            """,
+            conversation_id,
+        )
+        entries: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(row["payload"])
+            entry: dict[str, Any] = {
+                "id": f"{row['task_id']}_{row['seq']}",
+                "type": row["event_type"],
+                "created_at": row["created_at"].isoformat(),
+            }
+            entry.update(payload)
+            entries.append(entry)
+        return entries
+
 
 class TaskService:
     def __init__(
@@ -423,6 +561,7 @@ class TaskService:
         mode: str,
         thinking_level: str,
         file_paths: list[str],
+        conversation_id: str = "",
     ) -> dict[str, Any]:
         request_payload = {
             "task": task_text,
@@ -437,6 +576,7 @@ class TaskService:
             mode=mode,
             thinking_level=thinking_level,
             request_payload=request_payload,
+            conversation_id=conversation_id,
         )
         background = asyncio.create_task(
             self._execute_task(snapshot["task_id"]),

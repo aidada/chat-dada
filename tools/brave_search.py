@@ -5,7 +5,7 @@ Useful for broad web discovery and finding candidate pages.
 import json
 import os
 
-from logger import log_async
+from core.logger import log_async
 
 try:
     from langchain_community.tools.brave_search.tool import BraveSearch

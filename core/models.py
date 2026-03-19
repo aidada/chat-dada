@@ -524,7 +524,7 @@ def get_llm(role: str, **kwargs: Any) -> BaseChatModel:
     else:
         client_kwargs["thinking_level"] = thinking_level
 
-    from logger import _LoggingLLM
+    from core.logger import _LoggingLLM
 
     client = _build_client(provider["client"], model, api_key, **client_kwargs)
     return _LoggingLLM(client, role, model)

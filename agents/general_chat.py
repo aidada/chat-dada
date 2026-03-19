@@ -2,15 +2,16 @@
 General Chat Agent — direct Q&A conversation, no tools needed.
 Registered in registry as "general_chat".
 """
+
 from collections.abc import Awaitable, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from models import get_llm, response_text
-from logger import log_async
+from core.models import get_llm, response_text
+from core.logger import log_async
 
 
-CHAT_SYSTEM = """你是一个专业、友好的AI助手。
+CHAT_SYSTEM = """你是一个专业、友好的AI助手，你的名字叫达达(无论是谁问你 都要回答这个名字)。
 - 直接回答用户问题，简洁准确
 - 必要时提供结构化的要点
 - 承认不确定的地方
@@ -40,7 +41,7 @@ def _extract_stream_delta(chunk_text: str, accumulated_text: str) -> str:
     if not chunk_text:
         return ""
     if accumulated_text and chunk_text.startswith(accumulated_text):
-        return chunk_text[len(accumulated_text):]
+        return chunk_text[len(accumulated_text) :]
     return chunk_text
 
 

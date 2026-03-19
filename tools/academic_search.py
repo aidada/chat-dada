@@ -7,7 +7,7 @@ import urllib.parse
 
 import httpx
 
-from logger import log_async
+from core.logger import log_async
 
 
 @log_async("tool", "academic_search")

@@ -219,7 +219,7 @@ class ResearchContext:
 
     async def _llm_compact_entry(self, entry: FindingEntry, query: str) -> None:
         """Compress a high-value entry using LLM summarization."""
-        from models import get_llm, response_text
+        from core.models import get_llm, response_text
         from langchain_core.messages import SystemMessage, HumanMessage
 
         llm = get_llm("orchestrator")

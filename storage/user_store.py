@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from models import get_llm, response_text
+from core.models import get_llm, response_text
 
 
 PROFILE_SECTIONS = (
