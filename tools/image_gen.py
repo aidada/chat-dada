@@ -15,6 +15,8 @@ from core.logger import log_async
 
 log = logging.getLogger("chatdada.tools")
 
+_OUTPUTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "outputs")
+
 
 # Nano Banana2 API configuration
 IMAGE_API_URL = os.getenv("IMAGE_GEN_API_URL", "https://co.yes.vg/v1/chat/completions")
@@ -46,7 +48,7 @@ async def run(input_data) -> dict:
                       "Set IMAGE_GEN_API_KEY or OPENAI_API_KEY environment variable.",
         }
 
-    os.makedirs("outputs", exist_ok=True)
+    os.makedirs(_OUTPUTS_DIR, exist_ok=True)
     generated_files = []
     errors = []
 
@@ -148,7 +150,7 @@ def _save_inline(inline: dict) -> list[str]:
     mime = inline.get("mimeType", "image/png")
     ext = mime.split("/")[-1] if "/" in mime else "png"
     file_id = uuid.uuid4().hex[:8]
-    filepath = f"outputs/image_{file_id}.{ext}"
+    filepath = os.path.join(_OUTPUTS_DIR, f"image_{file_id}.{ext}")
     with open(filepath, "wb") as f:
         f.write(base64.b64decode(inline["data"]))
     return [filepath]
@@ -181,7 +183,7 @@ async def _download_image_urls(client: httpx.AsyncClient, text: str) -> list[str
             elif "webp" in ct:
                 ext = "webp"
             file_id = uuid.uuid4().hex[:8]
-            filepath = f"outputs/image_{file_id}.{ext}"
+            filepath = os.path.join(_OUTPUTS_DIR, f"image_{file_id}.{ext}")
             with open(filepath, "wb") as f:
                 f.write(resp.content)
             files.append(filepath)

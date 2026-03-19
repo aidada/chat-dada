@@ -817,6 +817,17 @@
     margin-left:2px; font-weight:700;
   }
   .file-tag .remove:hover{ color:#d44; }
+  .file-tag-thumb{
+    width:20px; height:20px; border-radius:4px; object-fit:cover; flex-shrink:0;
+  }
+  .attachment-gallery{
+    display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;
+  }
+  .attachment-image{
+    max-width:280px; max-height:200px;
+    border-radius:10px; border:1px solid rgba(246,169,122,.2);
+    object-fit:contain; cursor:pointer;
+  }
 
   /* ━━━ 底部 A ━━━ */
   .stage{
@@ -1518,6 +1529,7 @@ function normalizeConversationEntry(entry) {
     taskId: entry?.taskId || entry?.task_id || '',
     name: entry?.name ? String(entry.name) : '',
     url: entry?.url ? String(entry.url) : '',
+    attachments: Array.isArray(entry?.attachments) ? entry.attachments : [],
     createdAt: entry?.createdAt || entry?.created_at || nowIso(),
   };
 }
@@ -2203,7 +2215,31 @@ function renderConversationEntry(entry, options = {}) {
   if (entry.type === 'result' && entry.taskId && entry.taskId === activeTaskId && running) {
     element.classList.add('streaming');
   }
+  appendAttachmentGallery(element, entry.attachments);
   return element;
+}
+
+function appendAttachmentGallery(entryEl, attachments) {
+  if (!Array.isArray(attachments) || !attachments.length) return;
+  const images = attachments.filter(a => a.is_image && a.url);
+  if (!images.length) return;
+  const bubble = entryEl.querySelector('.ebubble');
+  if (!bubble) return;
+  // Remove existing gallery if re-rendering
+  const existing = bubble.querySelector('.attachment-gallery');
+  if (existing) existing.remove();
+  const gallery = document.createElement('div');
+  gallery.className = 'attachment-gallery';
+  for (const img of images) {
+    const el = document.createElement('img');
+    el.className = 'attachment-image';
+    el.src = apiUrl(img.url);
+    el.alt = img.name || '';
+    el.title = img.name || '';
+    el.onclick = () => window.open(el.src, '_blank');
+    gallery.appendChild(el);
+  }
+  bubble.appendChild(gallery);
 }
 
 function upsertRenderedConversationEntry(entry, options = {}) {
@@ -2235,6 +2271,7 @@ function upsertRenderedConversationEntry(entry, options = {}) {
   } else {
     setBubbleContent(bubble, entry.content || '', { render: entry.type === 'result' ? 'markdown' : undefined });
   }
+  appendAttachmentGallery(existing, entry.attachments);
   return existing;
 }
 
@@ -2589,9 +2626,16 @@ function renderEvent(event, { fromCache = false } = {}) {
     }
   }
 
-  // Terminal events: remove progress card
-  if (!fromCache && (event.type === 'result_delta' || event.type === 'result' || event.type === 'error')) {
+  // Terminal events: remove progress card (fade out on first streaming token, instant on final)
+  if (!fromCache && (event.type === 'result' || event.type === 'error')) {
     removeProgressCard(event.task_id);
+  }
+  if (!fromCache && event.type === 'result_delta') {
+    const card = document.querySelector('.agent-progress[data-task-id="' + event.task_id + '"]');
+    if (card && !card.classList.contains('fade-out')) {
+      card.classList.add('fade-out');
+      setTimeout(() => card.remove(), 1500);
+    }
   }
 
   if (event.type === 'result_delta') {
@@ -2789,6 +2833,7 @@ function openEventSource(taskId, afterSeq = 0) {
 
 async function uploadPendingFiles() {
   const filePaths = [];
+  const fileAttachments = [];
   for (const file of pendingFiles) {
     const form = new FormData();
     form.append('file', file);
@@ -2802,8 +2847,11 @@ async function uploadPendingFiles() {
       throw new Error(`文件上传响应为空: ${file.name}`);
     }
     filePaths.push(data.path);
+    if (data.url) {
+      fileAttachments.push({ name: data.name || file.name, url: data.url, is_image: !!data.is_image });
+    }
   }
-  return filePaths;
+  return { filePaths, fileAttachments };
 }
 
 function prepareNewTask(taskId) {
@@ -2872,6 +2920,7 @@ async function sendTask() {
       id: makeId('user'),
       type: 'user',
       content: task,
+      attachments: [],
       createdAt: nowIso(),
     });
     upsertRenderedConversationEntry(userEntry);
@@ -2881,7 +2930,14 @@ async function sendTask() {
     setDot('off');
 
     const conversation = await ensureActiveConversation();
-    const filePaths = await uploadPendingFiles();
+    const { filePaths, fileAttachments } = await uploadPendingFiles();
+
+    // Update user entry with uploaded attachment metadata and re-render
+    if (fileAttachments.length) {
+      userEntry.attachments = fileAttachments;
+      upsertRenderedConversationEntry(userEntry);
+    }
+
     const res = await fetch(apiUrl('/tasks'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3104,11 +3160,34 @@ document.getElementById('file-input').addEventListener('change', event => {
   renderFileTags();
 });
 
+document.getElementById('task-input').addEventListener('paste', event => {
+  const items = event.clipboardData?.items;
+  if (!items) return;
+  let handled = false;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      const ext = item.type.split('/')[1] || 'png';
+      const file = item.getAsFile();
+      if (file) {
+        const named = new File([file], `pasted_image_${Date.now()}.${ext}`, { type: file.type });
+        pendingFiles.push(named);
+        handled = true;
+      }
+    }
+  }
+  if (handled) {
+    event.preventDefault();
+    renderFileTags();
+  }
+});
+
 function renderFileTags() {
   const container = document.getElementById('file-tags');
-  container.innerHTML = pendingFiles.map((file, index) =>
-    `<span class="file-tag">${esc(file.name)}<span class="remove" onclick="removeFile(${index})">×</span></span>`
-  ).join('');
+  container.innerHTML = pendingFiles.map((file, index) => {
+    const isImage = file.type && file.type.startsWith('image/');
+    const thumb = isImage ? `<img class="file-tag-thumb" src="${URL.createObjectURL(file)}">` : '';
+    return `<span class="file-tag">${thumb}${esc(file.name)}<span class="remove" onclick="removeFile(${index})">×</span></span>`;
+  }).join('');
 }
 
 function removeFile(index) {
@@ -3202,6 +3281,9 @@ async function restoreActiveTask() {
     }
 
     if (serverSeq > currentSeq || liveTask) {
+      if (['queued', 'running'].includes(snapshot.status)) {
+        createProgressCard(activeTaskId);
+      }
       openEventSource(activeTaskId, currentSeq);
     } else {
       terminalEventSeen = taskIsTerminal(snapshot.status);

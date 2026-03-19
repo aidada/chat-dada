@@ -29,8 +29,11 @@ load_dotenv()
 setup_logging()
 log = logging.getLogger("chatdada.main")
 
-UPLOAD_DIR = Path("uploads")
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+OUTPUTS_DIR = BASE_DIR / "outputs"
+OUTPUTS_DIR.mkdir(exist_ok=True)
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://chatdada:chatdada@localhost:5432/chatdada"
@@ -209,6 +212,9 @@ async def _event_stream(request: Request, task_id: str, after_seq: int) -> Strea
     )
 
 
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     """接收上传文件，保存到 uploads/ 目录，返回服务端路径"""
@@ -216,7 +222,13 @@ async def upload_file(file: UploadFile = File(...)):
     dest = UPLOAD_DIR / safe_name
     with open(dest, "wb") as handle:
         shutil.copyfileobj(file.file, handle)
-    return {"path": str(dest.resolve()), "name": file.filename}
+    is_image = Path(file.filename).suffix.lower() in IMAGE_EXTENSIONS
+    return {
+        "path": str(dest.resolve()),
+        "name": file.filename,
+        "url": f"/uploads/{safe_name}",
+        "is_image": is_image,
+    }
 
 
 @app.get("/")
@@ -230,10 +242,20 @@ async def index():
 async def download_file(filename: str):
     """下载生成的文件（PPT 等）"""
     safe_name = Path(filename).name
-    path = Path("outputs") / safe_name
+    path = OUTPUTS_DIR / safe_name
     if not path.exists():
-        return {"error": "文件不存在"}
+        raise HTTPException(status_code=404, detail=f"文件不存在: {safe_name}")
     return FileResponse(path, filename=safe_name)
+
+
+@app.get("/uploads/{filename}")
+async def serve_upload(filename: str):
+    """提供上传文件的静态访问（图片展示等）"""
+    safe_name = Path(filename).name
+    path = UPLOAD_DIR / safe_name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return FileResponse(path)
 
 
 @app.post("/tasks")
@@ -455,4 +477,5 @@ async def change_log_level(req: LogLevelRequest):
     return {"level": req.level}
 
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+app.mount("/download", StaticFiles(directory=str(OUTPUTS_DIR)), name="download-files")

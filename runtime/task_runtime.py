@@ -33,6 +33,24 @@ def compose_task_text(task: str, file_paths: list[str]) -> str:
     return f"{task}\n\n[用户上传了以下文件，请在任务中使用这些文件]:\n{file_list}"
 
 
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+
+def _build_attachments(request_payload_raw) -> list[dict[str, Any]]:
+    """Extract attachment metadata from a task_runs.request_payload value."""
+    try:
+        payload = json.loads(request_payload_raw) if isinstance(request_payload_raw, str) else (request_payload_raw or {})
+    except (json.JSONDecodeError, TypeError):
+        return []
+    file_paths = payload.get("file_paths") or []
+    attachments = []
+    for fp in file_paths:
+        name = Path(fp).name
+        is_image = Path(fp).suffix.lower() in _IMAGE_EXTENSIONS
+        attachments.append({"name": name, "url": f"/uploads/{name}", "is_image": is_image})
+    return attachments
+
+
 def task_is_terminal(status: str) -> bool:
     return status in TERMINAL_STATUSES
 
@@ -504,7 +522,18 @@ class TaskRunStore:
         return result == "DELETE 1"
 
     async def get_conversation_entries(self, conversation_id: str) -> list[dict[str, Any]]:
-        rows = await self.pool.fetch(
+        # Fetch user queries from task_runs (not stored in task_events)
+        task_rows = await self.pool.fetch(
+            """
+            SELECT task_id, task_text, request_payload, created_at
+            FROM task_runs
+            WHERE conversation_id = $1
+            ORDER BY created_at ASC
+            """,
+            conversation_id,
+        )
+        # Fetch all events
+        event_rows = await self.pool.fetch(
             """
             SELECT e.task_id, e.seq, e.event_type, e.payload, e.created_at
             FROM task_events e
@@ -514,16 +543,34 @@ class TaskRunStore:
             """,
             conversation_id,
         )
+
+        # Group events by task_id
+        events_by_task: dict[str, list] = {}
+        for row in event_rows:
+            events_by_task.setdefault(row["task_id"], []).append(row)
+
         entries: list[dict[str, Any]] = []
-        for row in rows:
-            payload = json.loads(row["payload"])
-            entry: dict[str, Any] = {
-                "id": f"{row['task_id']}_{row['seq']}",
-                "type": row["event_type"],
-                "created_at": row["created_at"].isoformat(),
-            }
-            entry.update(payload)
-            entries.append(entry)
+        for task_row in task_rows:
+            tid = task_row["task_id"]
+            # Insert user query entry before this task's events
+            attachments = _build_attachments(task_row["request_payload"])
+            entries.append({
+                "id": f"{tid}_user",
+                "type": "user",
+                "content": task_row["task_text"],
+                "attachments": attachments,
+                "created_at": task_row["created_at"].isoformat(),
+            })
+            # Append all events belonging to this task
+            for row in events_by_task.get(tid, []):
+                payload = json.loads(row["payload"])
+                entry: dict[str, Any] = {
+                    "id": f"{row['task_id']}_{row['seq']}",
+                    "type": row["event_type"],
+                    "created_at": row["created_at"].isoformat(),
+                }
+                entry.update(payload)
+                entries.append(entry)
         return entries
 
     async def get_conversation_summary(self, conversation_id: str) -> tuple[str, int]:

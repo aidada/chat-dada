@@ -9,6 +9,7 @@ Three-stage progressive strategy based on conversation length:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
@@ -144,22 +145,23 @@ async def _generate_summary(existing_summary: str, new_entries_text: str) -> str
 
 
 async def _embed_text(text: str) -> list[float] | None:
-    """Generate embedding using OpenAI text-embedding-3-small."""
+    """Generate embedding using Gemini Embedding 2 (1536 dimensions)."""
     try:
-        import openai
+        from google import genai
 
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        base_url = os.getenv("OPENAI_BASE_URL", None)
+        api_key = os.getenv("GEMINI_API_KEY", "")
         if not api_key:
-            log.warning("OPENAI_API_KEY not set, skipping embedding")
+            log.warning("GEMINI_API_KEY not set, skipping embedding")
             return None
 
-        client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
-        response = await client.embeddings.create(
-            input=text[:8000],  # limit input length
-            model="text-embedding-3-small",
+        client = genai.Client(api_key=api_key)
+        result = await asyncio.to_thread(
+            client.models.embed_content,
+            model="gemini-embedding-2-preview",
+            contents=text[:8000],
+            config={"output_dimensionality": 1536},
         )
-        return response.data[0].embedding
+        return list(result.embeddings[0].values)
     except Exception as exc:
         log.warning("Embedding generation failed: %s", exc)
         return None

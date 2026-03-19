@@ -4,10 +4,14 @@ Accepts an image path, sends it to a vision-capable LLM, and returns a structure
 """
 import os
 import base64
+import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from core.models import get_llm, response_text
 from core.logger import log_async
+from core import r2_storage
+
+log = logging.getLogger("chatdada.image_to_diagram")
 
 
 DIAGRAM_SYSTEM = """你是一个专业的图表分析师。分析给定的图片，将其转换为结构化的图表 JSON 描述。
@@ -65,15 +69,35 @@ async def run(input_data) -> dict:
     if not os.path.exists(image_path):
         return {"status": "error", "result": f"Image file not found: {image_path}"}
 
-    try:
-        b64_data, media_type = _encode_image(image_path)
-    except Exception as e:
-        return {"status": "error", "result": f"Failed to read image: {e}"}
+    # Try R2 presigned URL first, fall back to base64
+    image_url = None
+    if r2_storage.is_available():
+        try:
+            image_url = r2_storage.upload_and_presign(image_path)
+        except Exception:
+            log.warning("R2 upload failed, falling back to base64", exc_info=True)
 
-    user_content = [
-        {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64_data}"}},
-        {"type": "text", "text": extra_prompt or "请分析这张图片并转换为结构化图表 JSON。"},
-    ]
+    if image_url:
+        # Use "media" + "file_uri" so langchain-google-genai sends the URL
+        # directly as Gemini fileData instead of downloading → inlineData base64.
+        ext = os.path.splitext(image_path)[1].lower()
+        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
+        mime_type = mime_map.get(ext, "image/png")
+        user_content = [
+            {"type": "media", "file_uri": image_url, "mime_type": mime_type},
+            {"type": "text", "text": extra_prompt or "请分析这张图片并转换为结构化图表 JSON。"},
+        ]
+    else:
+        try:
+            b64_data, media_type = _encode_image(image_path)
+        except Exception as e:
+            return {"status": "error", "result": f"Failed to read image: {e}"}
+
+        user_content = [
+            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64_data}"}},
+            {"type": "text", "text": extra_prompt or "请分析这张图片并转换为结构化图表 JSON。"},
+        ]
 
     llm = get_llm("doc_analyst")
     messages = [
