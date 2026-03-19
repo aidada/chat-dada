@@ -100,8 +100,10 @@ async def classify_and_plan(task: str, memory_context: str = "", conversation_co
         context = {
             "search_query": params.get("search_query", task),
             "file_paths": params.get("file_paths", []),
+            "image_path": (params.get("file_paths") or [""])[0],
             "title": params.get("title", task[:50]),
             "author": params.get("author", ""),
+            "prompt": params.get("prompt", task),
             "task": task,
             "storyline": "",
         }

@@ -5,10 +5,13 @@ Saves generated images to outputs/ directory.
 import os
 import uuid
 import base64
+import logging
 
 import httpx
 
 from core.logger import log_async
+
+log = logging.getLogger("chatdada.tools")
 
 
 # Nano Banana2 API configuration
@@ -62,32 +65,29 @@ async def run(input_data) -> dict:
                     },
                     json={
                         "model": IMAGE_MODEL,
-                        "prompt": prompt,
-                        "n": n,
-                        "size": size,
-                        "response_format": "b64_json",
+                        "messages": [
+                            {"role": "user", "content": prompt},
+                        ],
                     },
                 )
                 resp.raise_for_status()
                 result = resp.json()
+                log.info(f"image_gen API response keys: {list(result.keys())}, "
+                         f"preview: {str(result)[:500]}")
 
-                for i, img_data in enumerate(result.get("data", [])):
-                    file_id = uuid.uuid4().hex[:8]
-                    filename = f"image_{file_id}.png"
-                    filepath = f"outputs/{filename}"
-
-                    if "b64_json" in img_data:
-                        raw_bytes = base64.b64decode(img_data["b64_json"])
-                        with open(filepath, "wb") as f:
-                            f.write(raw_bytes)
-                        generated_files.append(filepath)
-                    elif "url" in img_data:
-                        # Download from URL
-                        img_resp = await client.get(img_data["url"])
-                        img_resp.raise_for_status()
-                        with open(filepath, "wb") as f:
-                            f.write(img_resp.content)
-                        generated_files.append(filepath)
+                # Parse Gemini-style response:
+                # candidates[].content.parts[].inlineData.{mimeType, data}
+                for candidate in result.get("candidates", []):
+                    for part in candidate.get("content", {}).get("parts", []):
+                        inline = part.get("inlineData")
+                        if inline and inline.get("data"):
+                            mime = inline.get("mimeType", "image/png")
+                            ext = mime.split("/")[-1] if "/" in mime else "png"
+                            file_id = uuid.uuid4().hex[:8]
+                            filepath = f"outputs/image_{file_id}.{ext}"
+                            with open(filepath, "wb") as f:
+                                f.write(base64.b64decode(inline["data"]))
+                            generated_files.append(filepath)
 
             except httpx.HTTPStatusError as e:
                 errors.append(f"API error for '{prompt[:50]}': {e.response.status_code} {e.response.text[:200]}")
