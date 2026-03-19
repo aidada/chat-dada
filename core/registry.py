@@ -13,6 +13,47 @@ from langchain_core.tools import StructuredTool
 # Each entry: {fn_path, type, description, input_schema, output_schema, available_to}
 REGISTRY: dict[str, dict[str, Any]] = {}
 
+# Display names for user-facing progress messages
+DISPLAY_NAMES: dict[str, str] = {
+    # Intents
+    "ppt_report": "PPT 报告",
+    "research_report": "研究报告",
+    "data_analysis": "数据分析",
+    "quick_question": "快速问答",
+    "translate_doc": "文档翻译",
+    "image_to_visio": "图片转流程图",
+    "image_generation": "图片生成",
+    "free_form": "自由任务",
+    # Agents
+    "search": "搜索",
+    "deep_research": "深度研究",
+    "doc_analyst": "文档分析",
+    "data_analyst": "数据分析",
+    "writer": "内容撰写",
+    "general_chat": "对话",
+    # Tools
+    "web_search": "网页搜索",
+    "brave_search": "网页搜索",
+    "exa_search": "深度搜索",
+    "academic_search": "学术搜索",
+    "translator": "翻译",
+    "summarizer": "摘要",
+    "code_executor": "代码执行",
+    "image_gen": "图片生成",
+    "image_to_diagram": "图片转结构图",
+    # Renderers
+    "ppt_render": "PPT 渲染",
+    "word_render": "Word 导出",
+    "markdown_render": "Markdown 导出",
+    "excel_render": "Excel 导出",
+    "visio_render": "Visio 导出",
+}
+
+
+def display_name(name: str) -> str:
+    """Return user-facing Chinese display name, falling back to the raw name."""
+    return DISPLAY_NAMES.get(name, name)
+
 
 def register(
     name: str,

@@ -32,6 +32,20 @@ AGENT_KEYWORDS = (
     "导出",
     "ppt",
     "幻灯片",
+    "画",
+    "绘制",
+    "生成图",
+    "生图",
+    "头像",
+    "插画",
+    "图片",
+    "壁纸",
+    "logo",
+    "海报",
+    "draw",
+    "generate image",
+    "image",
+    "illustration",
     "research",
     "paper",
     "papers",
@@ -128,7 +142,7 @@ async def run_general_chat_task(
     user_id: str = "anonymous",
     conversation_context: str = "",
 ) -> str:
-    await on_step("💬 General Chat: 直接回答用户问题...")
+    await on_step("💬 正在回答...")
 
     async def on_chunk(content: str) -> None:
         if not content:

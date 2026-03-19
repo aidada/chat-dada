@@ -11,9 +11,18 @@ from typing import Any, Callable, Awaitable
 
 from core.content_utils import extract_result_text
 from core.logger import log_async
-from core.registry import resolve_fn
+from core.registry import display_name, resolve_fn
 
 log = logging.getLogger("chatdada.orchestrator")
+
+
+def _strip_code_fences(text: str) -> str:
+    """Strip markdown code fences (```json ... ```) from LLM output."""
+    if "```json" in text:
+        text = text.split("```json", 1)[1].split("```", 1)[0]
+    elif "```" in text:
+        text = text.split("```", 1)[1].split("```", 1)[0]
+    return text.strip()
 
 
 @log_async("orchestrator", "execute_plan")
@@ -55,8 +64,8 @@ async def execute_plan(
 
         # Execute ready steps concurrently
         if on_step:
-            names = ", ".join(s["name"] for s in ready)
-            await on_step(f"Executing: {names}")
+            names = ", ".join(display_name(s["name"]) for s in ready)
+            await on_step(f"执行: {names}")
 
         tasks = [_run_step(step, context, step_map, on_step) for step in ready]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -65,7 +74,7 @@ async def execute_plan(
             sid = step["id"]
             if isinstance(result, Exception):
                 if on_step:
-                    await on_step(f"⚠️ Step {step['name']} failed: {result}")
+                    await on_step(f"⚠️ {display_name(step['name'])} 失败: {result}")
                 context[f"step_{sid}_error"] = str(result)
             else:
                 context[f"step_{sid}"] = result
@@ -92,7 +101,7 @@ async def _run_step(
 
     if on_step:
         emoji = {"agent": "🤖", "tool": "🔧", "renderer": "📄"}.get(cap_type, "▶️")
-        await on_step(f"{emoji} {name}: starting...")
+        await on_step(f"{emoji} {display_name(name)}: 处理中...")
 
     fn = resolve_fn(name)
     result = await fn(input_data) if asyncio.iscoroutinefunction(fn) else fn(input_data)
@@ -100,7 +109,7 @@ async def _run_step(
 
     if on_step:
         preview = str(result)[:100]
-        await on_step(f"✅ {name}: done ({preview}...)")
+        await on_step(f"✅ {display_name(name)}: 完成")
 
     return result
 
@@ -168,6 +177,8 @@ def _build_renderer_input(
         return _build_text_render_input(step, context, step_map, extension="docx")
     if step["name"] == "markdown_render":
         return _build_text_render_input(step, context, step_map, extension="md")
+    if step["name"] == "visio_render":
+        return _build_visio_render_input(step, context, step_map)
 
     input_key = step.get("input_key", "")
     if not input_key:
@@ -221,6 +232,38 @@ def _build_text_render_input(
     return {
         "title": title,
         "content": content,
+        "output_path": output_path,
+    }
+
+
+def _build_visio_render_input(
+    step: dict[str, Any],
+    context: dict[str, Any],
+    step_map: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """Build input for visio_render from upstream image_to_diagram output."""
+    diagram = None
+    for dep_id in step.get("depends_on", []):
+        dep_result = context.get(f"step_{dep_id}")
+        if not dep_result:
+            continue
+        raw = dep_result.get("result") if isinstance(dep_result, dict) else dep_result
+        if isinstance(raw, str):
+            try:
+                diagram = json.loads(_strip_code_fences(raw))
+            except (json.JSONDecodeError, TypeError):
+                diagram = {"raw": raw}
+        elif isinstance(raw, dict):
+            diagram = raw
+
+    title = _coerce_text(context.get("title") or context.get("task") or "diagram")
+    safe_title = "".join(ch for ch in title if ch.isalnum() or ch in " _-").strip()
+    stem = safe_title[:40] or "diagram"
+    output_path = f"outputs/{stem}_{uuid.uuid4().hex[:8]}"
+
+    return {
+        "diagram": diagram or {},
+        "title": title,
         "output_path": output_path,
     }
 

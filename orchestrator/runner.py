@@ -18,6 +18,7 @@ from core.content_utils import extract_result_text
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.logger import log_async
+from core.registry import display_name
 from storage.user_store_v2 import MemoryStoreV2
 from core.models import get_llm, response_text
 from orchestrator.planner import classify_and_plan
@@ -55,7 +56,7 @@ async def run_orchestrator(
     Main entry point — replaces agents.orchestrator.run_agent().
     Same callback interface for backward compatibility with main.py.
     """
-    await on_step("🧠 Orchestrator: 分析任务...")
+    await on_step("🧠 分析任务...")
 
     memory_store = MemoryStoreV2()
     memory_context = ""
@@ -74,7 +75,7 @@ async def run_orchestrator(
     # Step 1: Classify and plan
     plan = await classify_and_plan(task, memory_context=memory_context, conversation_context=conversation_context)
     intent = plan["intent"]
-    await on_step(f"📋 Intent: {intent}")
+    await on_step(f"📋 意图识别: {display_name(intent)}")
 
     # Step 2: Route to appropriate handler
     if intent == "ppt_report":
@@ -107,7 +108,7 @@ async def _handle_ppt_report(
     from ppt_engine.renderer import render_pptx
 
     # Generate storyline
-    await on_step("📝 Generating storyline...")
+    await on_step("📝 生成大纲...")
     llm = get_llm("orchestrator")
     messages = [
         SystemMessage(content=STORYLINE_SYSTEM),
@@ -139,12 +140,12 @@ async def _handle_ppt_report(
     # Parallel: Search + Doc
     tasks = []
     if search_queries:
-        await on_step(f"🔍 Search Agent: searching {len(search_queries)} queries...")
+        await on_step(f"🔍 搜索: 正在检索 {len(search_queries)} 个关键词...")
         combined = "\n".join(f"- {q}" for q in search_queries)
         search_input = {"query": combined, "memory_context": memory_context} if memory_context else combined
         tasks.append(("search", run_search(search_input)))
     if file_paths:
-        await on_step(f"📄 Doc Agent: analyzing {len(file_paths)} files...")
+        await on_step(f"📄 文档分析: 正在处理 {len(file_paths)} 个文件...")
         tasks.append(("doc", run_doc_analysis(file_paths)))
 
     search_findings = ""
@@ -158,25 +159,25 @@ async def _handle_ppt_report(
                 continue
             if label == "search":
                 search_findings = result
-                await on_step(f"🔍 Search done: {len(result)} chars")
+                await on_step(f"🔍 搜索完成: {len(result)} 字")
             elif label == "doc":
                 doc_analysis = result
-                await on_step(f"📄 Doc done: {len(result)} chars")
+                await on_step(f"📄 文档分析完成: {len(result)} 字")
 
     # Writer
-    await on_step("✍️ Writer Agent: generating slides...")
+    await on_step("✍️ 正在撰写幻灯片内容...")
     try:
         deck = await run_writer(storyline, search_findings, doc_analysis, author)
         deck.meta.title = title
         if author:
             deck.meta.author = author
-        await on_step(f"✍️ Writer done: {len(deck.slides)} slides")
+        await on_step(f"✍️ 撰写完成: {len(deck.slides)} 页")
     except Exception as e:
         await on_step(f"⚠️ Writer failed: {e}")
         return f"PPT 内容生成失败: {e}"
 
     # Render
-    await on_step("📊 Rendering .pptx...")
+    await on_step("📊 正在渲染 PPT...")
     file_id = uuid.uuid4().hex[:8]
     safe_title = "".join(c for c in title if c.isalnum() or c in " _-").strip()[:30] or "report"
     filename = f"{safe_title}_{file_id}.pptx"
@@ -184,7 +185,7 @@ async def _handle_ppt_report(
 
     try:
         render_pptx(deck, output_path)
-        await on_step(f"✅ PPT generated: {filename}")
+        await on_step(f"✅ PPT 已生成: {filename}")
         await on_step(json.dumps({"type": "file", "url": f"/download/{filename}", "name": filename}))
     except Exception as e:
         await on_step(f"⚠️ Render failed: {e}")
@@ -204,7 +205,7 @@ async def _handle_quick_question(
     """Handle direct Q&A — single LLM call, no tools."""
     from agents.general_chat import generate_reply
 
-    await on_step("💬 Answering directly...")
+    await on_step("💬 正在回答...")
 
     async def on_chunk(content: str) -> None:
         if not content:
@@ -239,7 +240,7 @@ async def _handle_generic(
             task, on_step, memory_context=memory_context, conversation_context=conversation_context
         )
 
-    await on_step(f"🚀 Executing {len(steps)} steps...")
+    await on_step(f"🚀 开始执行，共 {len(steps)} 个步骤...")
     result_ctx = await execute_plan(steps, context, on_step)
     failure_message = _collect_plan_failure(steps, result_ctx)
     if failure_message:
