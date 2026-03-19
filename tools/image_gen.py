@@ -3,6 +3,7 @@ Image Generation Tool — generates images from text prompts via Nano Banana2 AP
 Saves generated images to outputs/ directory.
 """
 import os
+import json
 import uuid
 import base64
 import logging
@@ -24,20 +25,14 @@ IMAGE_MODEL = os.getenv("IMAGE_GEN_MODEL", "gemini-3.1-flash-image-landscape")
 async def run(input_data) -> dict:
     if isinstance(input_data, str):
         prompts = [input_data]
-        size = "1024x1024"
-        n = 1
     elif isinstance(input_data, dict):
         raw = input_data.get("prompts", input_data.get("prompt", ""))
         if isinstance(raw, list):
             prompts = raw
         else:
             prompts = [str(raw)]
-        size = input_data.get("size", "1024x1024")
-        n = input_data.get("n", 1)
     else:
         prompts = [str(input_data)]
-        size = "1024x1024"
-        n = 1
 
     prompts = [p for p in prompts if p.strip()]
     if not prompts:
@@ -57,38 +52,8 @@ async def run(input_data) -> dict:
     async with httpx.AsyncClient(timeout=120.0) as client:
         for prompt in prompts:
             try:
-                resp = await client.post(
-                    IMAGE_API_URL,
-                    headers={
-                        "Authorization": f"Bearer {IMAGE_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": IMAGE_MODEL,
-                        "messages": [
-                            {"role": "user", "content": prompt},
-                        ],
-                    },
-                )
-                resp.raise_for_status()
-                result = resp.json()
-                log.info(f"image_gen API response keys: {list(result.keys())}, "
-                         f"preview: {str(result)[:500]}")
-
-                # Parse Gemini-style response:
-                # candidates[].content.parts[].inlineData.{mimeType, data}
-                for candidate in result.get("candidates", []):
-                    for part in candidate.get("content", {}).get("parts", []):
-                        inline = part.get("inlineData")
-                        if inline and inline.get("data"):
-                            mime = inline.get("mimeType", "image/png")
-                            ext = mime.split("/")[-1] if "/" in mime else "png"
-                            file_id = uuid.uuid4().hex[:8]
-                            filepath = f"outputs/image_{file_id}.{ext}"
-                            with open(filepath, "wb") as f:
-                                f.write(base64.b64decode(inline["data"]))
-                            generated_files.append(filepath)
-
+                files = await _stream_image(client, prompt)
+                generated_files.extend(files)
             except httpx.HTTPStatusError as e:
                 errors.append(f"API error for '{prompt[:50]}': {e.response.status_code} {e.response.text[:200]}")
             except Exception as e:
@@ -104,3 +69,85 @@ async def run(input_data) -> dict:
         "status": "error",
         "result": f"Failed to generate images. Errors: {'; '.join(errors) or 'Unknown error'}",
     }
+
+
+async def _stream_image(client: httpx.AsyncClient, prompt: str) -> list[str]:
+    """Call the API with stream=true and collect the full response."""
+    async with client.stream(
+        "POST",
+        IMAGE_API_URL,
+        headers={
+            "Authorization": f"Bearer {IMAGE_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": IMAGE_MODEL,
+            "stream": True,
+            "messages": [
+                {"role": "user", "content": prompt},
+            ],
+        },
+    ) as resp:
+        resp.raise_for_status()
+        raw_body = await resp.aread()
+
+    # Parse SSE stream: collect all "data: {...}" lines
+    text = raw_body.decode("utf-8", errors="replace")
+    chunks = []
+    for line in text.splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[6:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            chunks.append(json.loads(payload))
+        except json.JSONDecodeError:
+            continue
+
+    log.info(f"image_gen stream: {len(chunks)} chunks, "
+             f"first keys: {list(chunks[0].keys()) if chunks else 'none'}")
+
+    # Extract image data from chunks
+    files = []
+
+    # Strategy 1: Gemini-style candidates[].content.parts[].inlineData
+    for chunk in chunks:
+        for candidate in chunk.get("candidates", []):
+            for part in candidate.get("content", {}).get("parts", []):
+                inline = part.get("inlineData")
+                if inline and inline.get("data"):
+                    files.extend(_save_inline(inline))
+
+    # Strategy 2: OpenAI-style delta content parts (multimodal streaming)
+    if not files:
+        b64_parts = []
+        for chunk in chunks:
+            for choice in chunk.get("choices", []):
+                delta = choice.get("delta", {})
+                content = delta.get("content", "")
+                if isinstance(content, str) and content:
+                    b64_parts.append(content)
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            inline = part.get("inlineData")
+                            if inline and inline.get("data"):
+                                files.extend(_save_inline(inline))
+        # If all chunks were plain text, check if it's base64 image data
+        if not files and b64_parts:
+            full_text = "".join(b64_parts)
+            log.info(f"image_gen stream text preview: {full_text[:200]}")
+
+    return files
+
+
+def _save_inline(inline: dict) -> list[str]:
+    """Save inlineData to file, return list of paths."""
+    mime = inline.get("mimeType", "image/png")
+    ext = mime.split("/")[-1] if "/" in mime else "png"
+    file_id = uuid.uuid4().hex[:8]
+    filepath = f"outputs/image_{file_id}.{ext}"
+    with open(filepath, "wb") as f:
+        f.write(base64.b64decode(inline["data"]))
+    return [filepath]
