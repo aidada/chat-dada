@@ -60,3 +60,20 @@ BEGIN
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_task_runs_conversation ON task_runs (conversation_id);
+
+-- Conversation context summary cache
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='conversations' AND column_name='context_summary') THEN
+    ALTER TABLE conversations ADD COLUMN context_summary TEXT DEFAULT '';
+    ALTER TABLE conversations ADD COLUMN summary_through_seq INTEGER DEFAULT 0;
+  END IF;
+END $$;
+
+-- pgvector extension + embedding column for semantic retrieval
+CREATE EXTENSION IF NOT EXISTS vector;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='task_events' AND column_name='embedding') THEN
+    ALTER TABLE task_events ADD COLUMN embedding vector(1536);
+  END IF;
+END $$;

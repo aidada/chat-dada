@@ -18,21 +18,23 @@ CHAT_SYSTEM = """你是一个专业、友好的AI助手，你的名字叫达达(
 - 使用中文回答"""
 
 
-def _normalize_input(input_data) -> tuple[str, str]:
+def _normalize_input(input_data) -> tuple[str, str, str]:
     if isinstance(input_data, str):
-        return input_data, ""
+        return input_data, "", ""
     if isinstance(input_data, dict):
         return (
             input_data.get("query", input_data.get("chat_input", str(input_data))),
             input_data.get("memory_context", ""),
+            input_data.get("conversation_context", ""),
         )
-    return str(input_data), ""
+    return str(input_data), "", ""
 
 
-def _build_messages(query: str, memory_context: str):
+def _build_messages(query: str, memory_context: str, conversation_context: str = ""):
     return [
         SystemMessage(content=CHAT_SYSTEM),
         *([SystemMessage(content=memory_context)] if memory_context else []),
+        *([SystemMessage(content=conversation_context)] if conversation_context else []),
         HumanMessage(content=query),
     ]
 
@@ -59,10 +61,11 @@ async def generate_reply(
     query: str,
     *,
     memory_context: str = "",
+    conversation_context: str = "",
     on_chunk: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
     llm = get_llm("orchestrator")
-    messages = _build_messages(query, memory_context)
+    messages = _build_messages(query, memory_context, conversation_context)
 
     if on_chunk is None:
         response = await llm.ainvoke(messages)
@@ -102,6 +105,11 @@ async def run(
     input_data,
     on_chunk: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict:
-    query, memory_context = _normalize_input(input_data)
-    result = await generate_reply(query, memory_context=memory_context, on_chunk=on_chunk)
+    query, memory_context, conversation_context = _normalize_input(input_data)
+    result = await generate_reply(
+        query,
+        memory_context=memory_context,
+        conversation_context=conversation_context,
+        on_chunk=on_chunk,
+    )
     return {"status": "ok", "result": result}
