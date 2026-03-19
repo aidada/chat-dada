@@ -1,5 +1,5 @@
 """Deep Research Agent — multi-round research with web search + academic search."""
-from agents.deep_research.run import run, CORE_TOOLS, web_search, academic_search, browser_navigate, ask_user_clarification  # noqa: F401
+from agents.deep_research.run import run, CORE_TOOLS, web_search, academic_search, exa_deep_search, browser_navigate, ask_user_clarification  # noqa: F401
 from agents.deep_research.config import (  # noqa: F401
     ResearchConfig,
     ResearchState,

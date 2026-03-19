@@ -47,6 +47,23 @@ async def academic_search(query: str) -> str:
 
 
 @tool
+async def exa_deep_search(query: str) -> str:
+    """用 Exa 进行深度语义搜索，适合查找学术论文、研究报告和深度分析文章。支持 deep search 模式，返回全文摘要。"""
+    from tools.exa_search import run as search_exa
+    result = await search_exa({
+        "query": query,
+        "type": "deep",
+        "category": "research paper",
+        "num_results": 10,
+        "contents": {
+            "text": {"max_characters": 4000},
+            "highlights": {"query": query, "max_characters": 2000},
+        },
+    })
+    return result.get("result", "No results")
+
+
+@tool
 async def browser_navigate(task_description: str) -> str:
     """控制浏览器完成复杂网页任务。"""
     from browser_use import Agent as BrowserAgent
@@ -73,8 +90,8 @@ async def ask_user_clarification(
     return answer
 
 
-CORE_TOOLS = [web_search, academic_search, browser_navigate, ask_user_clarification,
-              save_research_note, recall_research_notes]
+CORE_TOOLS = [web_search, academic_search, exa_deep_search, browser_navigate,
+              ask_user_clarification, save_research_note, recall_research_notes]
 
 
 @log_async("agent", "deep_research")

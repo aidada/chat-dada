@@ -146,6 +146,9 @@ register("code_executor", fn_path="tools.code_executor:run",
 register("academic_search", fn_path="tools.academic_search:run",
          cap_type="tool", description="Search Semantic Scholar and arXiv for academic papers",
          available_to=[])
+register("exa_search", fn_path="tools.exa_search:run",
+         cap_type="tool", description="Deep AI-powered web search via Exa with text/highlights/summary extraction",
+         available_to=["search", "deep_research"])
 register("image_gen", fn_path="tools.image_gen:run",
          cap_type="tool", description="Generate images from text prompts via Nano Banana2 API",
          available_to=["deep_research", "data_analyst"])

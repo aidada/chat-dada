@@ -719,3 +719,99 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "ok")
         # task_id should be empty since init failed
         self.assertEqual(fake_graph.captured_state["task_id"], "")
+
+
+class SearchToolSelectionTests(unittest.TestCase):
+    """Tests for _select_search_tools and _apply_tool_selection in graphs.py."""
+
+    def _make_tool(self, name: str) -> MagicMock:
+        t = MagicMock()
+        t.name = name
+        return t
+
+    def _make_all_search_tools(self) -> list:
+        return [self._make_tool(n) for n in ("web_search", "brave_search", "academic_search", "exa_deep_search")]
+
+    def test_early_step_general_query(self):
+        """Steps 0-3 with general query: only web_search + brave_search."""
+        from agents.deep_research.graphs import _select_search_tools
+        tools = self._make_all_search_tools()
+        state = {"step_count": 0, "query": "how does GPS work", "progress": {}}
+        selected = _select_search_tools(state, tools)
+        names = {t.name for t in selected}
+        self.assertEqual(names, {"web_search", "brave_search"})
+
+    def test_early_step_academic_query(self):
+        """Steps 0-3 with academic query: adds academic_search."""
+        from agents.deep_research.graphs import _select_search_tools
+        tools = self._make_all_search_tools()
+        state = {"step_count": 1, "query": "请帮我写一篇关于GNSS多路径的论文", "progress": {}}
+        selected = _select_search_tools(state, tools)
+        names = {t.name for t in selected}
+        self.assertIn("academic_search", names)
+        self.assertNotIn("exa_deep_search", names)
+
+    def test_late_step_opens_exa(self):
+        """Step >= 4 opens exa_deep_search."""
+        from agents.deep_research.graphs import _select_search_tools
+        tools = self._make_all_search_tools()
+        state = {"step_count": 5, "query": "test query", "progress": {}}
+        selected = _select_search_tools(state, tools)
+        names = {t.name for t in selected}
+        self.assertIn("exa_deep_search", names)
+
+    def test_gaps_with_paper_keyword_opens_academic_and_exa_early(self):
+        """Gaps mentioning 论文 opens academic_search and exa at step >= 2."""
+        from agents.deep_research.graphs import _select_search_tools
+        tools = self._make_all_search_tools()
+        state = {
+            "step_count": 2,
+            "query": "general question",
+            "progress": {"remaining_gaps": ["缺少相关论文的实验数据"]},
+        }
+        selected = _select_search_tools(state, tools)
+        names = {t.name for t in selected}
+        self.assertIn("academic_search", names)
+        self.assertIn("exa_deep_search", names)
+
+    def test_gaps_keyword_at_step_1_no_exa(self):
+        """Gaps with keyword at step 1: academic yes, exa no (needs step >= 2)."""
+        from agents.deep_research.graphs import _select_search_tools
+        tools = self._make_all_search_tools()
+        state = {
+            "step_count": 1,
+            "query": "general question",
+            "progress": {"remaining_gaps": ["need paper data"]},
+        }
+        selected = _select_search_tools(state, tools)
+        names = {t.name for t in selected}
+        self.assertIn("academic_search", names)
+        self.assertNotIn("exa_deep_search", names)
+
+    def test_many_findings_removes_brave(self):
+        """8+ findings removes brave_search."""
+        from agents.deep_research.graphs import _select_search_tools
+        tools = self._make_all_search_tools()
+        state = {
+            "step_count": 5,
+            "query": "test",
+            "progress": {"key_findings_so_far": [f"finding {i}" for i in range(10)]},
+        }
+        selected = _select_search_tools(state, tools)
+        names = {t.name for t in selected}
+        self.assertNotIn("brave_search", names)
+        self.assertIn("web_search", names)
+
+    def test_apply_tool_selection_preserves_non_search_tools(self):
+        """_apply_tool_selection keeps non-search tools unchanged."""
+        from agents.deep_research.graphs import _apply_tool_selection
+        all_tools = self._make_all_search_tools() + [
+            self._make_tool("browser_navigate"),
+            self._make_tool("ask_user_clarification"),
+        ]
+        state = {"step_count": 0, "query": "test", "progress": {}}
+        selected = _apply_tool_selection(state, all_tools)
+        names = {t.name for t in selected}
+        self.assertIn("browser_navigate", names)
+        self.assertIn("ask_user_clarification", names)
+

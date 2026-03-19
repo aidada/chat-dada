@@ -17,13 +17,54 @@ from core.content_utils import extract_text_content, normalize_markdown_report
 from core.models import get_llm
 
 from agents.deep_research.config import DEFAULT_REPORT_PROFILE, ResearchConfig, ResearchState
-from agents.deep_research.prompts import _build_research_messages
+from agents.deep_research.prompts import _build_research_messages, _looks_like_academic_paper_task
 from agents.deep_research.utils import _generate_structured_summary, _latest_tool_messages, _synthesize_parallel_findings
 from agents.deep_research.run import CORE_TOOLS
 
 from tools.research_notes import set_research_context
 
 log = logging.getLogger("chatdada.agent")
+
+_SEARCH_TOOL_NAMES = {"web_search", "brave_search", "academic_search", "exa_deep_search"}
+_ACADEMIC_GAP_KEYWORDS = ("论文", "paper", "实验", "experiment", "数据", "data", "baseline", "ablation")
+
+
+def _select_search_tools(state: dict, all_search_tools: list) -> list:
+    """Dynamically filter search tools based on research stage, query features, and progress."""
+    step = state.get("step_count", 0)
+    query = state.get("query", "")
+    progress = state.get("progress", {})
+    is_academic = _looks_like_academic_paper_task(query)
+
+    available = {"web_search", "brave_search"}
+
+    if is_academic:
+        available.add("academic_search")
+
+    if step >= 4:
+        available.add("exa_deep_search")
+
+    gaps = progress.get("gaps", []) or progress.get("remaining_gaps", [])
+    findings = progress.get("findings", []) or progress.get("key_findings_so_far", [])
+    gap_text = " ".join(gaps).lower() if gaps else ""
+
+    if any(kw in gap_text for kw in _ACADEMIC_GAP_KEYWORDS):
+        available.add("academic_search")
+        if step >= 2:
+            available.add("exa_deep_search")
+
+    if len(findings) >= 8:
+        available.discard("brave_search")
+
+    return [t for t in all_search_tools if t.name in available]
+
+
+def _apply_tool_selection(state: dict, all_tools: list) -> list:
+    """Split tools into search/non-search, filter search tools, then recombine."""
+    search_tools = [t for t in all_tools if t.name in _SEARCH_TOOL_NAMES]
+    non_search_tools = [t for t in all_tools if t.name not in _SEARCH_TOOL_NAMES]
+    selected_search = _select_search_tools(state, search_tools)
+    return non_search_tools + selected_search
 
 
 async def research_planner(state: ResearchState) -> dict:
@@ -112,7 +153,8 @@ def build_research_graph(config: ResearchConfig | None = None):
     all_tools = CORE_TOOLS + dynamic
 
     async def research_planner_node(state: ResearchState) -> dict:
-        llm = get_llm("deep_research").bind_tools(all_tools)
+        step_tools = _apply_tool_selection(state, all_tools)
+        llm = get_llm("deep_research").bind_tools(step_tools)
 
         # --- progress tracking ---
         tracker = ProgressTracker.from_dict(state.get("progress", {})) if state.get("progress") else ProgressTracker(original_query=state["query"])
@@ -341,7 +383,8 @@ def build_hierarchical_research_graph():
 
     async def hierarchical_planner_node(state: ResearchState) -> dict:
         """Research planner that respects subtask scope."""
-        llm = get_llm("deep_research").bind_tools(all_tools)
+        step_tools = _apply_tool_selection(state, all_tools)
+        llm = get_llm("deep_research").bind_tools(step_tools)
 
         tracker = ProgressTracker.from_dict(state.get("progress", {})) if state.get("progress") else ProgressTracker(original_query=state["query"])
         tool_msgs = _latest_tool_messages(state["messages"])
