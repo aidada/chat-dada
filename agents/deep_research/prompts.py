@@ -91,7 +91,7 @@ def _build_research_messages(query: str, context: str, report_profile: str = DEF
         f"当前输出模板：{profile.name}\n\n"
         f"当前研究笔记（已压缩）：\n{notes}\n\n"
         "请基于当前笔记决定下一步：\n"
-        "0. 如果当前笔记里还没有用户澄清，而研究目标、评价维度或输出重点存在关键歧义，先调用 ask_user_clarification；最多一次。\n"
+        "0. 如果当前笔记里还没有用户澄清，而研究目标、评价维度或输出重点存在关键歧义，先调用 ask_user_clarification；最多三次。\n"
         "1. 如果还缺少以下任一项，就继续调用最必要的 1-2 个工具：直接结论、关键证据、成立条件、工程限制、关键数据或明确缺口。\n"
         "2. 如果信息已经足够，直接输出最终研究报告。\n"
         "3. 不要重复已经完成的搜索。\n"

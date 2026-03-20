@@ -70,7 +70,7 @@ async def run(input_data) -> dict:
 
     return {
         "status": "error",
-        "result": f"Failed to generate images. Errors: {'; '.join(errors) or 'Unknown error'}",
+        "result": f"图片生成失败，API 未返回图片数据，请重试。{(' Errors: ' + '; '.join(errors)) if errors else ''}",
     }
 
 
@@ -122,12 +122,12 @@ async def _stream_image(client: httpx.AsyncClient, prompt: str) -> list[str]:
                 if inline and inline.get("data"):
                     files.extend(_save_inline(inline))
 
-    # Strategy 2: OpenAI-style delta content parts (multimodal streaming)
+    # Strategy 2: OpenAI-style delta/message content parts
     if not files:
         b64_parts = []
         for chunk in chunks:
             for choice in chunk.get("choices", []):
-                delta = choice.get("delta", {})
+                delta = choice.get("delta") or choice.get("message") or {}
                 content = delta.get("content", "")
                 if isinstance(content, str) and content:
                     b64_parts.append(content)
@@ -141,6 +141,17 @@ async def _stream_image(client: httpx.AsyncClient, prompt: str) -> list[str]:
         if not files and b64_parts:
             full_text = "".join(b64_parts)
             files.extend(await _download_image_urls(client, full_text))
+
+    if not files:
+        # Collect reasoning_content for diagnostics
+        reasoning = []
+        for chunk in chunks:
+            for choice in chunk.get("choices", []):
+                rc = (choice.get("delta") or {}).get("reasoning_content", "")
+                if rc:
+                    reasoning.append(rc.strip())
+        log.warning("image_gen: no images extracted from %d chunks. reasoning=%s",
+                    len(chunks), " | ".join(reasoning) if reasoning else "(none)")
 
     return files
 

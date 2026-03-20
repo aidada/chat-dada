@@ -1401,7 +1401,6 @@ const LOG_BOTTOM_THRESHOLD = 64;
 
 let eventSource = null;
 let running = false;
-let runTimer = null;
 let taskMode = localStorage.getItem(TASK_MODE_KEY) || 'auto';
 let thinkingLevel = 'medium';
 let pendingFiles = [];
@@ -2115,15 +2114,6 @@ function refreshTaskStateUi() {
 
 function setRunning(nextRunning) {
   running = nextRunning;
-  clearTimeout(runTimer);
-  if (nextRunning) {
-    runTimer = setTimeout(() => {
-      if (!running) return;
-      addLog('error', '执行超时（90s），Agent 长时间无响应。请检查服务端日志或网络状态。');
-      setRunning(false);
-      setDot('off');
-    }, 90000);
-  }
   refreshTaskStateUi();
 }
 

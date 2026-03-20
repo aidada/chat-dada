@@ -79,7 +79,7 @@ MODEL_CONFIGS: dict[str, dict] = {
     "search": {"model": "gpt-5.4", "provider": "proxy"},
     "doc_analyst": {"model": "gemini-3.1-pro-preview-customtools", "provider": "google_proxy"},
     "writer": {"model": "gpt-5.4", "provider": "proxy"},
-    "deep_research": {"model": "gemini-3.1-pro-preview-customtools", "provider": "google_proxy"},
+    "deep_research": {"model": "gpt-5.4", "provider": "proxy"},
     "data_analyst": {"model": "gpt-5.4", "provider": "proxy"},
 }
 
