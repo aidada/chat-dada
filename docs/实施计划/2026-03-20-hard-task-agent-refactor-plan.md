@@ -38,6 +38,7 @@
 - `RootState` / root graph skeleton
 - 统一的 graph streaming adapter
 - `task_id -> thread_id` 映射策略
+- memory 分层接口雏形（user / conversation / checkpoint）
 
 ### 任务
 
@@ -56,6 +57,10 @@
    - `finish`
 4. 在不改前端协议的前提下，将 graph v2 stream 翻译为现有 SSE 事件格式
 5. 为 root graph 接入 LangSmith tags/metadata
+6. 抽出 memory 接口：
+   - `UserMemoryProvider`
+   - `ConversationMemoryProvider`
+   - `CheckpointProvider`
 
 ### 影响文件
 
@@ -63,6 +68,8 @@
 - Update: `runtime/task_runtime.py`
 - Update: `runtime/task_dispatcher.py`
 - Update: `main.py`
+- Update: `storage/user_store_v2.py`（接口适配，非语义重写）
+- Update: `runtime/conversation_context.py`（抽象提升）
 
 ### 验证
 
@@ -89,6 +96,7 @@
 - v2 `StreamPart` 到前端事件的稳定映射
 - review/clarification interrupt 机制
 - `reply_to_task` 与 `Command(resume=...)` 桥接
+- LangGraph checkpointer 接管执行恢复
 
 ### 任务
 
@@ -104,6 +112,7 @@
    - 子图中断
    - 恢复后继续 streaming
 4. 将当前 `waiting_for_user` 状态改为 graph interrupt 主导
+5. 将业务层 checkpoint 从 agent memory 中剥离，切到 LangGraph checkpointer
 
 ### 影响文件
 
@@ -111,6 +120,7 @@
 - Update: `runtime/task_interaction.py`
 - Update: `platform/interrupts.py`
 - Update: `platform/streaming.py`
+- Update: `capabilities/memory.py`（checkpoint 职责下沉）
 
 ### 验证
 
@@ -137,6 +147,8 @@
 - research artifact schema
 - graph-native 并行 worker 方案
 - 统一 evidence/citation 能力
+- 保留并迁移的 research context memory 能力
+- 共享 browser capability 的 research 域接入
 
 ### 任务
 
@@ -152,6 +164,7 @@
    - progress tracker
    - 工具选择策略
    - report rewrite
+   - findings / summaries / final report 落盘语义
 3. 把 parallel worker 从单节点 `asyncio.gather` 改成 graph-native fan-out/fan-in：
    - subgraphs 或 `Send`
    - `subgraphs=True` 可见
@@ -160,6 +173,7 @@
    - 结构完整性
    - 引用完整性
    - 研究缺口提示
+6. 抽出共享 browser capability，并在 research 域优先接入
 
 ### 影响文件
 
@@ -167,6 +181,8 @@
 - Update: `agents/deep_research/run.py` 作为兼容 shim
 - Update: `agents/deep_research/graphs.py` 或逐步退役
 - Update: `capabilities/` 下的 evidence/citation 能力
+- Create: `capabilities/toolkits/browser_toolkit.py` 或 `tools/browser_navigate.py`
+- Update: `core/models.py`
 
 ### 验证
 
@@ -174,6 +190,7 @@
 - 并行子代理可在 stream 中单独可见
 - 引用和 artifact 能结构化输出
 - 旧 `deep_research.run()` 入口仍可用
+- browser capability 仅在需要页面级交互时被触发
 
 ### 风险控制
 
@@ -193,6 +210,7 @@
 - 一个 deepagents-backed research agent 版本
 - deepagents 与现有工具/能力层的适配桥
 - 使用规范：哪些能力由 deepagents 接管，哪些仍保留平台自定义
+- workspace memory 与 product memory 的明确边界
 
 ### 任务
 
@@ -204,12 +222,19 @@
 3. 定义 filesystem workspace 边界
 4. 将现有搜索工具、研究笔记、citation manager 暴露为 deepagents 工具
 5. 保持 domain artifact/review gate 在平台侧，不让 deepagents 吞掉产品层语义
+6. 明确 memory 边界：
+   - `MemoryStoreV2` 继续作为产品级用户记忆
+   - `ConversationContextBuilder` 升级为会话记忆服务
+   - deepagents 接管工作区 memory
+   - LangGraph 接管 checkpoint
 
 ### 影响文件
 
 - Update: `domain_agents/research/agent.py`
 - Update: `pyproject.toml` 依赖约束与使用说明
 - Update: `platform/root_graph.py`
+- Update: `storage/user_store_v2.py`
+- Update: `runtime/conversation_context.py`
 
 ### 验证
 
@@ -235,6 +260,7 @@
 - `domain_agents/patent/`
 - prior-art / claim tree / specification artifact schema
 - review gate：术语一致性、权利要求依赖、实施例支撑
+- 可选的 browser capability 页面核实路径
 
 ### 任务
 
@@ -249,6 +275,7 @@
 4. 增加渲染：
    - markdown/docx
    - claim appendix / prior-art matrix
+5. 仅在需要页面核实时接入 browser capability，不作为主检索路径
 
 ### 验证
 
@@ -269,6 +296,7 @@
 - `domain_agents/zero_report/`
 - timeline / root cause / action matrix schema
 - 审批和整改回退 gate
+- 按需启用的 browser capability 门户接入点
 
 ### 任务
 
@@ -281,6 +309,7 @@
    - `report_reviewer`
 3. 定义 zero-report artifact 组装和渲染
 4. 定义整改措施 review gate
+5. 仅在工单/监控/wiki 门户采集时接入 browser capability
 
 ### 验证
 
@@ -381,6 +410,13 @@
 | `orchestrator/templates.py` | 迁为 route presets / legacy aliases |
 | `agents/deep_research/*` | 提炼资产后迁入 `domain_agents/research/` |
 | `agents/general_chat.py` | 作为 root graph 的 direct-chat path 保留 |
+| `storage/user_store_v2.py` | 保留并抽象为产品级用户记忆 |
+| `runtime/conversation_context.py` | 保留策略，升级为会话记忆服务 |
+| `capabilities/context_manager.py` | 迁入 research 域，保留为领域上下文压缩能力 |
+| `capabilities/memory.py` | findings/artifact 语义保留；checkpoint 语义移除 |
+| `agents/search_agent.py::browser_navigate` | 上收为共享 browser capability |
+| `agents/deep_research/run.py::browser_navigate` | 上收为共享 browser capability |
+| `core/models.py::get_browser_use_llm` | 保留，继续作为 browser capability 的统一模型适配层 |
 
 ---
 
@@ -405,6 +441,7 @@
 - 一次性重写所有前端页面
 - 一次性替换所有 storage 方案
 - 在第一阶段就让 patent / zero_report 达到 production quality
+- 用 `AGENTS.md` 替换结构化产品记忆
 
 ---
 

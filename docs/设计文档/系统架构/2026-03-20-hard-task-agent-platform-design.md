@@ -331,6 +331,305 @@ Runtime/API shell
                 -> domain-specific subagents + tools
 ```
 
+## 记忆与上下文分层
+
+`deepagents` 确实自带 memory/context management，但它解决的是 **agent 工作区上下文管理**，不是完整的 **产品级记忆体系**。
+
+当前系统里实际上已经存在 4 类不同性质的记忆：
+
+1. **用户长期记忆**：用户画像、偏好、项目生命周期、近期时间线
+2. **会话上下文记忆**：多轮任务/对话的摘要、最近轮次、检索增强上下文
+3. **领域任务上下文记忆**：如 research 的 `raw -> compact -> summary`
+4. **任务 artifact / 证据记忆**：findings、sources、draft、final report、附件证据
+
+另外还有一类不应再被当成“业务记忆”的内容：
+
+5. **执行状态恢复**：checkpoint / interrupt / resume
+
+这一类应由 LangGraph runtime/checkpointer 接管，而不是由领域 agent 自己保存 JSON 状态。
+
+### 目标记忆分层图
+
+```text
+                         ┌────────────────────────────────────┐
+                         │        User Memory Layer           │
+                         │ facts / preferences / projects     │
+                         │ structured, cross-task, product    │
+                         └────────────────┬───────────────────┘
+                                          │
+                         ┌────────────────▼───────────────────┐
+                         │    Conversation Memory Layer       │
+                         │ summary / recent rounds / recall   │
+                         │ task-thread or conversation scoped │
+                         └────────────────┬───────────────────┘
+                                          │
+                         ┌────────────────▼───────────────────┐
+                         │     Workspace Memory Layer         │
+                         │ AGENTS.md / skills / files         │
+                         │ deepagents-native working memory   │
+                         └────────────────┬───────────────────┘
+                                          │
+                  ┌───────────────────────▼────────────────────────┐
+                  │         Domain Context Memory Layer            │
+                  │ research raw/compact/summary, patent notes,    │
+                  │ zero-report timeline/root-cause structures     │
+                  └───────────────────────┬────────────────────────┘
+                                          │
+                         ┌────────────────▼───────────────────┐
+                         │     Artifact / Evidence Layer      │
+                         │ findings / citations / drafts /    │
+                         │ matrices / final report / sources  │
+                         └────────────────┬───────────────────┘
+                                          │
+                         ┌────────────────▼───────────────────┐
+                         │  Execution Checkpoint Layer        │
+                         │ thread state / interrupts / resume │
+                         │ LangGraph-owned, not business mem  │
+                         └────────────────────────────────────┘
+```
+
+### deepagents 自带 memory/context 的能力边界
+
+`deepagents` 原生提供的内容主要是：
+
+- `memory=[...]` 对 `AGENTS.md` 的自动注入
+- `FilesystemBackend` 读写工作区文件
+- 长任务自动摘要与大输出落文件
+- subagent 的隔离上下文
+- skills 的按需加载
+
+这些能力非常适合：
+
+- 复杂任务拆解
+- 长文档/长研究的工作区管理
+- 子代理协作时控制上下文膨胀
+- 让 agent 在文件工作区里逐步构建中间产物
+
+但它不直接解决：
+
+- 结构化用户画像与项目生命周期
+- 产品级跨任务记忆召回
+- 会话轮次检索与摘要治理
+- 研究领域的来源保真与证据链压缩
+- 平台级 task/thread checkpoint 语义
+
+### 与当前方案的对比
+
+| 维度 | 当前方案 | deepagents 内建方案 | 结论 |
+|------|----------|---------------------|------|
+| 用户长期记忆 | `MemoryStoreV2`，有 facts/projects/confidence/timeline | `AGENTS.md` 文本记忆 | 当前方案明显更强，应保留 |
+| 会话上下文 | 摘要 + recent + retrieval | 自动摘要，偏 agent 内部 | 当前方案更适合产品级会话记忆，应保留思路 |
+| 任务工作区 | 目前分散在 research memory / 文件落盘 | `FilesystemBackend` + 文件工具天然支持 | deepagents 更适合，建议采用 |
+| 研究上下文压缩 | `ResearchContext` 的 `raw -> compact -> summary` | 通用 auto-summarization | research 域保留现有方案更好 |
+| artifact / 证据 | findings/summaries/final_report 落盘 | 可写文件，但无固定 schema | 当前方案应升级为结构化 artifact/evidence store |
+| checkpoint / resume | `ResearchMemory` 自定义 JSON checkpoint | graph 侧由 LangGraph 更适合接管 | 应放弃自定义 checkpoint |
+
+### 兼容策略
+
+推荐策略不是“二选一”，而是分层兼容：
+
+#### 保留当前方案的部分
+
+- `storage/user_store_v2.py`
+  - 保留为产品级用户长期记忆
+- `runtime/conversation_context.py`
+  - 升级为通用会话记忆服务
+- `capabilities/context_manager.py`
+  - 保留为 research 域上下文压缩能力
+- `capabilities/memory.py` 中的 findings / summaries / final report 落盘思想
+  - 提炼为 artifact/evidence store
+
+#### 引入 deepagents 的部分
+
+- 工作区文件系统记忆
+- 长任务自动摘要
+- subagent 隔离上下文
+- skills / AGENTS.md 规则注入
+
+#### 应替换掉的部分
+
+- `capabilities/memory.py` 中的自定义 checkpoint/resume
+  - 由 LangGraph checkpointer 接管
+
+### 最终建议
+
+最合适的落点是：
+
+```text
+UserMemory              -> 保留现有结构化方案
+ConversationMemory      -> 保留现有策略并服务化
+WorkspaceMemory         -> 使用 deepagents
+DomainContextMemory     -> 保留 research 等领域专用方案
+Artifact/EvidenceMemory -> 由现有 research memory 升级而来
+ExecutionCheckpoint     -> 改用 LangGraph
+```
+
+也就是说：
+
+> **产品级 memory 继续用当前方案；agent 工作区 memory 用 deepagents；执行恢复交给 LangGraph。**
+
+## Browser Capability 设计
+
+当前仓库中，`browser_use` 只在两个地方被实际使用：
+
+- `agents/search_agent.py` 中的 `browser_navigate`
+- `agents/deep_research/run.py` 中的 `browser_navigate`
+
+底层还有一层统一适配：
+
+- `core/models.py` 中的 `_BrowserUseResponsesAdapter`
+- `core/models.py` 中的 `get_browser_use_llm(...)`
+
+这说明当前系统已经具备 browser automation 的基础能力，但其组织方式仍是：
+
+1. **能力分散**：`search` 和 `deep_research` 各自内嵌一份工具
+2. **返回值过弱**：当前浏览器工具主要返回字符串总结，不利于前端渲染和证据追踪
+3. **缺少平台约束**：没有统一的启用条件、速率控制、审计结构和 artifact 输出规范
+
+因此，重构后不应把 `browser_use` 当成“某个 agent 的私有工具”，而应提升为 **共享 browser capability**。
+
+### 目标定位
+
+`browser_use` 在目标架构中的角色是：
+
+> **高成本、低吞吐、强交互的网页执行能力。用于动态页面、多步交互、结构化页面证据采集，而不是默认搜索路径。**
+
+它适合解决的问题：
+
+- JS-heavy 页面抓取
+- 登录后/交互后页面内容提取
+- 分页、展开、点击后可见信息采集
+- 需要截图、页面证据和步骤审计的网页任务
+
+它不适合作为：
+
+- 默认搜索入口
+- 通用问答的常规路径
+- 没有明确页面交互需求时的第一选择
+
+### 目标分层位置
+
+推荐将其上收为共享 toolkit：
+
+```text
+capabilities/
+└── toolkits/
+    └── browser_toolkit.py
+
+或
+
+tools/
+└── browser_navigate.py
+```
+
+由领域 agent 显式引用，而不是在每个 agent 内部各写一遍。
+
+### 在各领域 agent 中的适用性
+
+#### 1. Research Agent
+
+最适合使用 `browser_use`。
+
+典型场景：
+
+- 访问搜索结果中的具体网页
+- 抓取需要展开/滚动/点击后才能看到的研究资料
+- 获取动态网页中的事实、表格、引用和截图
+- 对网页证据进行可追溯采集
+
+建议策略：
+
+- 优先用搜索/API 工具发现来源
+- 仅当需要深入页面细节时再升级到 browser capability
+
+#### 2. Patent Agent
+
+可以使用，但应克制。
+
+典型场景：
+
+- 浏览 Google Patents / Espacenet / CNIPA / USPTO 的具体专利详情页
+- 采集现有技术页面、产品规格页、技术公告页
+- 获取需要页面交互后可见的对比证据
+
+不建议：
+
+- 让 browser capability 成为 prior-art 检索默认主路径
+
+建议策略：
+
+- 检索优先走专利检索工具/API
+- 页面级核实和证据补充再用浏览器
+
+#### 3. Zero Report Agent
+
+仅在需要接 Web 门户时启用。
+
+典型场景：
+
+- 工单系统
+- 监控平台
+- 事故时间线后台
+- 内部 wiki / 知识库页面
+
+如果数据已通过日志、附件、结构化接口可获得，则不应使用浏览器。
+
+### 目标输出结构
+
+重构后，browser capability 不应继续只返回字符串，而应返回结构化结果：
+
+```json
+{
+  "summary": "页面任务总结",
+  "visited_urls": ["..."],
+  "page_artifacts": [
+    {
+      "url": "...",
+      "title": "...",
+      "html_path": "...",
+      "screenshot_path": "...",
+      "text_excerpt": "..."
+    }
+  ],
+  "extracted_evidence": [
+    {
+      "type": "quote|table|fact|screenshot",
+      "content": "...",
+      "source_url": "...",
+      "locator": "selector/xpath/section"
+    }
+  ],
+  "execution_log": [
+    {"step": 1, "action": "open", "target": "..."},
+    {"step": 2, "action": "click", "target": "..."}
+  ]
+}
+```
+
+这样才能支撑：
+
+- 文档溯源卡片
+- 页面截图卡片
+- 工具调用进度条
+- 证据引用与审计
+
+### 运行约束
+
+由于 browser capability 慢、贵、脆，必须加平台级约束：
+
+1. 并发限制
+2. 最大步数限制
+3. 任务超时
+4. 域级白名单/策略
+5. 截图和页面 artifact 的存储策略
+6. LangSmith trace tags（区分 browser task）
+
+### 最终建议
+
+重构后应将 `browser_use` 定义为：
+
+> **共享的 browser capability，由 research 域优先使用，patent 域谨慎使用，zero_report 域按需使用；禁止作为平台默认执行路径。**
+
 ## 流式事件协议
 
 ### 产品主协议
@@ -390,6 +689,21 @@ Runtime/API shell
 
 研究、专利、归零报告都依赖这个抽象。
 
+### 4. 记忆迁移原则
+
+在 memory 相关模块迁移时，遵循以下原则：
+
+1. **不丢语义**
+   - 用户画像、项目状态、时间线这类产品资产必须保留
+2. **不重复造轮子**
+   - deepagents 已经擅长的 workspace/context 交给 deepagents
+3. **不混淆职责**
+   - checkpoint/resume 不再由业务 memory 管理
+4. **不让文本文件替代结构化产品记忆**
+   - `AGENTS.md` 只能补充规则和工作区上下文，不能替代 `MemoryStoreV2`
+5. **不让浏览器工具变成默认搜索器**
+   - browser capability 只在页面级交互/证据采集需要时启用
+
 ## 兼容与迁移原则
 
 迁移期间保留：
@@ -413,5 +727,9 @@ Runtime/API shell
 目标架构应当是：
 
 > **以 LangGraph 为平台运行时，以 deepagents 为复杂领域 agent harness，以 research / patent / zero_report 三个领域 agent 为核心产品能力，以 v2 streaming + interrupts + durable execution + structured artifacts 为统一产品协议。**
+
+对于 memory/context，最终结论是：
+
+> **保留现有结构化用户记忆和领域上下文方案，引入 deepagents 的 workspace/context 管理能力，并将 checkpoint/resume 统一迁移到 LangGraph runtime。**
 
 这条路线比继续堆叠当前 orchestrator/scheduler 更适合“hard-task agent”目标，也能保留现有 API 外壳作为迁移缓冲层。
