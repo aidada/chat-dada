@@ -1,6 +1,6 @@
 # chat dada / Local Agent
 
-一个基于 FastAPI、LangGraph 和流式任务运行时的通用多智能体平台。支持聊天、深度研究（含层级分解与并行执行）、专利撰写、归零报告、文件分析、翻译、图片生成、PPT 输出的任务系统。
+一个基于 FastAPI、LangGraph 和流式任务运行时的通用多智能体平台。支持聊天、深度研究（含层级分解与并行执行）、专利撰写、归零报告、PPT 生成的任务系统。
 
 前端页面位于 [static/index.html](static/index.html)，后端入口位于 [main.py](main.py)。
 
@@ -8,11 +8,12 @@
 
 - 任务提交采用 `POST /tasks`，事件流采用 `GET /tasks/{task_id}/events` 的 SSE 模式，支持断线重放。
 - 任务状态和事件持久化到 **PostgreSQL**，跨实例事件广播通过 **Redis Pub/Sub**。
-- 支持人机交互追问。任务运行中可进入 `waiting_for_user`，再通过 `POST /tasks/{task_id}/reply` 继续。跨实例回复通过 Redis BLPOP/LPUSH 传递。
-- 新架构通过 `task_platform/root_graph.py` 统一调度，按领域路由到 `domain_agents/` 下的专用图（research、patent、zero_report）。
-- 编排链路支持用户记忆。`orchestrator` 路由会从 `data/memory/` 召回历史片段，并在任务结束后回写长期记忆。
+- 支持人机交互追问。任务运行中可进入 `waiting_for_user`，再通过 `POST /tasks/{task_id}/reply` 继续。
+- 通过 `task_platform/root_graph.py` 统一调度，按领域路由到 `domain_agents/` 下的专用图（research、patent、zero_report、ppt）。
+- 领域 agent 执行前会从 `data/memory/` 召回用户历史片段，任务结束后回写长期记忆。
 - 深度研究支持三种图模式：简单循环、层级分解、并行工作者，配合三层上下文管理、进度追踪与外部研究记忆。
 - 支持多种输出形态：直接回答、PPT、图片。
+- LangSmith tracing 集成：启动时自动验证连接，每次 graph 执行注入业务 metadata，支持运行时动态开关。
 
 ## 架构
 
@@ -31,31 +32,30 @@ FastAPI app (main.py)
         ▼
 TaskService / TaskRunStore (runtime/task_runtime.py)
         │              ├── PostgreSQL: task_runs + task_events
-        │              ├── Redis Pub/Sub: SSE 广播
-        │              └── Redis BLPOP/LPUSH: 跨实例用户回复
+        │              └── Redis Pub/Sub: SSE 广播
         ▼
 Task Dispatcher (runtime/task_dispatcher.py)
         │
-        ├── general_chat  ──→  agents/general_chat.py
+        ├── general_chat  ──→  capabilities/general_chat.py
         └── orchestrator  ──→  task_platform/root_graph.py
                                     │
-                            ┌───────┼──────────┬────────────┐
-                            ▼       ▼          ▼            ▼
-                        research   patent   zero_report   legacy_fallback
-                        (domain_agents/)                  (orchestrator/runner.py)
-                                                              └── PPT pipeline only
+                          ┌─────────┼──────────┬──────────────┬──────┐
+                          ▼         ▼          ▼              ▼      ▼
+                      research   patent   zero_report        ppt   general_chat
+                      (domain_agents/)                              (fallback)
 ```
 
-### 新架构流程
+### 调度流程
 
-1. `task_dispatcher.py` 将任务路由为 `general_chat` 或 `orchestrator`
+1. `task_dispatcher.py` 按关键词和模式将任务路由为 `general_chat` 或 `orchestrator`
 2. `orchestrator` 路由进入 `task_platform/root_graph.py`（LangGraph 状态图）
 3. `root_graph` 通过 `router.py` 决定 `execution_path`：
    - `research` → `domain_agents/research/`
    - `patent` → `domain_agents/patent/`
    - `zero_report` → `domain_agents/zero_report/`
-   - `general_chat` → 直接问答
-   - `legacy_fallback` → `orchestrator/runner.py`（仅保留 PPT 管线）
+   - `ppt` → `domain_agents/ppt/`
+   - `general_chat` → `capabilities/general_chat.py`（直接问答）
+   - `needs_clarification` → 向用户追问后重新路由
 
 ## 任务模式
 
@@ -69,27 +69,16 @@ Task Dispatcher (runtime/task_dispatcher.py)
 
 `thinking_level` 当前支持 `low` / `medium` / `high`，会通过 [core/models.py](core/models.py) 映射到底层模型的推理强度参数。
 
-## 已注册能力
+## Domain Agents
 
-能力注册定义见 [core/registry.py](core/registry.py)。
+所有领域 agent 统一注册在 [task_platform/domain_registry.py](task_platform/domain_registry.py)。
 
-### Agents
-
-| 名称 | 入口 | 说明 |
-| --- | --- | --- |
-| `general_chat` | `agents.general_chat:run` | 直接问答，支持流式文本增量 |
-| `search` | `agents.search_agent:run_search` | Web 搜索与页面抓取 |
-| `doc_analyst` | `agents.doc_agent:run_doc_analysis` | 读取并分析 PDF/文本/附件 |
-| `writer` | `agents.writer_agent:run_writer` | 生成写作内容或幻灯片 DSL |
-| `deep_research` | `agents.deep_research:run` | 多轮深度研究，支持 Web、学术检索、浏览器、追问、研究笔记 |
-
-### Domain Agents
-
-| 领域 | 入口 | 说明 |
-| --- | --- | --- |
-| `research` | `domain_agents/research/agent.py` | 结构化研究报告，含证据链、引用管理、评审门控 |
-| `patent` | `domain_agents/patent/agent.py` | 专利撰写，含权利要求树、技术方案、评审门控 |
-| `zero_report` | `domain_agents/zero_report/agent.py` | 零号报告生成，含行动矩阵、评审门控 |
+| 领域 | 入口 | 别名 | 说明 |
+| --- | --- | --- | --- |
+| `research` | `domain_agents/research/agent.py` | `deep_research` | 结构化研究报告，含证据链、引用管理、评审门控、并行工作者 |
+| `patent` | `domain_agents/patent/agent.py` | `专利` | 专利撰写，含权利要求树、技术方案、评审门控 |
+| `zero_report` | `domain_agents/zero_report/agent.py` | `归零`, `postmortem` | 归零报告生成，含行动矩阵、评审门控 |
+| `ppt` | `domain_agents/ppt/agent.py` | `幻灯片`, `powerpoint` | PPT 生成，含大纲规划、搜索、文档分析、幻灯片撰写、渲染 |
 
 ### Tools
 
@@ -114,7 +103,7 @@ Task Dispatcher (runtime/task_dispatcher.py)
 
 ## 深度研究系统
 
-`deep_research` 是系统中最复杂的 agent，实现位于 `agents/deep_research/` 子包，支持三种图执行模式：
+深度研究是系统中最复杂的领域 agent，实现位于 `domain_agents/research/` 子包，支持三种图执行模式：
 
 | 模式 | 流程 | 适用场景 |
 | --- | --- | --- |
@@ -122,15 +111,21 @@ Task Dispatcher (runtime/task_dispatcher.py)
 | Hierarchical | plan → route subtasks → individual research → judge → synthesize | 复杂多维度问题 |
 | Parallel | plan → parallel workers → synthesis | 独立子问题可并行 |
 
-子包结构（`agents/deep_research/`）：
+子包结构（`domain_agents/research/`）：
 
 | 文件 | 职责 |
 | --- | --- |
+| `agent.py` | 入口函数、领域 runner |
 | `config.py` | 状态定义、研究配置、报告模板（default / academic_paper_guidance） |
 | `graphs.py` | LangGraph 图构建（simple / hierarchical / parallel） |
 | `prompts.py` | 系统提示词与报告模板选择 |
-| `run.py` | 入口函数、工具定义（web_search / academic_search / browser / ask_user / research_notes） |
+| `tools.py` | 领域工具（web_search / academic_search / browser / ask_user / research_notes） |
+| `schemas.py` | 领域数据模型 |
+| `renderers.py` | Markdown 渲染 |
+| `reviewers.py` | 评审门控 |
+| `worker.py` | 并行研究工作者（Wave-based 并行执行，最多 3 个并发） |
 | `utils.py` | 报告改写与辅助函数 |
+| `legacy_runner.py` | 遗留兼容入口 |
 
 依赖的 capabilities 模块：
 
@@ -148,8 +143,6 @@ Task Dispatcher (runtime/task_dispatcher.py)
 | PPT 能力 | `capabilities/ppt_capability.py` | 跨域 PPT 管线（storyline → DSL → 渲染） |
 | 浏览器工具包 | `capabilities/toolkits/browser_toolkit.py` | Browser-use 封装 |
 
-并行工作者：`agents/research_worker.py`（Wave-based 并行执行，最多 3 个并发）。
-
 报告模板：
 
 | profile | 说明 |
@@ -159,9 +152,20 @@ Task Dispatcher (runtime/task_dispatcher.py)
 
 运行参数：最多 15 步，每 5 步保存检查点，每 6 步生成中间摘要。
 
-## 流式任务协议
+## PPT 生成系统
 
-当前主协议不是旧版 `/ws`，而是任务式 API。
+PPT 领域 agent 位于 `domain_agents/ppt/`，实现完整的幻灯片生成管线：
+
+| 文件 | 职责 |
+| --- | --- |
+| `agent.py` | 入口 runner：大纲规划 → 并行搜索/文档分析 → 撰写 → 渲染 |
+| `search_agent.py` | Web 搜索与页面抓取 |
+| `doc_agent.py` | 读取并分析 PDF/文本/附件 |
+| `writer_agent.py` | 生成幻灯片 DSL JSON |
+
+流程：LLM 生成大纲 → 并行执行搜索和文档分析 → Writer 生成 Slide DSL → `ppt_engine/renderer.py` 渲染为 `.pptx`。
+
+## 流式任务协议
 
 ### 1. 上传附件
 
@@ -290,7 +294,7 @@ data/memory/<user_id>/
 
 当前逻辑：
 
-- `orchestrator` 路由开始前会根据 `user_id` 召回相关历史片段。
+- 领域 agent 执行前会根据 `user_id` 召回相关历史片段。
 - 任务结束后会把当前任务与结果写入时间线和月度摘要。
 - 同时尝试抽取稳定画像，更新长期 profile。
 
@@ -302,9 +306,9 @@ data/memory/<user_id>/
 .
 ├── main.py                        # FastAPI 入口（唯一根级模块）
 │
-├── task_platform/                 # 新架构：LangGraph 任务平台
+├── task_platform/                 # LangGraph 任务平台
 │   ├── root_graph.py              # 根状态图（路由 + 调度）
-│   ├── router.py                  # 意图路由（研究/专利/零号报告/通用/遗留）
+│   ├── router.py                  # 意图路由（研究/专利/零号报告/PPT/通用/追问）
 │   ├── state.py                   # 根图状态定义
 │   ├── domain_registry.py         # 领域 agent 注册表
 │   ├── renderer_registry.py       # 领域渲染器注册表
@@ -315,20 +319,31 @@ data/memory/<user_id>/
 │
 ├── domain_agents/                 # 领域 agent（每个领域一个子包）
 │   ├── research/                  # 研究报告领域
-│   │   ├── agent.py               # LangGraph 图 + 入口
+│   │   ├── agent.py               # 入口 runner
+│   │   ├── config.py              # 状态定义、研究配置
+│   │   ├── graphs.py              # LangGraph 图构建（simple / hierarchical / parallel）
 │   │   ├── prompts.py             # 系统提示词
 │   │   ├── schemas.py             # 领域数据模型
 │   │   ├── tools.py               # 领域工具
 │   │   ├── renderers.py           # Markdown 渲染
-│   │   └── reviewers.py           # 评审门控
+│   │   ├── reviewers.py           # 评审门控
+│   │   ├── worker.py              # 并行研究工作者
+│   │   ├── utils.py               # 报告改写辅助
+│   │   └── legacy_runner.py       # 遗留兼容入口
 │   ├── patent/                    # 专利撰写领域（同构）
-│   └── zero_report/               # 零号报告领域（同构）
+│   ├── zero_report/               # 零号报告领域（同构）
+│   └── ppt/                       # PPT 生成领域
+│       ├── agent.py               # 入口 runner（大纲→搜索→分析→撰写→渲染）
+│       ├── search_agent.py        # Web 搜索与页面抓取
+│       ├── doc_agent.py           # 文档分析
+│       └── writer_agent.py        # 幻灯片 DSL 生成
 │
 ├── core/                          # 基础设施层
 │   ├── models.py                  # 模型与 provider 配置中心
 │   ├── registry.py                # 统一能力注册表
 │   ├── logger.py                  # 结构化日志与监控汇总
 │   ├── content_utils.py           # 输出文本提取与清洗
+│   ├── langsmith_config.py        # LangSmith 开关、连接验证、run metadata
 │   └── r2_storage.py              # R2 对象存储
 │
 ├── runtime/                       # 任务运行时
@@ -342,6 +357,7 @@ data/memory/<user_id>/
 │   └── user_models.py             # 用户数据模型
 │
 ├── capabilities/                  # 可复用能力模块
+│   ├── general_chat.py            # 直接问答（流式文本增量）
 │   ├── context_manager.py         # 三层上下文管理 (raw → compact → summary)
 │   ├── progress_tracker.py        # 研究进度与缺口追踪
 │   ├── memory.py                  # 研究外部文件记忆 (data/research/)
@@ -354,22 +370,6 @@ data/memory/<user_id>/
 │   ├── ppt_capability.py          # 跨域 PPT 管线
 │   └── toolkits/
 │       └── browser_toolkit.py     # Browser-use 封装
-│
-├── orchestrator/                  # 遗留编排层（仅保留 PPT shim）
-│   └── runner.py                  # PPT 管线入口 + 快速问答回退
-│
-├── agents/                        # Agent 实现
-│   ├── general_chat.py            # 直接问答
-│   ├── deep_research/             # 多模式深度研究（子包）
-│   │   ├── config.py              # 状态、配置、报告模板
-│   │   ├── graphs.py              # LangGraph 图构建
-│   │   ├── prompts.py             # 系统提示词
-│   │   ├── run.py                 # 入口与工具定义
-│   │   └── utils.py               # 报告改写辅助
-│   ├── research_worker.py         # 并行研究工作者
-│   ├── search_agent.py            # Web 搜索
-│   ├── doc_agent.py               # 文档分析
-│   └── writer_agent.py            # 写作与幻灯片
 │
 ├── tools/                         # 工具实现
 │   ├── web_search.py              # Tavily 搜索
@@ -390,8 +390,8 @@ data/memory/<user_id>/
 ├── scripts/
 │   └── init.sql                   # PostgreSQL 建表脚本
 │
+├── docs/                          # 设计文档与计划
 ├── static/index.html              # 当前前端页面
-├── old/                           # 旧版前端与单体 agent 备份
 ├── uploads/                       # 上传文件
 ├── outputs/                       # 生成文件
 ├── data/                          # 运行时数据
@@ -443,7 +443,7 @@ playwright install chromium
 说明：
 
 - 依赖已定义在 `pyproject.toml`，使用 `uv pip install -e .` 即可安装全部依赖。
-- `playwright install chromium` 建议执行，因为 `deep_research` 会使用 `browser-use`。
+- `playwright install chromium` 建议执行，因为研究领域 agent 会使用 `browser-use`。
 
 ### 最小可用配置
 
@@ -478,6 +478,11 @@ LOCAL_AGENT_MEMORY_DIR=data/memory
 RESEARCH_DATA_DIR=data/research
 LLM_TIMEOUT_SECONDS=7200
 LLM_MAX_RETRIES=2
+
+# LangSmith（可选 — 启用后自动注入 tracing metadata）
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your_langsmith_key
+LANGSMITH_PROJECT=chat-dada
 
 # 图片生成
 IMAGE_GEN_API_URL=https://co.yes.vg/v1/chat/completions
@@ -530,12 +535,14 @@ task_id, seq, event_type, payload (JSONB), created_at
 
 ## 监控与调试
 
-除了业务事件流，后端还提供两个调试接口：
-
 | 接口 | 说明 |
 | --- | --- |
+| `GET /api/langsmith` | 返回 LangSmith tracing 当前状态与连接验证结果 |
+| `POST /api/langsmith` | `{"enabled": bool}` 动态开关 LangSmith tracing（无需重启） |
 | `GET /api/verbose` / `POST /api/verbose` | 查看或切换 verbose 输出 |
 | `POST /api/log-level` | 动态调整日志级别 |
+
+服务启动时会自动验证 LangSmith 连接，按结果打印 info/warning 日志。每次 graph 执行会自动注入 `task_id`、`user_id`、`domain`、`mode` 到 LangSmith run metadata 与 tags，可在 LangSmith 控制台按业务维度筛选。
 
 任务结束时会追加一个 `monitoring` 事件，内容来自 [core/logger.py](core/logger.py) 的采集汇总，包括耗时、LLM 调用数、token 统计和错误信息。
 
@@ -564,13 +571,3 @@ task_id, seq, event_type, payload (JSONB), created_at
 ```bash
 python -m pytest tests/ -v
 ```
-
-## 旧版代码说明
-
-这些路径仍保留，但不再是主执行链路：
-
-- [old/agent.py](old/agent.py)
-- [old/index.html](old/index.html)
-- [old/orchestrator.py](old/orchestrator.py)
-
-`orchestrator/runner.py` 已精简为 PPT-only shim（~180 行），仅保留 PPT 管线和快速问答回退。当前应以 [task_platform/root_graph.py](task_platform/root_graph.py) 和 [runtime/task_runtime.py](runtime/task_runtime.py) 为准。
