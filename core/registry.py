@@ -210,15 +210,3 @@ register("image_to_diagram", fn_path="tools.image_to_diagram:run",
 # New Agents (V2)
 register("deep_research", fn_path="agents.deep_research:run",
          cap_type="agent", description="Multi-round deep research with web + academic search")
-register("data_analyst", fn_path="agents.data_analyst:run",
-         cap_type="agent", description="Analyze data files with code execution and generate insights")
-
-# New Renderers (V2)
-register("word_render", fn_path="renderers.word_renderer:run",
-         cap_type="renderer", description="Render markdown text to editable .docx file")
-register("markdown_render", fn_path="renderers.markdown_renderer:run",
-         cap_type="renderer", description="Save markdown text to a .md file")
-register("excel_render", fn_path="renderers.excel_renderer:run",
-         cap_type="renderer", description="Render structured data to .xlsx Excel file")
-register("visio_render", fn_path="renderers.visio_renderer:run",
-         cap_type="renderer", description="Render diagram JSON to Visio format (placeholder, outputs JSON)")

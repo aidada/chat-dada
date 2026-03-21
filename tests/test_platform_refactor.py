@@ -43,7 +43,7 @@ class StreamingAdapterTests(unittest.TestCase):
         events = translate_stream_part(
             {"type": "updates", "data": {"__interrupt__": (_Interrupt(),)}},
             thread_id="task_2",
-            domain="legacy_fallback",
+            domain="ppt",
             checkpoint_id="ckpt_2",
             trace_metadata={"task_id": "task_2"},
         )
@@ -136,9 +136,9 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         try:
             with (
                 patch("domain_agents.research.agent.generate_research_plan", return_value=plan),
-                patch("agents.research_worker.run_worker", side_effect=fake_worker),
+                patch("domain_agents.research.worker.run_worker", side_effect=fake_worker),
                 patch(
-                    "agents.deep_research.utils._synthesize_parallel_findings",
+                    "domain_agents.research.utils._synthesize_parallel_findings",
                     return_value="final synthesized report with enough detail to pass the review gate and preserve artifacts.",
                 ),
             ):
@@ -219,7 +219,6 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
         decision = RouteDecision(
             route_name="orchestrator",
             reason="detected patent task",
-            executor=None,
             confidence=0.9,
         )
         route = build_route_payload(
@@ -278,7 +277,6 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
         decision = RouteDecision(
             route_name="orchestrator",
             reason="detected incident analysis task",
-            executor=None,
             confidence=0.9,
         )
         route = build_route_payload(
@@ -354,12 +352,12 @@ class ResumePathTests(unittest.TestCase):
     def test_resume_reads_execution_path_from_request_payload(self) -> None:
         """On resume, execution_path should come from request_payload, not route_name."""
         snapshot = {
-            "route_name": "orchestrator",
+            "route_name": "ppt",
             "route_reason": "test",
             "route_confidence": 0.9,
             "request_payload": {
-                "execution_path": "legacy_fallback",
-                "domain": "legacy_fallback",
+                "execution_path": "ppt",
+                "domain": "ppt",
             },
         }
         # Simulate the resume path logic
@@ -368,7 +366,7 @@ class ResumePathTests(unittest.TestCase):
             "execution_path",
             snapshot.get("route_name", ""),
         )
-        self.assertEqual(execution_path, "legacy_fallback")
+        self.assertEqual(execution_path, "ppt")
 
 
 class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
@@ -384,14 +382,12 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
             return RouteDecision(
                 route_name="orchestrator",
                 reason="test interrupt",
-                executor=None,
                 confidence=0.5,
             )
 
         checkpointer = InMemorySaver()
         graph = build_root_graph(
             dispatcher=fake_dispatcher,
-            executor_lookup=lambda tid: None,
             checkpointer=checkpointer,
         )
 
@@ -457,7 +453,6 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
             return RouteDecision(
                 route_name="general_chat",
                 reason="simple question",
-                executor=None,
                 confidence=0.95,
             )
 
@@ -467,7 +462,6 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
         checkpointer = InMemorySaver()
         graph = build_root_graph(
             dispatcher=fake_dispatcher,
-            executor_lookup=lambda tid: fake_general_chat,
             checkpointer=checkpointer,
         )
 
@@ -487,15 +481,16 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
         config = {"configurable": {"thread_id": "test_no_interrupt"}}
 
         interrupted = False
-        async for part in graph.astream(
-            initial_state,
-            config=config,
-            version="v2",
-            stream_mode=["updates"],
-        ):
-            data = part.get("data") or {}
-            if data.get("__interrupt__"):
-                interrupted = True
+        with patch("runtime.task_dispatcher.run_general_chat_task", new=fake_general_chat):
+            async for part in graph.astream(
+                initial_state,
+                config=config,
+                version="v2",
+                stream_mode=["updates"],
+            ):
+                data = part.get("data") or {}
+                if data.get("__interrupt__"):
+                    interrupted = True
 
         self.assertFalse(interrupted, "High-confidence task should not interrupt")
         state = await graph.aget_state(config)

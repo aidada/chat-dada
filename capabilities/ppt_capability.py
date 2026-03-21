@@ -81,12 +81,19 @@ def markdown_to_deck(title: str, markdown_report: str, *, author: str = "") -> P
 
 
 def render_deck_to_pptx(deck: PPTDeck, output_path: str) -> str:
-    """Render a PPTDeck to .pptx file using ppt_engine if available, else fallback."""
+    """Render a PPTDeck to .pptx file — fallback writes placeholder text."""
     try:
         from ppt_engine.renderer import render_pptx
-        from agents.writer_agent import deck_from_slides
+        from ppt_engine.dsl_schema import SlideDeck as PptSlideDeck, DeckMeta, Slide
 
-        ppt_deck = deck_from_slides(deck.title, deck.slides, author=deck.author)
+        ppt_slides = [
+            Slide(layout="content_only", title=sc.heading, body=sc.body, speaker_notes=sc.notes or None)
+            for sc in deck.slides
+        ]
+        ppt_deck = PptSlideDeck(
+            meta=DeckMeta(title=deck.title, author=deck.author),
+            slides=ppt_slides,
+        )
         render_pptx(ppt_deck, output_path)
     except ImportError:
         _log.warning("ppt_engine not available, writing placeholder pptx")

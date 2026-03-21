@@ -14,6 +14,7 @@ import asyncpg
 import redis.asyncio as aioredis
 from langgraph.types import Command
 
+from core.langsmith_config import build_langsmith_run_config
 from core.logger import monitor, new_trace_id
 from core.models import set_thinking_level
 from runtime.task_dispatcher import RouteDecision, dispatch_task
@@ -677,7 +678,6 @@ class TaskService:
         self._dispatcher = dispatcher
         self._redis: aioredis.Redis | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
-        self._dispatch_cache: dict[str, RouteDecision] = {}
         self._checkpointer_cm: Any | None = None
         self._checkpointer: Any | None = None
         self._root_graph: Any | None = None
@@ -702,7 +702,6 @@ class TaskService:
         self._checkpointer = await self._open_checkpointer()
         self._root_graph = build_root_graph(
             dispatcher=self._dispatcher,
-            executor_lookup=self._get_executor_for_task,
             checkpointer=self._checkpointer,
         )
 
@@ -720,10 +719,6 @@ class TaskService:
     @property
     def store(self) -> TaskRunStore:
         return self._store
-
-    def _get_executor_for_task(self, task_id: str) -> Any:
-        decision = self._dispatch_cache.get(task_id)
-        return getattr(decision, "executor", None)
 
     async def submit_task(
         self,
@@ -858,17 +853,12 @@ class TaskService:
         route_payload = snapshot.get("initial_route_payload")
         if resume_value is None:
             decision = await self._dispatcher(task_text, file_paths, mode, user_id)
-            self._dispatch_cache[task_id] = decision
             route_payload = build_route_payload(
                 task_text=task_text,
                 file_paths=file_paths,
                 decision=decision,
             )
-            public_route_name = (
-                decision.route_name
-                if route_payload["execution_path"] == "legacy_fallback"
-                else route_payload["route_name"]
-            )
+            public_route_name = route_payload["route_name"]
             await self._store.set_route_info(
                 task_id,
                 route_name=public_route_name,
@@ -954,9 +944,16 @@ class TaskService:
                 "conversation_context": conversation_context,
                 "request_payload": dict(request_payload),
                 "initial_route_payload": route_payload,
-                "legacy_route_name": getattr(decision, "route_name", ""),
             }
             config = {"configurable": {"thread_id": task_id}}
+            ls_config = build_langsmith_run_config(
+                task_id=task_id,
+                user_id=user_id,
+                domain=route_payload.get("route_name", ""),
+                mode=mode,
+            )
+            if ls_config:
+                config.update(ls_config)
             stream_input: Any = initial_state if resume_value is None else Command(resume=resume_value)
 
             async for part in self._root_graph.astream(
@@ -1050,7 +1047,6 @@ class TaskService:
             summary = monitor.get_summary(trace_id)
             await self.record_event(task_id, "monitoring", {"content": summary})
             await self._store.finish_task(task_id, "failed")
-            self._dispatch_cache.pop(task_id, None)
             monitor.finalize(trace_id)
             return
         finally:
@@ -1059,7 +1055,6 @@ class TaskService:
         summary = monitor.get_summary(trace_id)
         await self.record_event(task_id, "monitoring", {"content": summary})
         await self._store.finish_task(task_id, "succeeded")
-        self._dispatch_cache.pop(task_id, None)
         monitor.finalize(trace_id)
 
         # Fire-and-forget: generate embeddings for future retrieval

@@ -10,7 +10,7 @@ class RouteDecisionPayload(TypedDict):
     route_name: str
     reason: str
     confidence: float
-    execution_path: Literal["general_chat", "research", "patent", "zero_report", "legacy_fallback", "needs_clarification"]
+    execution_path: Literal["general_chat", "research", "patent", "zero_report", "ppt", "needs_clarification"]
 
 
 class UIEventPayload(TypedDict, total=False):
@@ -48,7 +48,6 @@ class RootState(TypedDict, total=False):
     route_reason: str
     route_confidence: float
     domain: str
-    legacy_route_name: str
     needs_clarification: bool
     clarification_prompt: NotRequired[dict[str, Any]]
     pending_question: NotRequired[dict[str, Any]]

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from contextvars import Token
-import inspect
 from typing import Any
 
 from langgraph.config import get_stream_writer
@@ -17,23 +16,12 @@ from task_platform.tracing import build_trace_metadata
 from runtime.task_interaction import reset_graph_interrupt_bridge, set_graph_interrupt_bridge
 
 
-OnStep = Callable[[str], Awaitable[None]]
-LegacyExecutor = Callable[[str, OnStep, str, str], Awaitable[str]]
 Dispatcher = Callable[[str, list[str], str, str], Awaitable[Any]]
-ExecutorLookup = Callable[[str], Any]
 
 
 def _emit_custom(payload: dict[str, Any]) -> None:
     writer = get_stream_writer()
     writer(payload)
-
-
-async def _legacy_on_step(step_info: str) -> None:
-    from runtime.task_runtime import parse_step_payload
-
-    event_type, payload = parse_step_payload(step_info)
-    payload["event_type"] = event_type
-    _emit_custom(payload)
 
 
 def _build_clarification_prompt(state: RootState) -> dict[str, Any]:
@@ -89,7 +77,6 @@ def make_route_domain(dispatcher: Dispatcher):
             "route_reason": route["reason"],
             "route_confidence": route["confidence"],
             "domain": domain,
-            "legacy_route_name": getattr(decision, "route_name", state.get("legacy_route_name", "")),
             "trace_metadata": build_trace_metadata(
                 task_id=state["task_id"],
                 user_id=state["user_id"],
@@ -100,23 +87,6 @@ def make_route_domain(dispatcher: Dispatcher):
         }
 
     return route_domain
-
-
-async def _invoke_executor(
-    executor: LegacyExecutor,
-    *,
-    task: str,
-    on_step: OnStep,
-    user_id: str,
-    conversation_context: str,
-) -> str:
-    signature = inspect.signature(executor)
-    kwargs: dict[str, Any] = {}
-    if "user_id" in signature.parameters:
-        kwargs["user_id"] = user_id
-    if "conversation_context" in signature.parameters:
-        kwargs["conversation_context"] = conversation_context
-    return await executor(task, on_step, **kwargs)
 
 
 async def maybe_clarify(state: RootState) -> dict[str, Any]:
@@ -135,26 +105,25 @@ def _interrupt_bridge(payload: dict[str, Any]) -> str:
     return str(request_interrupt({**payload, "interrupt_type": "human_input"}))
 
 
-def make_run_general_chat(executor_lookup: ExecutorLookup):
-    async def run_general_chat(state: RootState) -> dict[str, Any]:
-        executor = executor_lookup(state["task_id"])
-        if executor is None:
-            from runtime.task_dispatcher import run_general_chat_task
+async def run_general_chat(state: RootState) -> dict[str, Any]:
+    from runtime.task_dispatcher import run_general_chat_task
+    from runtime.task_runtime import parse_step_payload
 
-            executor = run_general_chat_task
-        result = await _invoke_executor(
-            executor,
-            task=state["execution_task"],
-            on_step=_legacy_on_step,
-            user_id=state["user_id"],
-            conversation_context=state.get("conversation_context", ""),
-        )
-        return {
-            "final_result": result,
-            "artifact_refs": [],
-        }
+    async def on_step(step_info: str) -> None:
+        event_type, payload = parse_step_payload(step_info)
+        payload["event_type"] = event_type
+        _emit_custom(payload)
 
-    return run_general_chat
+    result = await run_general_chat_task(
+        state["execution_task"],
+        on_step,
+        user_id=state["user_id"],
+        conversation_context=state.get("conversation_context", ""),
+    )
+    return {
+        "final_result": result,
+        "artifact_refs": [],
+    }
 
 
 def make_run_registered_domain(domain_name: str, *, enable_interrupt_bridge: bool = False):
@@ -196,29 +165,6 @@ def make_run_registered_domain(domain_name: str, *, enable_interrupt_bridge: boo
     return run_registered_domain
 
 
-def make_run_legacy_fallback(executor_lookup: ExecutorLookup):
-    async def run_legacy_fallback(state: RootState) -> dict[str, Any]:
-        executor = executor_lookup(state["task_id"])
-        if executor is None:
-            from orchestrator.runner import run_orchestrator
-
-            executor = run_orchestrator
-
-        token: Token[Any] = set_graph_interrupt_bridge(_interrupt_bridge)
-        try:
-            result = await _invoke_executor(
-                executor,
-                task=state["execution_task"],
-                on_step=_legacy_on_step,
-                user_id=state["user_id"],
-                conversation_context=state.get("conversation_context", ""),
-            )
-        finally:
-            reset_graph_interrupt_bridge(token)
-        return {"final_result": result}
-
-    return run_legacy_fallback
-
 async def persist_summary(state: RootState) -> dict[str, Any]:
     """Persist a rolling conversation summary for multi-turn context."""
     conversation_id = state.get("conversation_id", "")
@@ -250,16 +196,16 @@ def select_path(state: RootState) -> str:
     return state["route_decision"]["execution_path"]
 
 
-def build_root_graph(*, dispatcher: Dispatcher, executor_lookup: ExecutorLookup, checkpointer: Any):
+def build_root_graph(*, dispatcher: Dispatcher, checkpointer: Any):
     graph = StateGraph(RootState)
     graph.add_node("normalize_input", normalize_input)
     graph.add_node("route_domain", make_route_domain(dispatcher))
     graph.add_node("maybe_clarify", maybe_clarify)
-    graph.add_node("run_general_chat", make_run_general_chat(executor_lookup))
+    graph.add_node("run_general_chat", run_general_chat)
     graph.add_node("run_research", make_run_registered_domain("research", enable_interrupt_bridge=True))
     graph.add_node("run_patent", make_run_registered_domain("patent", enable_interrupt_bridge=True))
     graph.add_node("run_zero_report", make_run_registered_domain("zero_report", enable_interrupt_bridge=True))
-    graph.add_node("run_legacy_fallback", make_run_legacy_fallback(executor_lookup))
+    graph.add_node("run_ppt", make_run_registered_domain("ppt", enable_interrupt_bridge=True))
     graph.add_node("persist_summary", persist_summary)
 
     graph.add_edge(START, "normalize_input")
@@ -272,7 +218,7 @@ def build_root_graph(*, dispatcher: Dispatcher, executor_lookup: ExecutorLookup,
             "research": "run_research",
             "patent": "run_patent",
             "zero_report": "run_zero_report",
-            "legacy_fallback": "run_legacy_fallback",
+            "ppt": "run_ppt",
             "needs_clarification": "maybe_clarify",
         },
     )
@@ -281,6 +227,6 @@ def build_root_graph(*, dispatcher: Dispatcher, executor_lookup: ExecutorLookup,
     graph.add_edge("run_research", "persist_summary")
     graph.add_edge("run_patent", "persist_summary")
     graph.add_edge("run_zero_report", "persist_summary")
-    graph.add_edge("run_legacy_fallback", "persist_summary")
+    graph.add_edge("run_ppt", "persist_summary")
     graph.add_edge("persist_summary", END)
     return graph.compile(checkpointer=checkpointer, name="chat_dada_root_graph")

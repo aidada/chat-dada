@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from core.langsmith_config import is_langsmith_enabled, set_langsmith_enabled, verify_langsmith_connection
 from core.logger import is_verbose, monitor, set_log_level, set_verbose, setup_logging
 from runtime.task_runtime import HEARTBEAT_INTERVAL_SECONDS, TaskService, format_sse, task_is_terminal
 
@@ -45,6 +46,15 @@ task_service = TaskService(DATABASE_URL, REDIS_URL)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await task_service.connect()
+    ls_status = verify_langsmith_connection()
+    if ls_status.get("ok"):
+        log.info(
+            "LangSmith tracing enabled — project=%s endpoint=%s",
+            ls_status.get("project"),
+            ls_status.get("endpoint"),
+        )
+    else:
+        log.warning("LangSmith tracing unavailable: %s", ls_status.get("reason"))
     yield
     await task_service.close()
 
@@ -78,6 +88,10 @@ class TaskCreateRequest(BaseModel):
 
 class TaskReplyRequest(BaseModel):
     answer: str
+
+
+class LangSmithToggleRequest(BaseModel):
+    enabled: bool
 
 
 class VerboseRequest(BaseModel):
@@ -472,6 +486,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 await task_service.unsubscribe(task_id, pubsub)
     except WebSocketDisconnect:
         log.info("Client disconnected")
+
+
+@app.get("/api/langsmith")
+async def get_langsmith_status():
+    status = verify_langsmith_connection()
+    return {"enabled": is_langsmith_enabled(), **status}
+
+
+@app.post("/api/langsmith")
+async def toggle_langsmith(req: LangSmithToggleRequest):
+    set_langsmith_enabled(req.enabled)
+    return {"enabled": is_langsmith_enabled()}
 
 
 @app.post("/api/verbose")

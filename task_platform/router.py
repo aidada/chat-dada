@@ -45,17 +45,15 @@ ZERO_REPORT_KEYWORDS = (
     "zero report",
 )
 
-LEGACY_FALLBACK_KEYWORDS = (
+PPT_KEYWORDS = (
     "ppt",
     "幻灯片",
-    "图片",
-    "生图",
-    "logo",
-    "海报",
-    "word",
-    "excel",
-    "visio",
-    "流程图",
+    "演示文稿",
+    "slide",
+    "slides",
+    "powerpoint",
+    "presentation",
+    "deck",
 )
 
 
@@ -83,38 +81,29 @@ def build_route_payload(
     file_paths: list[str],
     decision: RouteDecision,
 ) -> RouteDecisionPayload:
-    executor = getattr(decision, "executor", None)
-    if decision.route_name == "orchestrator" and executor is not None:
-        executor_module = getattr(executor, "__module__", "")
-        if executor_module and executor_module != "orchestrator.runner":
-            return {
-                "route_name": "legacy_fallback",
-                "reason": decision.reason,
-                "confidence": decision.confidence,
-                "execution_path": "legacy_fallback",
-            }
+    lowered = (task_text or "").lower()
 
     if decision.route_name == "general_chat":
         execution_path: RouteDecisionPayload["execution_path"] = "general_chat"
-    elif any(keyword in (task_text or "").lower() for keyword in PATENT_KEYWORDS):
+    elif any(keyword in lowered for keyword in PATENT_KEYWORDS):
         execution_path = "patent"
-    elif any(keyword in (task_text or "").lower() for keyword in ZERO_REPORT_KEYWORDS):
+    elif any(keyword in lowered for keyword in ZERO_REPORT_KEYWORDS):
         execution_path = "zero_report"
     elif needs_clarification(task_text, decision):
         execution_path = "needs_clarification"
     elif is_research_task(task_text, file_paths):
         execution_path = "research"
     else:
-        execution_path = "legacy_fallback"
+        execution_path = "general_chat"
 
-    if any(keyword in (task_text or "").lower() for keyword in LEGACY_FALLBACK_KEYWORDS):
-        execution_path = "legacy_fallback"
+    # PPT keywords override — highest priority among content-based routes
+    if any(keyword in lowered for keyword in PPT_KEYWORDS):
+        execution_path = "ppt"
 
     from task_platform.domain_registry import registry as domain_registry
 
     if not domain_registry.is_registered(execution_path) and execution_path not in (
         "general_chat",
-        "legacy_fallback",
         "needs_clarification",
     ):
         _log.warning("Routed to unregistered domain %r — execution may fail", execution_path)

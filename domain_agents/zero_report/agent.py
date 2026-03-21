@@ -98,8 +98,10 @@ async def build_deepagents_zero_report_agent() -> object:
             "tools": tools,
         },
     ]
+    from core.models import build_chat_model
+
     return create_deep_agent(
-        model="openai:gpt-5.4-mini",
+        model=build_chat_model("zero_report_domain"),
         system_prompt=BASE_ZERO_REPORT_SYSTEM,
         tools=tools,
         subagents=subagents,

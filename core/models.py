@@ -81,6 +81,10 @@ MODEL_CONFIGS: dict[str, dict] = {
     "writer": {"model": "gpt-5.4", "provider": "proxy"},
     "deep_research": {"model": "gpt-5.4", "provider": "proxy"},
     "data_analyst": {"model": "gpt-5.4", "provider": "proxy"},
+    # 新增
+    "research_domain": {"model": "gpt-5.4", "provider": "proxy"},
+    "patent_domain": {"model": "gpt-5.4", "provider": "proxy"},
+    "zero_report_domain": {"model": "gpt-5.4", "provider": "proxy"},
 }
 
 
@@ -469,8 +473,13 @@ def response_text(response: Any) -> str:
     return str(content)
 
 
-def get_llm(role: str, **kwargs: Any) -> BaseChatModel:
-    """Get an LLM instance for a specific agent role.
+def build_chat_model(role: str, **kwargs: Any) -> BaseChatModel:
+    """Get a raw BaseChatModel instance for a specific agent role.
+
+    Unlike ``get_llm``, this does **not** wrap the result with ``_LoggingLLM``,
+    so the returned object is a genuine ``BaseChatModel`` subclass.  Use this
+    when a downstream library (e.g. *deepagents*) requires a real
+    ``BaseChatModel``.
 
     Args:
         role: One of the roles defined in MODEL_CONFIGS
@@ -524,9 +533,24 @@ def get_llm(role: str, **kwargs: Any) -> BaseChatModel:
     else:
         client_kwargs["thinking_level"] = thinking_level
 
+    return _build_client(provider["client"], model, api_key, **client_kwargs)
+
+
+def get_llm(role: str, **kwargs: Any) -> BaseChatModel:
+    """Get an LLM instance for a specific agent role (wrapped with logging).
+
+    Args:
+        role: One of the roles defined in MODEL_CONFIGS
+        **kwargs: Override any model parameter (e.g. temperature=0, max_tokens=8192)
+
+    Raises:
+        KeyError: if role or provider is not registered
+        EnvironmentError: if the required API key env var is not set
+    """
     from core.logger import _LoggingLLM
 
-    client = _build_client(provider["client"], model, api_key, **client_kwargs)
+    model = MODEL_CONFIGS[role]["model"]  # KeyError propagates from build_chat_model
+    client = build_chat_model(role, **kwargs)
     return _LoggingLLM(client, role, model)
 
 

@@ -4,10 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
-from agents.general_chat import run as run_general_chat
-from orchestrator.runner import run_orchestrator
-
-TaskExecutor = Callable[[str, Callable[[str], Awaitable[None]], str], Awaitable[str]]
+from capabilities.general_chat import run as run_general_chat
 
 AGENT_KEYWORDS = (
     "搜索",
@@ -97,7 +94,6 @@ MULTI_STEP_HINTS = (
 class RouteDecision:
     route_name: str
     reason: str
-    executor: TaskExecutor
     confidence: float
 
 
@@ -165,10 +161,8 @@ async def dispatch_task(
     user_id: str = "anonymous",
 ) -> RouteDecision:
     route_name, reason, confidence = route_task_request(task_text, file_paths, mode)
-    executor = run_general_chat_task if route_name == "general_chat" else run_orchestrator
     return RouteDecision(
         route_name=route_name,
         reason=reason,
-        executor=executor,
         confidence=confidence,
     )

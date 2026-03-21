@@ -6,7 +6,28 @@ from unittest.mock import patch, MagicMock
 import browser_use
 from langchain_core.messages import AIMessage, ToolMessage
 
-from agents import deep_research
+from domain_agents.research.config import (
+    ACADEMIC_PAPER_GUIDANCE_PROFILE,
+    ResearchConfig,
+    SUMMARY_INTERVAL,
+)
+from domain_agents.research.graphs import (
+    build_hierarchical_research_graph,
+    build_parallel_research_graph,
+    research_finish,
+)
+from domain_agents.research.legacy_runner import run as run_deep_research
+from domain_agents.research.prompts import (
+    _build_research_messages,
+    _resolve_report_profile,
+)
+from domain_agents.research.tools import CORE_TOOLS, browser_navigate
+from domain_agents.research.utils import (
+    _generate_structured_summary,
+    _retry_async,
+    _rewrite_final_report,
+    _synthesize_parallel_findings,
+)
 
 
 class _FakeBrowserProfile:
@@ -48,25 +69,25 @@ class _FakeLLM:
 
 class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
     def test_resolve_report_profile_auto_selects_academic_paper_guidance(self) -> None:
-        profile = deep_research._resolve_report_profile(
+        profile = _resolve_report_profile(
             "请做文献综述，并说明这篇论文后续应该怎么写 introduction 和 experiment",
         )
 
-        self.assertEqual(profile, deep_research.ACADEMIC_PAPER_GUIDANCE_PROFILE)
+        self.assertEqual(profile, ACADEMIC_PAPER_GUIDANCE_PROFILE)
 
     def test_resolve_report_profile_honors_explicit_override(self) -> None:
-        profile = deep_research._resolve_report_profile(
+        profile = _resolve_report_profile(
             "请做市场调研",
             requested_profile="academic",
         )
 
-        self.assertEqual(profile, deep_research.ACADEMIC_PAPER_GUIDANCE_PROFILE)
+        self.assertEqual(profile, ACADEMIC_PAPER_GUIDANCE_PROFILE)
 
     def test_build_research_messages_include_academic_writing_sections(self) -> None:
-        messages = deep_research._build_research_messages(
+        messages = _build_research_messages(
             "请帮我做论文引言相关的文献综述",
             "### note\nexisting",
-            deep_research.ACADEMIC_PAPER_GUIDANCE_PROFILE,
+            ACADEMIC_PAPER_GUIDANCE_PROFILE,
         )
 
         self.assertEqual(len(messages), 2)
@@ -79,61 +100,14 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             patch.object(browser_use, "Agent", _FakeBrowserAgent),
             patch.object(browser_use, "BrowserSession", _FakeBrowserSession),
             patch.object(browser_use, "BrowserProfile", _FakeBrowserProfile),
-            patch("agents.deep_research.run.get_browser_use_llm", return_value="mock-llm") as mocked_get_llm,
+            patch("domain_agents.research.tools.get_browser_use_llm", return_value="mock-llm") as mocked_get_llm,
         ):
-            result = await deep_research.browser_navigate.ainvoke(
+            result = await browser_navigate.ainvoke(
                 {"task_description": "Open example.com"}
             )
 
         mocked_get_llm.assert_called_once_with("deep_research")
         self.assertEqual(result, "Browser task done.")
-
-    async def test_research_planner_uses_deep_research_role(self) -> None:
-        state = {"messages": [], "query": "GNSS", "step_count": 0}
-
-        with patch("agents.deep_research.graphs.get_llm", return_value=_FakeLLM()) as mocked_get_llm:
-            result = await deep_research.research_planner(state)
-
-        mocked_get_llm.assert_called_once_with("deep_research")
-        self.assertEqual(result["step_count"], 1)
-        self.assertEqual(result["messages"], ["ok"])
-
-    async def test_research_planner_builds_compact_prompt_from_context(self) -> None:
-        captured: dict[str, object] = {}
-
-        class _InspectBoundLLM:
-            async def ainvoke(self, messages):
-                captured["messages"] = messages
-                return AIMessage(content="final answer")
-
-        class _InspectLLM:
-            def bind_tools(self, tools):
-                return _InspectBoundLLM()
-
-        state = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[{"id": "call_1", "name": "brave_search", "args": {"query": "GNSS"}}],
-                ),
-                ToolMessage(content="A" * 1200, tool_call_id="call_1", name="brave_search"),
-            ],
-            "query": "GNSS NLOS",
-            "step_count": 1,
-        }
-
-        with patch("agents.deep_research.graphs.get_llm", return_value=_InspectLLM()):
-            result = await deep_research.research_planner(state)
-
-        prompt_messages = captured["messages"]
-        self.assertEqual(len(prompt_messages), 2)
-        self.assertIn("当前研究笔记（已压缩）", prompt_messages[1].content)
-        # Three-tier context is now used in prompt
-        self.assertIn("## 研究总结", prompt_messages[1].content)
-        self.assertIn("## 最近发现（完整）", prompt_messages[1].content)
-        # research_context is populated
-        self.assertIn("research_context", result)
-        self.assertTrue(len(result["research_context"]["entries"]) > 0)
 
     async def test_research_finish_extracts_text_from_responses_blocks(self) -> None:
         state = {
@@ -149,7 +123,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             "step_count": 2,
         }
 
-        result = deep_research.research_finish(state)
+        result = research_finish(state)
 
         self.assertEqual(result["_final_text"], "## 直接结论\n\n可以，但依赖额外几何约束。")
 
@@ -163,7 +137,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             "step_count": 2,
         }
 
-        result = deep_research.research_finish(state)
+        result = research_finish(state)
 
         self.assertEqual(result["_final_text"], "## 直接结论\n\n前一轮已经给出结论。")
 
@@ -181,7 +155,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             "research_context": ctx.to_dict(),
         }
 
-        result = deep_research.research_finish(state)
+        result = research_finish(state)
 
         self.assertIn("已有检索笔记", result["_final_text"])
 
@@ -200,10 +174,10 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=_FakeGraph()),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.graphs.build_research_graph", return_value=_FakeGraph()),
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
         ):
-            result = await deep_research.run("GNSS NLOS")
+            result = await run_deep_research("GNSS NLOS")
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["result"], "## 直接结论\n\n结论更聚焦。")
@@ -221,10 +195,10 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
                 return AIMessage(content="## 文献综述正文\n\n聚焦论文写作建议。")
 
         with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=_FakeGraph()),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.graphs.build_research_graph", return_value=_FakeGraph()),
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
         ):
-            result = await deep_research.run(
+            result = await run_deep_research(
                 {
                     "search_query": {
                         "query": "请做文献综述并指导后续论文写作",
@@ -236,7 +210,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["state"]["query"], "请做文献综述并指导后续论文写作")
         self.assertEqual(
             captured["state"]["report_profile"],
-            deep_research.ACADEMIC_PAPER_GUIDANCE_PROFILE,
+            ACADEMIC_PAPER_GUIDANCE_PROFILE,
         )
         self.assertEqual(result["result"], "## 文献综述正文\n\n聚焦论文写作建议。")
 
@@ -248,50 +222,17 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
                 captured["messages"] = messages
                 return AIMessage(content="## 文献综述正文\n\nAcademic draft.")
 
-        with patch("agents.deep_research.utils.get_llm", return_value=_InspectRewriteLLM()):
-            result = await deep_research._rewrite_final_report(
+        with patch("domain_agents.research.utils.get_llm", return_value=_InspectRewriteLLM()):
+            result = await _rewrite_final_report(
                 "请帮我做后续论文写作指导",
                 "raw notes",
-                deep_research.ACADEMIC_PAPER_GUIDANCE_PROFILE,
+                ACADEMIC_PAPER_GUIDANCE_PROFILE,
             )
 
         prompt_messages = captured["messages"]
         self.assertIn("对后续论文写作的明确建议", prompt_messages[0].content)
         self.assertIn("当前输出模板：academic_paper_guidance", prompt_messages[1].content)
         self.assertEqual(result, "## 文献综述正文\n\nAcademic draft.")
-
-    async def test_research_planner_populates_research_context(self) -> None:
-        """Verify research_planner returns research_context with entries."""
-        class _InspectBoundLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="continuing research")
-
-        class _InspectLLM:
-            def bind_tools(self, tools):
-                return _InspectBoundLLM()
-
-        state = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[{"id": "call_1", "name": "web_search", "args": {"query": "test"}}],
-                ),
-                ToolMessage(content="result from search https://example.com", tool_call_id="call_1", name="web_search"),
-            ],
-            "query": "test query",
-            "step_count": 1,
-            "research_context": {},
-            "task_id": "",
-        }
-
-        with patch("agents.deep_research.graphs.get_llm", return_value=_InspectLLM()):
-            result = await deep_research.research_planner(state)
-
-        self.assertIn("research_context", result)
-        ctx = result["research_context"]
-        self.assertIsInstance(ctx, dict)
-        self.assertTrue(len(ctx.get("entries", [])) > 0)
-        self.assertEqual(ctx["entries"][0]["tool_name"], "web_search")
 
     async def test_run_creates_research_memory(self) -> None:
         """Verify run() initializes ResearchMemory and saves final report."""
@@ -304,14 +245,14 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
                 return AIMessage(content="## 直接结论\n\nRewritten.")
 
         with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=_FakeGraph()),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
+            patch("domain_agents.research.graphs.build_research_graph", return_value=_FakeGraph()),
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.legacy_runner.ResearchMemory") as MockMemory,
         ):
             mock_instance = MagicMock()
             MockMemory.return_value = mock_instance
 
-            result = await deep_research.run("test query")
+            result = await run_deep_research("test query")
 
         self.assertEqual(result["status"], "ok")
         mock_instance.init.assert_called_once()
@@ -332,12 +273,12 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
+            patch("domain_agents.research.graphs.build_research_graph", return_value=fake_graph),
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.legacy_runner.ResearchMemory") as MockMemory,
         ):
             MockMemory.return_value = MagicMock()
-            result = await deep_research.run("simple question")
+            result = await run_deep_research("simple question")
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("直接结论", result["result"])
@@ -346,43 +287,10 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(fake_graph.captured_state["task_id"], str)
         self.assertEqual(fake_graph.captured_state["progress"], {})
 
-    async def test_research_planner_populates_progress(self) -> None:
-        """Verify research_planner returns progress dict with tracked searches."""
-        class _InspectBoundLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="continuing")
-
-        class _InspectLLM:
-            def bind_tools(self, tools):
-                return _InspectBoundLLM()
-
-        state = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[{"id": "call_1", "name": "web_search", "args": {"query": "GNSS accuracy"}}],
-                ),
-                ToolMessage(content="GNSS provides 3m accuracy.", tool_call_id="call_1", name="web_search"),
-            ],
-            "query": "GNSS research",
-            "step_count": 1,
-            "research_context": {},
-            "task_id": "",
-            "progress": {},
-        }
-
-        with patch("agents.deep_research.graphs.get_llm", return_value=_InspectLLM()):
-            result = await deep_research.research_planner(state)
-
-        self.assertIn("progress", result)
-        progress = result["progress"]
-        self.assertIn("GNSS accuracy", progress["completed_searches"])
-        self.assertTrue(len(progress["key_findings_so_far"]) > 0)
-
     def test_build_research_messages_attention_block(self) -> None:
         """Verify attention_block appears at end of prompt."""
         block = "---\n研究进度：\n目标：test\n---"
-        messages = deep_research._build_research_messages(
+        messages = _build_research_messages(
             "test query", "notes", attention_block=block,
         )
         self.assertIn(block, messages[1].content)
@@ -401,9 +309,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
+            patch("domain_agents.research.graphs.build_research_graph", return_value=fake_graph),
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.legacy_runner.ResearchMemory") as MockMemory,
         ):
             mock_instance = MagicMock()
             mock_instance.load_checkpoint.return_value = {
@@ -414,7 +322,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             mock_instance.load_meta.return_value = {"query": "GNSS research", "report_profile": "default"}
             MockMemory.return_value = mock_instance
 
-            result = await deep_research.run({"resume_task_id": "research_abc123"})
+            result = await run_deep_research({"resume_task_id": "research_abc123"})
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(fake_graph.captured_state["step_count"], 5)
@@ -433,16 +341,16 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
+            patch("domain_agents.research.graphs.build_research_graph", return_value=fake_graph),
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.legacy_runner.ResearchMemory") as MockMemory,
         ):
             mock_instance = MagicMock()
             mock_instance.load_checkpoint.return_value = None
             mock_instance.init.return_value = None
             MockMemory.return_value = mock_instance
 
-            result = await deep_research.run({"query": "test", "resume_task_id": "nonexistent"})
+            result = await run_deep_research({"query": "test", "resume_task_id": "nonexistent"})
 
         self.assertEqual(result["status"], "ok")
         # Should start from step 0 since no checkpoint
@@ -460,28 +368,28 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         tracker = ProgressTracker(original_query="test")
         tracker.record_search("q1", success=True)
 
-        with patch("agents.deep_research.utils.get_llm", return_value=_SummaryLLM()):
-            summary = await deep_research._generate_structured_summary("test query", ctx, tracker)
+        with patch("domain_agents.research.utils.get_llm", return_value=_SummaryLLM()):
+            summary = await _generate_structured_summary("test query", ctx, tracker)
         self.assertIn("Summary", summary)
 
         # Verify the interval logic: step divisible by SUMMARY_INTERVAL should trigger
-        self.assertEqual(deep_research.SUMMARY_INTERVAL % deep_research.SUMMARY_INTERVAL, 0)
+        self.assertEqual(SUMMARY_INTERVAL % SUMMARY_INTERVAL, 0)
 
     async def test_summary_not_generated_before_interval(self) -> None:
         """Verify summary is NOT generated before SUMMARY_INTERVAL."""
         # step=3 should not trigger summary (SUMMARY_INTERVAL=6)
-        self.assertNotEqual(3 % deep_research.SUMMARY_INTERVAL, 0)
+        self.assertNotEqual(3 % SUMMARY_INTERVAL, 0)
 
     def test_core_tools_include_memory_tools(self) -> None:
         """Verify CORE_TOOLS includes save/recall research notes."""
-        tool_names = [t.name for t in deep_research.CORE_TOOLS]
+        tool_names = [t.name for t in CORE_TOOLS]
         self.assertIn("save_research_note", tool_names)
         self.assertIn("recall_research_notes", tool_names)
 
     def test_hierarchical_graph_compiles(self) -> None:
         """Verify the hierarchical graph compiles without errors."""
         with patch("core.registry.get_tools_for_agent", return_value=[]):
-            graph = deep_research.build_hierarchical_research_graph()
+            graph = build_hierarchical_research_graph()
         self.assertIsNotNone(graph)
 
     async def test_run_hierarchical_mode(self) -> None:
@@ -498,12 +406,12 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.graphs.build_hierarchical_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
+            patch("domain_agents.research.graphs.build_hierarchical_research_graph", return_value=fake_graph),
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.legacy_runner.ResearchMemory") as MockMemory,
         ):
             MockMemory.return_value = MagicMock()
-            result = await deep_research.run({"query": "test", "hierarchical": True})
+            result = await run_deep_research({"query": "test", "hierarchical": True})
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("research_plan", fake_graph.captured_state)
@@ -512,7 +420,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
     def test_parallel_graph_compiles(self) -> None:
         """Verify the parallel graph compiles without errors."""
         with patch("core.registry.get_tools_for_agent", return_value=[]):
-            graph = deep_research.build_parallel_research_graph()
+            graph = build_parallel_research_graph()
         self.assertIsNotNone(graph)
 
     async def test_run_parallel_mode(self) -> None:
@@ -529,24 +437,24 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.graphs.build_parallel_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
+            patch("domain_agents.research.graphs.build_parallel_research_graph", return_value=fake_graph),
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.legacy_runner.ResearchMemory") as MockMemory,
         ):
             MockMemory.return_value = MagicMock()
-            result = await deep_research.run({"query": "test", "parallel": True})
+            result = await run_deep_research({"query": "test", "parallel": True})
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("research_plan", fake_graph.captured_state)
         self.assertEqual(fake_graph.captured_state["research_plan"], {})
 
     async def test_run_empty_query_returns_error(self) -> None:
-        result = await deep_research.run("")
+        result = await run_deep_research("")
         self.assertEqual(result["status"], "error")
         self.assertIn("不能为空", result["result"])
 
     async def test_run_empty_dict_query_returns_error(self) -> None:
-        result = await deep_research.run({"query": ""})
+        result = await run_deep_research({"query": ""})
         self.assertEqual(result["status"], "error")
         self.assertIn("不能为空", result["result"])
 
@@ -564,12 +472,12 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         long_query = "A" * 15000
 
         with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
+            patch("domain_agents.research.graphs.build_research_graph", return_value=fake_graph),
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.legacy_runner.ResearchMemory") as MockMemory,
         ):
             MockMemory.return_value = MagicMock()
-            result = await deep_research.run(long_query)
+            result = await run_deep_research(long_query)
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(fake_graph.captured_state["query"]), 10000)
@@ -579,8 +487,8 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, messages):
                 return AIMessage(content="合并后的发现报告")
 
-        with patch("agents.deep_research.utils.get_llm", return_value=_SynthLLM()):
-            result = await deep_research._synthesize_parallel_findings(
+        with patch("domain_agents.research.utils.get_llm", return_value=_SynthLLM()):
+            result = await _synthesize_parallel_findings(
                 "test query",
                 {"sub_1": "发现1", "sub_2": "发现2"},
                 "default",
@@ -593,9 +501,9 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, messages):
                 raise ConnectionError("LLM unavailable")
 
-        with patch("agents.deep_research.utils.get_llm", return_value=_FailLLM()):
+        with patch("domain_agents.research.utils.get_llm", return_value=_FailLLM()):
             with self.assertRaises((ConnectionError, OSError)):
-                await deep_research._synthesize_parallel_findings(
+                await _synthesize_parallel_findings(
                     "test query", {"sub_1": "f1"}, "default",
                 )
 
@@ -606,7 +514,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             call_count += 1
             return "success"
 
-        result = await deep_research._retry_async(_ok, max_retries=2, delay=0.01)
+        result = await _retry_async(_ok, max_retries=2, delay=0.01)
         self.assertEqual(result, "success")
         self.assertEqual(call_count, 1)
 
@@ -619,7 +527,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
                 raise OSError("transient")
             return "recovered"
 
-        result = await deep_research._retry_async(_flaky, max_retries=2, delay=0.01)
+        result = await _retry_async(_flaky, max_retries=2, delay=0.01)
         self.assertEqual(result, "recovered")
         self.assertEqual(call_count, 2)
 
@@ -628,7 +536,7 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             raise OSError("persistent failure")
 
         with self.assertRaises(OSError):
-            await deep_research._retry_async(_always_fail, max_retries=1, delay=0.01)
+            await _retry_async(_always_fail, max_retries=1, delay=0.01)
 
     async def test_retry_async_no_retry_on_value_error(self) -> None:
         call_count = 0
@@ -638,18 +546,18 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
             raise ValueError("bad")
 
         with self.assertRaises(ValueError):
-            await deep_research._retry_async(_bad_input, max_retries=2, delay=0.01)
+            await _retry_async(_bad_input, max_retries=2, delay=0.01)
         self.assertEqual(call_count, 1)
 
     def test_config_from_dict_defaults(self) -> None:
-        config = deep_research.ResearchConfig.from_dict({})
+        config = ResearchConfig.from_dict({})
         self.assertEqual(config.max_steps, 15)
         self.assertEqual(config.checkpoint_interval, 5)
         self.assertEqual(config.summary_interval, 6)
         self.assertEqual(config.max_parallel_workers, 3)
 
     def test_config_from_dict_custom(self) -> None:
-        config = deep_research.ResearchConfig.from_dict({"max_steps": 5, "checkpoint_interval": 2})
+        config = ResearchConfig.from_dict({"max_steps": 5, "checkpoint_interval": 2})
         self.assertEqual(config.max_steps, 5)
         self.assertEqual(config.checkpoint_interval, 2)
         self.assertEqual(config.summary_interval, 6)  # default
@@ -667,29 +575,22 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph) as mock_build,
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
+            patch("domain_agents.research.graphs.build_research_graph", return_value=fake_graph) as mock_build,
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.legacy_runner.ResearchMemory") as MockMemory,
         ):
             MockMemory.return_value = MagicMock()
-            result = await deep_research.run({"query": "test", "config": {"max_steps": 3}})
+            result = await run_deep_research({"query": "test", "config": {"max_steps": 3}})
 
         self.assertEqual(result["status"], "ok")
         call_args = mock_build.call_args
         config_arg = call_args[0][0] if call_args[0] else call_args[1].get("config")
         self.assertEqual(config_arg.max_steps, 3)
 
-    def test_research_should_continue_non_ai_last_message(self) -> None:
-        """Non-AIMessage last message should return 'finish'."""
-        from langchain_core.messages import HumanMessage
-        state = {"messages": [HumanMessage(content="test")], "step_count": 0, "query": "test"}
-        result = deep_research.research_should_continue(state)
-        self.assertEqual(result, "finish")
-
     def test_research_finish_no_messages(self) -> None:
         """Empty messages list should not crash."""
         state = {"messages": [], "query": "test", "step_count": 0}
-        result = deep_research.research_finish(state)
+        result = research_finish(state)
         self.assertIn("_final_text", result)
 
     async def test_run_exception_in_memory_init_continues(self) -> None:
@@ -706,15 +607,15 @@ class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
         fake_graph = _FakeGraph()
 
         with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
+            patch("domain_agents.research.graphs.build_research_graph", return_value=fake_graph),
+            patch("domain_agents.research.utils.get_llm", return_value=_RewriteLLM()),
+            patch("domain_agents.research.legacy_runner.ResearchMemory") as MockMemory,
         ):
             mock_instance = MagicMock()
             mock_instance.init.side_effect = OSError("disk full")
             MockMemory.return_value = mock_instance
 
-            result = await deep_research.run("test query")
+            result = await run_deep_research("test query")
 
         self.assertEqual(result["status"], "ok")
         # task_id should be empty since init failed
@@ -734,7 +635,7 @@ class SearchToolSelectionTests(unittest.TestCase):
 
     def test_early_step_general_query(self):
         """Steps 0-3 with general query: only web_search + brave_search."""
-        from agents.deep_research.graphs import _select_search_tools
+        from domain_agents.research.graphs import _select_search_tools
         tools = self._make_all_search_tools()
         state = {"step_count": 0, "query": "how does GPS work", "progress": {}}
         selected = _select_search_tools(state, tools)
@@ -743,7 +644,7 @@ class SearchToolSelectionTests(unittest.TestCase):
 
     def test_early_step_academic_query(self):
         """Steps 0-3 with academic query: adds academic_search."""
-        from agents.deep_research.graphs import _select_search_tools
+        from domain_agents.research.graphs import _select_search_tools
         tools = self._make_all_search_tools()
         state = {"step_count": 1, "query": "请帮我写一篇关于GNSS多路径的论文", "progress": {}}
         selected = _select_search_tools(state, tools)
@@ -753,7 +654,7 @@ class SearchToolSelectionTests(unittest.TestCase):
 
     def test_late_step_opens_exa(self):
         """Step >= 4 opens exa_deep_search."""
-        from agents.deep_research.graphs import _select_search_tools
+        from domain_agents.research.graphs import _select_search_tools
         tools = self._make_all_search_tools()
         state = {"step_count": 5, "query": "test query", "progress": {}}
         selected = _select_search_tools(state, tools)
@@ -762,7 +663,7 @@ class SearchToolSelectionTests(unittest.TestCase):
 
     def test_gaps_with_paper_keyword_opens_academic_and_exa_early(self):
         """Gaps mentioning 论文 opens academic_search and exa at step >= 2."""
-        from agents.deep_research.graphs import _select_search_tools
+        from domain_agents.research.graphs import _select_search_tools
         tools = self._make_all_search_tools()
         state = {
             "step_count": 2,
@@ -776,7 +677,7 @@ class SearchToolSelectionTests(unittest.TestCase):
 
     def test_gaps_keyword_at_step_1_no_exa(self):
         """Gaps with keyword at step 1: academic yes, exa no (needs step >= 2)."""
-        from agents.deep_research.graphs import _select_search_tools
+        from domain_agents.research.graphs import _select_search_tools
         tools = self._make_all_search_tools()
         state = {
             "step_count": 1,
@@ -790,7 +691,7 @@ class SearchToolSelectionTests(unittest.TestCase):
 
     def test_many_findings_removes_brave(self):
         """8+ findings removes brave_search."""
-        from agents.deep_research.graphs import _select_search_tools
+        from domain_agents.research.graphs import _select_search_tools
         tools = self._make_all_search_tools()
         state = {
             "step_count": 5,
@@ -804,7 +705,7 @@ class SearchToolSelectionTests(unittest.TestCase):
 
     def test_apply_tool_selection_preserves_non_search_tools(self):
         """_apply_tool_selection keeps non-search tools unchanged."""
-        from agents.deep_research.graphs import _apply_tool_selection
+        from domain_agents.research.graphs import _apply_tool_selection
         all_tools = self._make_all_search_tools() + [
             self._make_tool("browser_navigate"),
             self._make_tool("ask_user_clarification"),

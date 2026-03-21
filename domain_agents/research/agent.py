@@ -79,7 +79,7 @@ async def _generate_plan(query: str, report_profile: str) -> ResearchPlan:
 
 
 async def _run_parallel_worker_node(state: ParallelResearchState) -> dict[str, Any]:
-    from agents.research_worker import run_worker
+    from domain_agents.research.worker import run_worker
     from domain_agents.research.tools import get_research_tools
 
     subtask = state["subtask"]
@@ -121,7 +121,7 @@ def _fan_out(state: ParallelResearchState) -> list[Send]:
 
 
 async def _synthesize_parallel_results(state: ParallelResearchState) -> dict[str, Any]:
-    from agents.deep_research.utils import _synthesize_parallel_findings
+    from domain_agents.research.utils import _synthesize_parallel_findings
 
     results = {item["subtask_id"]: item.get("findings", "") for item in state.get("worker_results", [])}
     try:
@@ -246,7 +246,7 @@ def _collect_artifact_refs(task_id: str) -> list[dict[str, Any]]:
 
 
 async def _run_legacy_research(input_data: dict[str, Any]) -> str:
-    from agents.deep_research import run as deep_research_run
+    from domain_agents.research.legacy_runner import run as deep_research_run
 
     result = await deep_research_run(input_data)
     return str(result.get("result", result))
@@ -271,8 +271,10 @@ async def build_deepagents_research_agent() -> object:
             "tools": get_research_tools(),
         },
     ]
+    from core.models import build_chat_model
+
     return create_deep_agent(
-        model="openai:gpt-5.4-mini",
+        model=build_chat_model("research_domain"),
         system_prompt="你是 research domain agent，负责规划研究并组织子代理协作。",
         tools=get_research_tools(),
         subagents=subagents,
@@ -312,29 +314,28 @@ async def run_research_domain(input_data: dict[str, Any]) -> ResearchDomainResul
     elif use_deepagents:
         strategy = "deepagents_harness"
         _safe_emit("step", "🤖 Building deepagents research agent...")
-        try:
-            agent = await build_deepagents_research_agent()
-            _safe_emit("step", "🚀 Executing deepagents research...")
-            response = await agent.ainvoke(
-                {"messages": [HumanMessage(content=f"请深入研究以下主题，并给出中文研究摘要：{query}")]}
-            )
-            messages = response.get("messages", []) if isinstance(response, dict) else []
-            final_text = ""
-            for message in reversed(messages):
-                if isinstance(message, AIMessage):
-                    final_text = extract_result_text(getattr(message, "content", ""))
-                    if final_text:
-                        break
-            if not final_text:
-                _safe_emit("step", "⚠️ Deepagents produced no output, falling back to legacy research")
-                final_text = await _run_legacy_research(input_data)
-                strategy = "legacy_fallback"
-        except Exception:
-            _safe_emit("step", "⚠️ Deepagents failed, falling back to legacy research")
-            final_text = await _run_legacy_research(input_data)
-            strategy = "legacy_fallback"
-    else:
-        final_text = await _run_legacy_research(input_data)
+        agent = await build_deepagents_research_agent()
+        _safe_emit("step", "🚀 Executing deepagents research...")
+        response = await agent.ainvoke(
+            {"messages": [HumanMessage(content=f"请深入研究以下主题，并给出中文研究摘要：{query}")]}
+        )
+        messages = response.get("messages", []) if isinstance(response, dict) else []
+        final_text = ""
+        for message in reversed(messages):
+            if isinstance(message, AIMessage):
+                final_text = extract_result_text(getattr(message, "content", ""))
+                if final_text:
+                    break
+    #         if not final_text:
+    #             _safe_emit("step", "⚠️ Deepagents produced no output, falling back to legacy research")
+    #             final_text = await _run_legacy_research(input_data)
+    #             strategy = "legacy_fallback"
+        # except Exception:
+            # _safe_emit("step", "⚠️ Deepagents failed, falling back to legacy research")
+    #         final_text = await _run_legacy_research(input_data)
+    #         strategy = "legacy_fallback"
+    # else:
+    #     final_text = await _run_legacy_research(input_data)
 
     if task_id:
         ResearchMemory(task_id).save_final_report(final_text)

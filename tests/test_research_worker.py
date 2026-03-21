@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 from langchain_core.messages import AIMessage
 
-from agents.research_worker import (
+from domain_agents.research.worker import (
     build_worker_graph,
     run_worker,
     coordinate_research,
@@ -39,7 +39,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
             "completion_criteria": "Found accuracy data",
         }
 
-        with patch("agents.research_worker.get_llm", return_value=_FakeLLM()):
+        with patch("domain_agents.research.worker.get_llm", return_value=_FakeLLM()):
             findings = await run_worker(subtask, tools=[])
 
         self.assertIn("Worker findings", findings)
@@ -65,7 +65,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
             "completion_criteria": "done",
         }
 
-        with patch("agents.research_worker.get_llm", return_value=_CountingLLM()):
+        with patch("domain_agents.research.worker.get_llm", return_value=_CountingLLM()):
             findings = await run_worker(subtask, tools=[])
 
         # Worker should stop after max_rounds even if LLM keeps producing text
@@ -81,7 +81,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        with patch("agents.research_worker.get_llm", return_value=_FakeLLM()):
+        with patch("domain_agents.research.worker.get_llm", return_value=_FakeLLM()):
             results = await coordinate_research(plan, tools=[])
 
         self.assertIn("sub_1", results)
@@ -117,7 +117,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
             def bind_tools(self, tools):
                 return _FailFirstBoundLLM()
 
-        with patch("agents.research_worker.get_llm", return_value=_FailFirstLLM()):
+        with patch("domain_agents.research.worker.get_llm", return_value=_FailFirstLLM()):
             results = await coordinate_research(plan, tools=[])
 
         # Both should have results (one is an error message)
@@ -129,7 +129,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_finish_empty_messages(self) -> None:
         """Empty messages list should not crash worker_finish."""
-        from agents.research_worker import worker_finish
+        from domain_agents.research.worker import worker_finish
         state = {"messages": [], "findings": "existing"}
         result = worker_finish(state)
         self.assertIn("findings", result)
@@ -145,7 +145,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        with patch("agents.research_worker.get_llm", return_value=_FakeLLM()):
+        with patch("domain_agents.research.worker.get_llm", return_value=_FakeLLM()):
             results = await coordinate_research(plan, tools=[])
 
         self.assertIn("sub_1", results)

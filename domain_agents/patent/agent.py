@@ -100,8 +100,10 @@ async def build_deepagents_patent_agent() -> object:
             "tools": tools,
         },
     ]
+    from core.models import build_chat_model
+
     return create_deep_agent(
-        model="openai:gpt-5.4-mini",
+        model=build_chat_model("patent_domain"),
         system_prompt=PATENT_DOMAIN_PROMPT,
         tools=tools,
         subagents=subagents,
