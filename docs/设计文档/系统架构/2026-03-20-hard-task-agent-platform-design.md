@@ -72,6 +72,24 @@
 
 而不是承诺暴露“模型原始思维链”。
 
+### 6. Maturity Over Appearance
+
+成熟 deep thinking 的判断标准不是“会写长分析”或“看起来思考很多”，而是：
+
+- 有统一 runtime
+- 有 layered memory/context
+- 有 verifier/reviewer
+- 有 budget protocol
+- 有 artifact-first 输出
+- 有 HITL/interrupt/resume
+- 有评估与观测
+
+详细判断依据与实现指导见：
+
+- [Deep Thinking 成熟度判断与实现指导](./2026-03-20-deep-thinking-maturity-guide.md)
+- [Deep Thinking 实施验收清单](../../实施计划/待执行/2026-03-20-deep-thinking-acceptance-checklist.md)
+- [General Chat 定位与路由语义设计](./2026-03-21-general-chat-positioning-design.md)
+
 ## 目标分层
 
 ### 1. 目标目录与职责
@@ -91,7 +109,9 @@ chat-dada/
 │   ├── state.py                  # RootState / typed artifacts / UI event payloads
 │   ├── streaming.py              # graph.astream(... version="v2") 适配
 │   ├── interrupts.py             # 审批/澄清/补件等 HITL gate
-│   └── tracing.py                # LangSmith tags / metadata / sampling
+│   ├── tracing.py                # LangSmith tags / metadata / sampling
+│   ├── domain_registry.py        # 领域 agent 注册（供 route_domain 使用）
+│   └── renderer_registry.py      # 渲染器注册（按 artifact 类型路由）
 │
 ├── domain_agents/
 │   ├── research/
@@ -119,10 +139,14 @@ chat-dada/
 ├── capabilities/
 │   ├── evidence_store.py         # URL/file/table/quote 统一证据抽象
 │   ├── citation_manager.py       # 引用标准化、去重、编号
-│   ├── review_gates.py           # domain-independent review gate primitives
+│   ├── review_gates.py           # ReviewGate 框架（structural + semantic checks）
+│   ├── budget_policy.py          # 全局用户配额检查与降级策略
+│   ├── retry_policy.py           # 工具/LLM 调用重试与容错策略
+│   ├── ppt_capability.py         # PPT storyline 规划 + DSL 生成 + 渲染
+│   ├── context_manager.py        # 领域上下文保真压缩（research raw/compact/summary）
 │   ├── doc_workspace.py          # 文件工作区 / artifact 版本管理
 │   ├── memory.py                 # thread/user memory
-│   └── toolkits/                 # 搜索、文档、代码执行、图表等通用工具包
+│   └── toolkits/                 # 搜索、文档、代码执行、图表、browser 等通用工具包
 │
 ├── agents/                       # 兼容层：对旧 registry 继续暴露 run()
 ├── orchestrator/                 # 迁移期兼容目录，逐步退役
@@ -202,6 +226,8 @@ capabilities / tools / renderers / storage
 - `task_id`
 - `user_id`
 - `intent`
+- `route_decision`
+- `needs_clarification`
 - `input_payload`
 - `attachments`
 - `thread_context`
@@ -223,6 +249,36 @@ capabilities / tools / renderers / storage
 8. `render_outputs`
 9. `persist_summary`
 10. `finish`
+
+### `general_chat` 的定位
+
+`general_chat` 在目标架构中不应视为与 `research / patent / zero_report` 对称的独立领域。
+
+它更适合作为：
+
+- `fallback path`
+- `conversation gateway`
+- `needs_clarification` 的澄清入口
+
+这意味着：
+
+1. 当用户只是闲聊或快速问答时，`route_domain` 可以直接返回 `direct_chat`
+2. 当领域意图明确时，`route_domain` 返回 `domain_selected`
+3. 当意图不明确时，`route_domain` 返回 `needs_clarification`，先进入 `run_general_chat` 补信息，再二次路由
+
+详细说明见：
+
+- [General Chat 定位与路由语义设计](./2026-03-21-general-chat-positioning-design.md)
+
+### `platform/router.py` 目标语义
+
+建议 `platform/router.py` 至少支持三类路由结果：
+
+1. `direct_chat`
+2. `domain_selected`
+3. `needs_clarification`
+
+其中 `needs_clarification` 不是失败态，而是显式的对话澄清态。
 
 ### 根图执行方式
 
@@ -333,22 +389,11 @@ Runtime/API shell
 
 ## 记忆与上下文分层
 
-`deepagents` 确实自带 memory/context management，但它解决的是 **agent 工作区上下文管理**，不是完整的 **产品级记忆体系**。
+`deepagents` 自带 memory/context management（`SummarizationMiddleware`、`FilesystemBackend`、subagent 隔离上下文），但它解决的是 **通用上下文窗口管理**，不是完整的 **产品级记忆体系**。
 
-当前系统里实际上已经存在 4 类不同性质的记忆：
+经过对比分析，当前系统的领域上下文压缩（`ResearchContext` 的 `raw → compact → summary` 三层压缩）在证据来源保真、基于证据强度的差异化压缩、结构化行提取等方面，优于 deepagents 的通用 `SummarizationMiddleware`。因此领域上下文压缩应保留为独立层。
 
-1. **用户长期记忆**：用户画像、偏好、项目生命周期、近期时间线
-2. **会话上下文记忆**：多轮任务/对话的摘要、最近轮次、检索增强上下文
-3. **领域任务上下文记忆**：如 research 的 `raw -> compact -> summary`
-4. **任务 artifact / 证据记忆**：findings、sources、draft、final report、附件证据
-
-另外还有一类不应再被当成“业务记忆”的内容：
-
-5. **执行状态恢复**：checkpoint / interrupt / resume
-
-这一类应由 LangGraph runtime/checkpointer 接管，而不是由领域 agent 自己保存 JSON 状态。
-
-### 目标记忆分层图
+### 目标记忆分层（5 层）
 
 ```text
                          ┌────────────────────────────────────┐
@@ -358,21 +403,16 @@ Runtime/API shell
                          └────────────────┬───────────────────┘
                                           │
                          ┌────────────────▼───────────────────┐
-                         │    Conversation Memory Layer       │
-                         │ summary / recent rounds / recall   │
-                         │ task-thread or conversation scoped │
-                         └────────────────┬───────────────────┘
-                                          │
-                         ┌────────────────▼───────────────────┐
-                         │     Workspace Memory Layer         │
-                         │ AGENTS.md / skills / files         │
-                         │ deepagents-native working memory   │
+                         │      Thread Memory Layer           │
+                         │ conversation history + workspace   │
+                         │ deepagents Summarization/FS 统一管理│
                          └────────────────┬───────────────────┘
                                           │
                   ┌───────────────────────▼────────────────────────┐
                   │         Domain Context Memory Layer            │
                   │ research raw/compact/summary, patent notes,    │
                   │ zero-report timeline/root-cause structures     │
+                  │ 证据保真压缩，非通用摘要可替代                     │
                   └───────────────────────┬────────────────────────┘
                                           │
                          ┌────────────────▼───────────────────┐
@@ -388,247 +428,59 @@ Runtime/API shell
                          └────────────────────────────────────┘
 ```
 
-### deepagents 自带 memory/context 的能力边界
+### 各层职责与实现方
 
-`deepagents` 原生提供的内容主要是：
+| 层 | 职责 | 实现方 |
+|---|---|---|
+| User Memory | 跨任务用户画像、偏好、项目生命周期 | 保留 `user_store_v2`（结构化 facts/projects/confidence） |
+| Thread Memory | 会话历史摘要 + 工作区文件管理 | deepagents（SummarizationMiddleware + FilesystemBackend） |
+| Domain Context | 领域证据保真压缩（source_urls/evidence_strength/key_claims） | 保留 `ResearchContext`，后续扩展到 patent/zero_report |
+| Artifact/Evidence | 结构化产物和证据存储 | 平台 `capabilities/evidence_store.py` |
+| Checkpoint | 执行恢复 | LangGraph checkpointer |
 
-- `memory=[...]` 对 `AGENTS.md` 的自动注入
-- `FilesystemBackend` 读写工作区文件
-- 长任务自动摘要与大输出落文件
-- subagent 的隔离上下文
-- skills 的按需加载
+### 为什么不把 Domain Context 合并到 Thread Memory
 
-这些能力非常适合：
+deepagents 的 `SummarizationMiddleware` 是对消息历史的通用 LLM 压缩，而 `ResearchContext` 做了 4 件 deepagents 不做的事：
 
-- 复杂任务拆解
-- 长文档/长研究的工作区管理
-- 子代理协作时控制上下文膨胀
-- 让 agent 在文件工作区里逐步构建中间产物
+1. **证据来源保真**：`FindingEntry` 把 `source_urls`、`evidence_strength`、`key_claims` 作为一等字段保留
+2. **基于证据强度的差异化压缩**：strong evidence 用 LLM 精细摘要，weak evidence 用截取关键行
+3. **结构化行提取**：识别 markdown 标题、列表项、数据模式，优先保留结构信息
+4. **三层独立预算的 prompt 组装**：summary / compact / raw 三层各自控制 token 预算
 
-但它不直接解决：
-
-- 结构化用户画像与项目生命周期
-- 产品级跨任务记忆召回
-- 会话轮次检索与摘要治理
-- 研究领域的来源保真与证据链压缩
-- 平台级 task/thread checkpoint 语义
-
-### 与当前方案的对比
-
-| 维度 | 当前方案 | deepagents 内建方案 | 结论 |
-|------|----------|---------------------|------|
-| 用户长期记忆 | `MemoryStoreV2`，有 facts/projects/confidence/timeline | `AGENTS.md` 文本记忆 | 当前方案明显更强，应保留 |
-| 会话上下文 | 摘要 + recent + retrieval | 自动摘要，偏 agent 内部 | 当前方案更适合产品级会话记忆，应保留思路 |
-| 任务工作区 | 目前分散在 research memory / 文件落盘 | `FilesystemBackend` + 文件工具天然支持 | deepagents 更适合，建议采用 |
-| 研究上下文压缩 | `ResearchContext` 的 `raw -> compact -> summary` | 通用 auto-summarization | research 域保留现有方案更好 |
-| artifact / 证据 | findings/summaries/final_report 落盘 | 可写文件，但无固定 schema | 当前方案应升级为结构化 artifact/evidence store |
-| checkpoint / resume | `ResearchMemory` 自定义 JSON checkpoint | graph 侧由 LangGraph 更适合接管 | 应放弃自定义 checkpoint |
+对于研究/专利/归零报告这种溯源是核心需求的场景，通用摘要会导致早期发现的关键 URL 和证据强度信息丢失。
 
 ### 兼容策略
 
-推荐策略不是“二选一”，而是分层兼容：
-
-#### 保留当前方案的部分
-
-- `storage/user_store_v2.py`
-  - 保留为产品级用户长期记忆
-- `runtime/conversation_context.py`
-  - 升级为通用会话记忆服务
-- `capabilities/context_manager.py`
-  - 保留为 research 域上下文压缩能力
-- `capabilities/memory.py` 中的 findings / summaries / final report 落盘思想
-  - 提炼为 artifact/evidence store
-
-#### 引入 deepagents 的部分
-
-- 工作区文件系统记忆
-- 长任务自动摘要
-- subagent 隔离上下文
-- skills / AGENTS.md 规则注入
-
-#### 应替换掉的部分
-
-- `capabilities/memory.py` 中的自定义 checkpoint/resume
-  - 由 LangGraph checkpointer 接管
-
-### 最终建议
-
-最合适的落点是：
-
 ```text
-UserMemory              -> 保留现有结构化方案
-ConversationMemory      -> 保留现有策略并服务化
-WorkspaceMemory         -> 使用 deepagents
-DomainContextMemory     -> 保留 research 等领域专用方案
-Artifact/EvidenceMemory -> 由现有 research memory 升级而来
-ExecutionCheckpoint     -> 改用 LangGraph
+UserMemory              -> 保留现有结构化方案（user_store_v2）
+ThreadMemory            -> deepagents（Summarization + Filesystem + subagent isolation）
+DomainContextMemory     -> 保留 ResearchContext，后续扩展
+Artifact/EvidenceMemory -> 由现有 research memory 升级为结构化 evidence store
+ExecutionCheckpoint     -> LangGraph checkpointer
 ```
 
-也就是说：
+> **产品级 memory 用现有方案；通用上下文管理用 deepagents；领域证据压缩保留专用方案；执行恢复交给 LangGraph。**
 
-> **产品级 memory 继续用当前方案；agent 工作区 memory 用 deepagents；执行恢复交给 LangGraph。**
+## Browser Capability
 
-## Browser Capability 设计
+重构后，`browser_use` 不再以私有工具形式分散在各 agent 内，而是上收为共享 browser capability（`capabilities/toolkits/browser_toolkit.py`）。
 
-当前仓库中，`browser_use` 只在两个地方被实际使用：
+定位：高成本、低吞吐、强交互的网页执行能力，用于动态页面、多步交互、结构化页面证据采集，不是默认搜索路径。
 
-- `agents/search_agent.py` 中的 `browser_navigate`
-- `agents/deep_research/run.py` 中的 `browser_navigate`
+各领域适用性：research 域优先使用，patent 域谨慎使用（仅页面核实），zero_report 域按需使用（仅门户采集）。
 
-底层还有一层统一适配：
+详细接口草图、Schema 定义、运行约束与各领域策略见：
 
-- `core/models.py` 中的 `_BrowserUseResponsesAdapter`
-- `core/models.py` 中的 `get_browser_use_llm(...)`
+- [Browser Capability 设计](./2026-03-20-browser-capability-design.md)
 
-这说明当前系统已经具备 browser automation 的基础能力，但其组织方式仍是：
+## Deep Thinking 成熟度与制作标准
 
-1. **能力分散**：`search` 和 `deep_research` 各自内嵌一份工具
-2. **返回值过弱**：当前浏览器工具主要返回字符串总结，不利于前端渲染和证据追踪
-3. **缺少平台约束**：没有统一的启用条件、速率控制、审计结构和 artifact 输出规范
+本设计是成熟 deep thinking 的平台骨架，不是成熟能力本身。架构正确不等于能力已经成熟。
 
-因此，重构后不应把 `browser_use` 当成“某个 agent 的私有工具”，而应提升为 **共享 browser capability**。
+成熟 deep thinking agent 的判断标准（8 个维度）、制作标准（6 条优先序）、以及可执行的验收检查项，见独立文档：
 
-### 目标定位
-
-`browser_use` 在目标架构中的角色是：
-
-> **高成本、低吞吐、强交互的网页执行能力。用于动态页面、多步交互、结构化页面证据采集，而不是默认搜索路径。**
-
-它适合解决的问题：
-
-- JS-heavy 页面抓取
-- 登录后/交互后页面内容提取
-- 分页、展开、点击后可见信息采集
-- 需要截图、页面证据和步骤审计的网页任务
-
-它不适合作为：
-
-- 默认搜索入口
-- 通用问答的常规路径
-- 没有明确页面交互需求时的第一选择
-
-### 目标分层位置
-
-推荐将其上收为共享 toolkit：
-
-```text
-capabilities/
-└── toolkits/
-    └── browser_toolkit.py
-
-或
-
-tools/
-└── browser_navigate.py
-```
-
-由领域 agent 显式引用，而不是在每个 agent 内部各写一遍。
-
-### 在各领域 agent 中的适用性
-
-#### 1. Research Agent
-
-最适合使用 `browser_use`。
-
-典型场景：
-
-- 访问搜索结果中的具体网页
-- 抓取需要展开/滚动/点击后才能看到的研究资料
-- 获取动态网页中的事实、表格、引用和截图
-- 对网页证据进行可追溯采集
-
-建议策略：
-
-- 优先用搜索/API 工具发现来源
-- 仅当需要深入页面细节时再升级到 browser capability
-
-#### 2. Patent Agent
-
-可以使用，但应克制。
-
-典型场景：
-
-- 浏览 Google Patents / Espacenet / CNIPA / USPTO 的具体专利详情页
-- 采集现有技术页面、产品规格页、技术公告页
-- 获取需要页面交互后可见的对比证据
-
-不建议：
-
-- 让 browser capability 成为 prior-art 检索默认主路径
-
-建议策略：
-
-- 检索优先走专利检索工具/API
-- 页面级核实和证据补充再用浏览器
-
-#### 3. Zero Report Agent
-
-仅在需要接 Web 门户时启用。
-
-典型场景：
-
-- 工单系统
-- 监控平台
-- 事故时间线后台
-- 内部 wiki / 知识库页面
-
-如果数据已通过日志、附件、结构化接口可获得，则不应使用浏览器。
-
-### 目标输出结构
-
-重构后，browser capability 不应继续只返回字符串，而应返回结构化结果：
-
-```json
-{
-  "summary": "页面任务总结",
-  "visited_urls": ["..."],
-  "page_artifacts": [
-    {
-      "url": "...",
-      "title": "...",
-      "html_path": "...",
-      "screenshot_path": "...",
-      "text_excerpt": "..."
-    }
-  ],
-  "extracted_evidence": [
-    {
-      "type": "quote|table|fact|screenshot",
-      "content": "...",
-      "source_url": "...",
-      "locator": "selector/xpath/section"
-    }
-  ],
-  "execution_log": [
-    {"step": 1, "action": "open", "target": "..."},
-    {"step": 2, "action": "click", "target": "..."}
-  ]
-}
-```
-
-这样才能支撑：
-
-- 文档溯源卡片
-- 页面截图卡片
-- 工具调用进度条
-- 证据引用与审计
-
-### 运行约束
-
-由于 browser capability 慢、贵、脆，必须加平台级约束：
-
-1. 并发限制
-2. 最大步数限制
-3. 任务超时
-4. 域级白名单/策略
-5. 截图和页面 artifact 的存储策略
-6. LangSmith trace tags（区分 browser task）
-
-### 最终建议
-
-重构后应将 `browser_use` 定义为：
-
-> **共享的 browser capability，由 research 域优先使用，patent 域谨慎使用，zero_report 域按需使用；禁止作为平台默认执行路径。**
+- [Deep Thinking 成熟度判断与实现指导](./2026-03-20-deep-thinking-maturity-guide.md)
+- [Deep Thinking 实施验收清单](../../实施计划/待执行/2026-03-20-deep-thinking-acceptance-checklist.md)
 
 ## 流式事件协议
 
@@ -715,12 +567,170 @@ tools/
 
 兼容层负责把旧接口映射到新的 root graph 执行，不要求前端一次性重写。
 
+## Review Gate 框架
+
+Review gate 不是一个大 prompt，而应区分确定性规则和 LLM 语义判断：
+
+### 标准结构
+
+```python
+class ReviewGate:
+    structural_checks: list[Callable]   # 确定性规则，无 LLM
+    semantic_checks: list[LLMCheck]     # LLM 判断，有 prompt + 评分标准
+    gate_policy: Literal["pass_all", "pass_ratio"]  # 通过策略
+    on_fail: Literal["retry", "escalate", "interrupt"]  # 失败后行为
+```
+
+### structural_checks 示例
+
+- 引用完整性：每个 `[n]` 标记是否都有对应的 source URL（正则匹配）
+- 权利要求依赖：从属权利要求是否引用了已有权利要求号（结构化校验）
+- 行动项时限：每个行动项是否有责任人和截止日期（schema 校验）
+- Artifact 字段完整性：必填字段是否为空（Pydantic validator）
+
+### semantic_checks 示例
+
+- 研究缺口：现有发现是否覆盖了用户提出的所有子问题
+- 术语一致性：说明书中的术语是否和权利要求中使用的一致
+- 因果链合理性：根因分析是否逻辑自洽
+
+### 实现位置
+
+基础框架放在 `capabilities/review_gates.py`，各领域的 `reviewers.py` 继承并填充具体规则。
+
+## Budget Policy 设计
+
+预算策略基于用户全局配额，而非单任务硬限。
+
+### 接口设计
+
+```python
+class BudgetPolicy:
+    def check(self, user_quota: UserQuota, current_usage: BudgetUsage) -> BudgetDecision:
+        """检查用户剩余配额，决定是否继续。"""
+        ...
+
+class BudgetDecision(Enum):
+    CONTINUE = "continue"           # 余量充足，正常继续
+    ESCALATE = "escalate_to_human"  # 接近阈值，触发 interrupt 询问用户
+```
+
+### 核心逻辑
+
+1. 不做单任务预算限制
+2. 在任务关键节点检查用户全局剩余额度
+3. 接近用户剩余配额时，通过 graph interrupt 主动询问用户是否继续
+4. 如果任务预计消耗较大（如并行 worker、browser 操作），提前告知用户预估成本
+
+### 实现位置
+
+`capabilities/budget_policy.py`，由 root graph 或领域 agent 在关键节点调用。
+
+## Retry Policy 设计
+
+任务级别的错误恢复策略，覆盖 LLM API 超时、browser 崩溃、工具调用失败等场景。
+
+### 接口设计
+
+```python
+class RetryPolicy:
+    max_retries: int = 3             # 单工具调用最大重试次数
+    retry_delay_seconds: float = 2.0 # 重试间隔
+    fallback_provider: str | None    # LLM 失败时的备选 provider
+    on_exhaust: Literal["skip", "stop", "escalate"]  # 重试耗尽后行为
+```
+
+### 与 checkpoint 的关系
+
+LangGraph checkpoint 保存的是节点间的状态。如果节点内部执行（第 N 步）崩溃，checkpoint 保存的是第 N-1 步的状态。RetryPolicy 负责：
+
+- 节点内部工具调用的重试
+- 重试耗尽后决定跳过/停止/升级为人工
+- 进程级崩溃后，从 checkpoint 恢复时自动重试失败节点
+
+### 实现位置
+
+`capabilities/retry_policy.py`，与 `BudgetPolicy` 同级，由 platform 层消费。
+
+## PPT Capability 设计
+
+PPT 不是独立领域 agent，而是跨领域共享的输出能力。research 的成果可以输出为 PPT，patent 的技术交底可以输出为 PPT，zero_report 的汇报也可以输出为 PPT。
+
+### 职责
+
+1. **Storyline 规划**：根据领域 artifact 生成 PPT 叙事结构
+2. **DSL 生成**：将叙事结构转换为 PPT DSL schema
+3. **渲染**：将 DSL 渲染为 .pptx 文件
+
+### 与现有实现的关系
+
+当前系统已有成熟的 PPT 管线：
+
+- `ppt_engine/dsl_schema.py`：Slide DSL 定义
+- `ppt_engine/renderer.py`：DSL → .pptx 渲染
+- `agents/writer_agent.py`：PPT DSL 生成能力
+
+重构后，这些资产应收口到 `capabilities/ppt_capability.py`，由各领域 agent 的 `renderers.py` 按需调用。
+
+### 实现位置
+
+`capabilities/ppt_capability.py`，作为共享渲染能力供所有领域使用。
+
+## Registry 架构拆分
+
+当前 `core/registry.py` 是一个扁平注册表（6 agents + 9 tools + 5 renderers），重构后应拆分为：
+
+### 1. DomainRegistry（`platform/domain_registry.py`）
+
+- 供 `route_domain` 和 root graph 使用
+- 只注册 `general_chat / research / patent / zero_report` 这类领域入口
+- 不暴露细粒度工具
+- 替代今天 planner 对 `registry_summary()` 的依赖
+
+### 2. RendererRegistry（`platform/renderer_registry.py`）
+
+- 渲染器单独管理，按 artifact 类型和目标格式路由
+- 例如 markdown/docx/pptx 是 artifact output strategy，不是同层级 agent/tool
+
+### 3. Domain Tool Manifest
+
+- 每个领域 agent 自己声明工具集和共享 capability 注入点
+- `domain_agents/research/tools.py`、`domain_agents/patent/tools.py` 等
+- browser capability、citation、evidence 这类共享能力从这里按需接入
+
+### 4. Policy/Review 配置
+
+- budget policy、retry policy、review gate 不做成 LLM-facing registry
+- 这些是 runtime 配置和 typed policy object，供 graph/node 使用，不进 `registry_summary()`
+
+## 并行 Worker 容错策略
+
+当并行 worker 从 `asyncio.gather` 迁移到 graph-native fan-out/fan-in（`Send`）时，需要处理部分失败场景。
+
+### LangGraph `Send` 的默认行为
+
+所有分支完成后才进入 fan-in 节点。如果一个分支抛异常，整个 graph 进入错误状态。
+
+### 目标容错策略
+
+1. 每个 worker 分支内部捕获异常，返回 `WorkerResult(status=ok|partial|error)`
+2. fan-in 节点根据成功 worker 数量决定后续行为：
+   - 全部成功：正常合成
+   - 部分成功（≥1 个 ok）：用已有结果继续，标记缺失部分
+   - 全部失败：触发 interrupt 让用户决定重试或终止
+3. 并行分支设置超时：超时后用已有结果继续，不无限等待
+
+### 实现位置
+
+容错逻辑内嵌在 `domain_agents/*/agent.py` 的 fan-in 节点中，`WorkerResult` schema 定义在各领域的 `schemas.py` 中。
+
 ## 风险
 
 1. **一次性替换过大**：如果同时替换 runtime、orchestrator、agent、存储，风险过高
 2. **deepagents 过度接管**：如果把 deepagents 当整个平台，会失去对平台边界的控制
 3. **领域 schema 设计不足**：如果没有结构化 artifact，最终还是会退化成“长 prompt + 长文本输出”
 4. **HITL 设计滞后**：若先做 agent 再补 review gate，后续会返工
+5. **并行失败传播**：graph-native fan-out 中一个分支失败可能阻塞全图，必须在 worker 内部做容错
 
 ## 结论
 
