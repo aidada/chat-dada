@@ -8,6 +8,8 @@ import json
 from typing import Any, Callable
 
 from langchain_core.tools import StructuredTool
+from task_platform.domain_registry import registry as domain_registry
+from task_platform.renderer_registry import registry as renderer_registry
 
 
 # Each entry: {fn_path, type, description, input_schema, output_schema, available_to}
@@ -110,6 +112,14 @@ def registry_summary() -> str:
             lines.append(f"\n## {cap_type.title()}s")
             for c in caps:
                 lines.append(f"- **{c['name']}**: {c['description']}")
+    domain_summary = domain_registry.summary()
+    if domain_summary:
+        lines.append("\n## Domain Entrypoints")
+        lines.append(domain_summary)
+    renderer_summary = renderer_registry.summary()
+    if renderer_summary:
+        lines.append("\n## Platform Renderers")
+        lines.append(renderer_summary)
     return "\n".join(lines)
 
 

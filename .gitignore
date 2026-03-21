@@ -23,6 +23,8 @@
 !core/**
 !runtime/
 !runtime/**
+!task_platform/
+!task_platform/**
 !capabilities/
 !capabilities/**
 !storage/

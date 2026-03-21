@@ -12,11 +12,15 @@ from typing import Any, Awaitable
 
 import asyncpg
 import redis.asyncio as aioredis
+from langgraph.types import Command
 
 from core.logger import monitor, new_trace_id
 from core.models import set_thinking_level
 from runtime.task_dispatcher import RouteDecision, dispatch_task
 from runtime.task_interaction import reset_task_interaction_handler, set_task_interaction_handler
+from task_platform.root_graph import build_root_graph
+from task_platform.router import build_route_payload
+from task_platform.streaming import extract_checkpoint_id, translate_stream_part
 
 log = logging.getLogger("chatdada.tasks")
 
@@ -104,9 +108,8 @@ class TaskRunStore:
             task_id = row["task_id"]
             snapshot = await self.get_task(task_id) or {}
             if snapshot.get("status") == "waiting_for_user":
-                message = "任务在等待用户补充时因服务重启而中断，请重新提交。"
-            else:
-                message = "任务因服务重启而中断，请重新提交。"
+                continue
+            message = "任务因服务重启而中断，请重新提交。"
             await self.set_error_text(task_id, message)
             await self.append_event(
                 task_id,
@@ -218,6 +221,30 @@ class TaskRunStore:
             WHERE task_id = $2
             """,
             now,
+            task_id,
+        )
+
+    async def update_request_payload(self, task_id: str, patch: dict[str, Any]) -> None:
+        row = await self.pool.fetchrow(
+            "SELECT request_payload FROM task_runs WHERE task_id = $1",
+            task_id,
+        )
+        if row is None:
+            return
+        payload = row["request_payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        merged = dict(payload or {})
+        merged.update(patch)
+        await self.pool.execute(
+            """
+            UPDATE task_runs
+            SET request_payload = $1::jsonb,
+                updated_at = $2
+            WHERE task_id = $3
+            """,
+            json.dumps(merged, ensure_ascii=False),
+            datetime.now(UTC),
             task_id,
         )
 
@@ -360,7 +387,8 @@ class TaskRunStore:
                 task_id,
             )
 
-        payload = json.loads(row["request_payload"])
+        payload_raw = row["request_payload"]
+        payload = json.loads(payload_raw) if isinstance(payload_raw, str) else dict(payload_raw or {})
         pending_question = None
         if row["pending_question"]:
             try:
@@ -378,6 +406,7 @@ class TaskRunStore:
             "task": row["task_text"],
             "mode": row["mode"],
             "thinking_level": row["thinking_level"],
+            "request_payload": payload,
             "route_name": row["route_name"],
             "route_reason": row["route_reason"],
             "route_confidence": row["route_confidence"],
@@ -385,6 +414,13 @@ class TaskRunStore:
             "pending_question": pending_question,
             "result": row["result_text"],
             "error": row["error_text"],
+            "thread_id": payload.get("thread_id", row["task_id"]),
+            "domain": row["route_name"] or payload.get("domain", ""),
+            "artifact_refs": payload.get("artifact_refs", []),
+            "interrupt_state": payload.get("interrupt_state"),
+            "latest_checkpoint_id": payload.get("latest_checkpoint_id", ""),
+            "review": payload.get("review"),
+            "budget": payload.get("budget"),
             "created_at": _ts(row["created_at"]),
             "started_at": _ts(row["started_at"]),
             "finished_at": _ts(row["finished_at"]),
@@ -636,24 +672,58 @@ class TaskService:
         dispatcher: TaskDispatcher = dispatch_task,
     ) -> None:
         self._store = TaskRunStore(database_url)
+        self._database_url = database_url
         self._redis_url = redis_url
         self._dispatcher = dispatcher
         self._redis: aioredis.Redis | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._dispatch_cache: dict[str, RouteDecision] = {}
+        self._checkpointer_cm: Any | None = None
+        self._checkpointer: Any | None = None
+        self._root_graph: Any | None = None
+
+    async def _open_checkpointer(self) -> Any:
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        except ImportError:
+            from langgraph.checkpoint.memory import InMemorySaver
+
+            log.warning("langgraph-checkpoint-postgres not installed; falling back to InMemorySaver")
+            return InMemorySaver()
+
+        self._checkpointer_cm = AsyncPostgresSaver.from_conn_string(self._database_url)
+        checkpointer = await self._checkpointer_cm.__aenter__()
+        await checkpointer.setup()
+        return checkpointer
 
     async def connect(self) -> None:
         await self._store.connect()
         self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
+        self._checkpointer = await self._open_checkpointer()
+        self._root_graph = build_root_graph(
+            dispatcher=self._dispatcher,
+            executor_lookup=self._get_executor_for_task,
+            checkpointer=self._checkpointer,
+        )
 
     async def close(self) -> None:
         await self._store.close()
         if self._redis:
             await self._redis.aclose()
             self._redis = None
+        if self._checkpointer_cm is not None:
+            await self._checkpointer_cm.__aexit__(None, None, None)
+            self._checkpointer_cm = None
+            self._checkpointer = None
+            self._root_graph = None
 
     @property
     def store(self) -> TaskRunStore:
         return self._store
+
+    def _get_executor_for_task(self, task_id: str) -> Any:
+        decision = self._dispatch_cache.get(task_id)
+        return getattr(decision, "executor", None)
 
     async def submit_task(
         self,
@@ -733,13 +803,12 @@ class TaskService:
         }
 
         await self._store.set_waiting_for_user(task_id, payload)
+        await self._store.update_request_payload(
+            task_id,
+            {"interrupt_state": payload, "pending_question": payload},
+        )
         await self.record_event(task_id, "question", payload)
-
-        result = await self._redis.blpop(f"task:{task_id}:reply", timeout=3600)
-        if result is None:
-            raise RuntimeError("等待用户回复超时，任务中断。")
-        _, answer = result
-        return answer
+        raise RuntimeError("request_user_input is now graph-interrupt driven and should not be awaited directly")
 
     async def reply_to_task(self, task_id: str, answer: str) -> dict[str, Any]:
         snapshot = await self._store.get_task(task_id)
@@ -755,10 +824,19 @@ class TaskService:
 
         await self._store.resume_task(task_id)
         await self.record_event(task_id, "user_reply", {"content": answer_text})
-        await self._redis.lpush(f"task:{task_id}:reply", answer_text)
+        await self._store.update_request_payload(
+            task_id,
+            {"interrupt_state": None, "pending_question": None},
+        )
+        background = asyncio.create_task(
+            self._execute_task(task_id, resume_value=answer_text),
+            name=f"task-resume-{task_id}",
+        )
+        self._background_tasks.add(background)
+        background.add_done_callback(self._background_tasks.discard)
         return await self._store.get_task(task_id) or snapshot
 
-    async def _execute_task(self, task_id: str) -> None:
+    async def _execute_task(self, task_id: str, *, resume_value: str | None = None) -> None:
         snapshot = await self._store.get_task(task_id)
         if snapshot is None:
             return
@@ -771,27 +849,73 @@ class TaskService:
         conversation_id = snapshot.get("conversation_id", "")
         execution_task = compose_task_text(task_text, file_paths)
         trace_id = new_trace_id()
+        interrupted = False
+        latest_checkpoint_id = snapshot.get("latest_checkpoint_id", "")
+        resume_last_step_content = ""
+        skipped_resume_replay_step = False
 
-        decision = await self._dispatcher(task_text, file_paths, mode, user_id)
-        await self._store.set_route_info(
-            task_id,
-            route_name=decision.route_name,
-            route_reason=decision.reason,
-            route_confidence=decision.confidence,
-        )
-
-        await self._store.mark_started(task_id)
-        await self.record_event(task_id, "start", {"content": f"开始执行: {execution_task}"})
-        await self.record_event(
-            task_id,
-            "step",
-            {"content": f"🧭 Route: {decision.route_name} ({decision.reason})"},
-        )
-        log.info("Task received user=%s task=%s", user_id, task_text[:80])
+        decision = None
+        route_payload = snapshot.get("initial_route_payload")
+        if resume_value is None:
+            decision = await self._dispatcher(task_text, file_paths, mode, user_id)
+            self._dispatch_cache[task_id] = decision
+            route_payload = build_route_payload(
+                task_text=task_text,
+                file_paths=file_paths,
+                decision=decision,
+            )
+            public_route_name = (
+                decision.route_name
+                if route_payload["execution_path"] == "legacy_fallback"
+                else route_payload["route_name"]
+            )
+            await self._store.set_route_info(
+                task_id,
+                route_name=public_route_name,
+                route_reason=route_payload["reason"],
+                route_confidence=route_payload["confidence"],
+            )
+            await self._store.mark_started(task_id)
+            await self._store.update_request_payload(
+                task_id,
+                {
+                    "thread_id": task_id,
+                    "domain": route_payload["execution_path"],
+                    "execution_path": route_payload["execution_path"],
+                    "latest_checkpoint_id": "",
+                    "interrupt_state": None,
+                    "artifact_refs": [],
+                },
+            )
+            await self.record_event(task_id, "start", {"content": f"开始执行: {execution_task}"})
+            await self.record_event(
+                task_id,
+                "step",
+                {"content": f"🧭 Route: {public_route_name} ({route_payload['reason']})", "thread_id": task_id},
+            )
+            log.info("Task received user=%s task=%s", user_id, task_text[:80])
+        else:
+            stored_request = snapshot.get("request_payload", {})
+            if not isinstance(stored_request, dict):
+                stored_request = {}
+            route_payload = {
+                "route_name": snapshot.get("route_name", ""),
+                "reason": snapshot.get("route_reason", ""),
+                "confidence": snapshot.get("route_confidence", 0.0),
+                "execution_path": stored_request.get(
+                    "execution_path",
+                    snapshot.get("route_name", ""),
+                ),
+            }
+            existing_events = await self._store.get_events_after(task_id, 0)
+            for event in reversed(existing_events):
+                if event["type"] == "step":
+                    resume_last_step_content = str(event.get("content", "") or "")
+                    break
 
         # Build conversation context
         conversation_context = ""
-        if conversation_id:
+        if conversation_id and resume_value is None:
             try:
                 from runtime.conversation_context import ConversationContextBuilder
 
@@ -811,18 +935,113 @@ class TaskService:
             event_type, payload = parse_step_payload(step_info)
             await self.record_event(task_id, event_type, payload)
 
-        async def request_user_input(question_payload: dict[str, Any]) -> str:
-            return await self.request_user_input(task_id, question_payload)
-
-        interaction_token = set_task_interaction_handler(request_user_input)
+        interaction_token = set_task_interaction_handler(None)
         try:
             set_thinking_level(thinking_level)
-            result = await decision.executor(
-                execution_task, on_step, user_id=user_id,
-                conversation_context=conversation_context,
-            )
+            request_payload = snapshot.get("request_payload", {})
+            if not isinstance(request_payload, dict):
+                request_payload = {}
+            initial_state = {
+                "task_id": task_id,
+                "thread_id": task_id,
+                "user_id": user_id,
+                "mode": mode,
+                "thinking_level": thinking_level,
+                "task_text": task_text,
+                "execution_task": execution_task,
+                "file_paths": file_paths,
+                "conversation_id": conversation_id,
+                "conversation_context": conversation_context,
+                "request_payload": dict(request_payload),
+                "initial_route_payload": route_payload,
+                "legacy_route_name": getattr(decision, "route_name", ""),
+            }
+            config = {"configurable": {"thread_id": task_id}}
+            stream_input: Any = initial_state if resume_value is None else Command(resume=resume_value)
+
+            async for part in self._root_graph.astream(
+                stream_input,
+                config=config,
+                version="v2",
+                stream_mode=["updates", "messages", "custom", "tasks", "checkpoints"],
+                subgraphs=True,
+            ):
+                checkpoint_id = extract_checkpoint_id(part)
+                if checkpoint_id:
+                    latest_checkpoint_id = checkpoint_id
+                    await self._store.update_request_payload(
+                        task_id,
+                        {"latest_checkpoint_id": checkpoint_id},
+                    )
+                for event_type, payload in translate_stream_part(
+                    part,
+                    thread_id=task_id,
+                    domain=route_payload["route_name"],
+                    checkpoint_id=latest_checkpoint_id,
+                    trace_metadata={
+                        "trace_id": trace_id,
+                        "task_id": task_id,
+                        "domain": route_payload["route_name"],
+                        "mode": mode,
+                    },
+                ):
+                    if event_type == "question":
+                        interrupted = True
+                        await self._store.set_waiting_for_user(task_id, payload)
+                        await self._store.update_request_payload(
+                            task_id,
+                            {
+                                "interrupt_state": payload,
+                                "pending_question": payload,
+                                "latest_checkpoint_id": latest_checkpoint_id,
+                            },
+                        )
+                    if (
+                        resume_value is not None
+                        and event_type == "step"
+                        and not skipped_resume_replay_step
+                        and str(payload.get("content", "") or "") == resume_last_step_content
+                    ):
+                        skipped_resume_replay_step = True
+                        continue
+                    await self.record_event(task_id, event_type, payload)
+
+            if interrupted:
+                return
+
+            state_snapshot = await self._root_graph.aget_state(config)
+            final_values = getattr(state_snapshot, "values", {}) or {}
+            result = str(final_values.get("final_result", "") or "")
+            artifact_refs = final_values.get("artifact_refs", []) or []
+            review = final_values.get("review") or {}
+            budget = final_values.get("budget") or {}
+            research_strategy = str(final_values.get("research_strategy", "") or "")
             await self._store.set_result_text(task_id, result)
-            await self.record_event(task_id, "result", {"content": result})
+            payload_patch: dict[str, Any] = {
+                "artifact_refs": artifact_refs,
+                "interrupt_state": None,
+                "pending_question": None,
+                "latest_checkpoint_id": latest_checkpoint_id,
+            }
+            if review:
+                payload_patch["review"] = review
+            if budget:
+                payload_patch["budget"] = budget
+            if research_strategy:
+                payload_patch["research_strategy"] = research_strategy
+            await self._store.update_request_payload(task_id, payload_patch)
+            event_payload: dict[str, Any] = {
+                "content": result,
+                "artifact_refs": artifact_refs,
+                "thread_id": task_id,
+            }
+            if review:
+                event_payload["review"] = review
+            if budget:
+                event_payload["budget"] = budget
+            if research_strategy:
+                event_payload["research_strategy"] = research_strategy
+            await self.record_event(task_id, "result", event_payload)
         except Exception as exc:
             error_text = str(exc)
             log.error("Task failed: %s", exc)
@@ -831,6 +1050,7 @@ class TaskService:
             summary = monitor.get_summary(trace_id)
             await self.record_event(task_id, "monitoring", {"content": summary})
             await self._store.finish_task(task_id, "failed")
+            self._dispatch_cache.pop(task_id, None)
             monitor.finalize(trace_id)
             return
         finally:
@@ -839,6 +1059,7 @@ class TaskService:
         summary = monitor.get_summary(trace_id)
         await self.record_event(task_id, "monitoring", {"content": summary})
         await self._store.finish_task(task_id, "succeeded")
+        self._dispatch_cache.pop(task_id, None)
         monitor.finalize(trace_id)
 
         # Fire-and-forget: generate embeddings for future retrieval

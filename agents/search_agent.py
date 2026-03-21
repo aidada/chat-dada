@@ -11,6 +11,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
+from capabilities.toolkits.browser_toolkit import browser_navigate_task
 from core.content_utils import extract_text_content, normalize_markdown_report
 from core.models import get_browser_use_llm, get_llm
 from core.logger import log_async
@@ -20,11 +21,6 @@ try:
     HAS_TAVILY = True
 except ImportError:
     HAS_TAVILY = False
-
-from browser_use import Agent as BrowserAgent
-from browser_use import BrowserSession as Browser
-from browser_use import BrowserProfile as BrowserConfig
-
 
 # ── State ──
 class SearchState(TypedDict):
@@ -48,12 +44,8 @@ async def web_search(query: str) -> str:
 @tool
 async def browser_navigate(task_description: str) -> str:
     """控制浏览器完成复杂网页任务：抓取动态内容、多步交互。"""
-    browser = Browser(browser_profile=BrowserConfig(headless=True))
     llm = get_browser_use_llm("search")
-    agent = BrowserAgent(task=task_description, llm=llm, browser=browser, max_actions_per_step=5)
-    result = await agent.run(max_steps=10)
-    final = result.final_result() if hasattr(result, "final_result") else str(result)
-    return final or "浏览器任务完成。"
+    return await browser_navigate_task(task_description, role="search", llm=llm)
 
 
 CORE_TOOLS = [web_search, browser_navigate]

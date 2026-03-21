@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from core.logger import is_verbose, set_log_level, set_verbose, setup_logging
+from core.logger import is_verbose, monitor, set_log_level, set_verbose, setup_logging
 from runtime.task_runtime import HEARTBEAT_INTERVAL_SECONDS, TaskService, format_sse, task_is_terminal
 
 load_dotenv()
@@ -294,6 +294,71 @@ async def get_task(task_id: str):
     if snapshot is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     return snapshot
+
+
+@app.get("/tasks/{task_id}/artifacts")
+async def get_task_artifacts(task_id: str):
+    snapshot = await task_service.get_task(task_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"task_id": task_id, "artifact_refs": snapshot.get("artifact_refs", [])}
+
+
+@app.get("/tasks/{task_id}/review")
+async def get_task_review(task_id: str):
+    snapshot = await task_service.get_task(task_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {
+        "task_id": task_id,
+        "review": snapshot.get("review"),
+        "budget": snapshot.get("budget"),
+    }
+
+
+@app.get("/tasks/{task_id}/provenance")
+async def get_task_provenance(task_id: str):
+    snapshot = await task_service.get_task(task_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    events = await task_service.get_events_after(task_id, 0)
+    supporting_events = [
+        event
+        for event in events
+        if event["type"] in {"file", "result", "question", "user_reply", "error"}
+    ]
+    return {
+        "task_id": task_id,
+        "domain": snapshot.get("domain"),
+        "artifact_refs": snapshot.get("artifact_refs", []),
+        "events": supporting_events,
+    }
+
+
+@app.get("/tasks/{task_id}/trace")
+async def get_task_trace(task_id: str):
+    snapshot = await task_service.get_task(task_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    events = await task_service.get_events_after(task_id, 0)
+    monitoring = [event for event in events if event["type"] == "monitoring"]
+    if not monitoring:
+        return {"task_id": task_id, "trace": None}
+    return {"task_id": task_id, "trace": monitoring[-1]["content"]}
+
+
+@app.get("/tasks/{task_id}/replay")
+async def get_task_replay(task_id: str):
+    snapshot = await task_service.get_task(task_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    events = await task_service.get_events_after(task_id, 0)
+    return {"task": snapshot, "events": events}
+
+
+@app.get("/api/traces")
+async def list_trace_history():
+    return {"items": monitor.get_history()}
 
 
 @app.post("/tasks/{task_id}/reply")

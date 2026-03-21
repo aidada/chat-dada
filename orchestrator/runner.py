@@ -22,6 +22,7 @@ from core.registry import display_name
 from storage.user_store_v2 import MemoryStoreV2
 from core.models import get_llm, response_text
 from orchestrator.planner import classify_and_plan
+from task_platform.domain_registry import registry as domain_registry
 
 log = logging.getLogger("chatdada.orchestrator")
 
@@ -78,6 +79,29 @@ async def run_orchestrator(
     await on_step(f"📋 意图识别: {display_name(intent)}")
 
     # Step 2: Route to appropriate handler
+    domain_alias = domain_registry.resolve_alias(intent)
+    if domain_alias:
+        await on_step(f"🧭 Domain shim: {domain_alias}")
+        runner = domain_registry.get(domain_alias)
+        if runner is None:
+            raise RuntimeError(f"Domain runner not registered: {domain_alias}")
+        result = await runner(
+            {
+                "query": task,
+                "task": task,
+                "task_id": f"shim_{uuid.uuid4().hex[:10]}",
+                "browser_enabled": False,
+                "parallel": domain_alias == "research",
+                "use_deepagents": domain_alias == "research",
+            }
+        )
+        result_text = str(result.result)
+        try:
+            await memory_store.remember(user_id, task, result_text, intent=domain_alias)
+        except Exception as exc:
+            await on_step(f"⚠️ Memory save failed: {exc}")
+        return result_text
+
     if intent == "ppt_report":
         result = await _handle_ppt_report(task, plan, on_step, memory_context=memory_context)
     elif intent == "quick_question":

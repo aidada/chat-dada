@@ -9,9 +9,10 @@ from langchain_core.tools import tool
 
 from capabilities.context_manager import ResearchContext
 from capabilities.memory import ResearchMemory
+from capabilities.toolkits.browser_toolkit import browser_navigate_task
 from core.content_utils import extract_result_text
 from core.logger import log_async
-from core.models import get_browser_use_llm
+from core.models import get_browser_use_llm  # kept for test compatibility
 from runtime.task_interaction import ask_user
 from tools.research_notes import save_research_note, recall_research_notes
 
@@ -66,15 +67,8 @@ async def exa_deep_search(query: str) -> str:
 @tool
 async def browser_navigate(task_description: str) -> str:
     """控制浏览器完成复杂网页任务。"""
-    from browser_use import Agent as BrowserAgent
-    from browser_use import BrowserSession as Browser
-    from browser_use import BrowserProfile as BrowserConfig
-    browser = Browser(browser_profile=BrowserConfig(headless=True))
     llm = get_browser_use_llm("deep_research")
-    agent = BrowserAgent(task=task_description, llm=llm, browser=browser, max_actions_per_step=5)
-    result = await agent.run(max_steps=10)
-    final = result.final_result() if hasattr(result, "final_result") else str(result)
-    return final or "Browser task done."
+    return await browser_navigate_task(task_description, role="deep_research", llm=llm)
 
 
 @tool
@@ -90,7 +84,7 @@ async def ask_user_clarification(
     return answer
 
 
-CORE_TOOLS = [web_search, academic_search, exa_deep_search, browser_navigate,
+CORE_TOOLS = [academic_search, exa_deep_search, browser_navigate,
               ask_user_clarification, save_research_note, recall_research_notes]
 
 

@@ -361,3 +361,41 @@ class TaskEndpointTests(unittest.TestCase):
             self.assertEqual(stream_response.status_code, 200)
             self.assertIn("event: question", body)
             self.assertIn("event: user_reply", body)
+
+    def test_task_metadata_endpoints_expose_replay_artifacts_review_and_traces(self) -> None:
+        with TestClient(main.app) as client:
+            create_response = client.post(
+                "/tasks",
+                json={
+                    "task": "hi",
+                    "user_id": "user-7",
+                    "mode": "auto",
+                    "thinking_level": "medium",
+                    "file_paths": [],
+                },
+            )
+            self.assertEqual(create_response.status_code, 202)
+            task_id = create_response.json()["task_id"]
+            wait_for_terminal_http(client, task_id)
+
+            artifacts = client.get(f"/tasks/{task_id}/artifacts")
+            self.assertEqual(artifacts.status_code, 200)
+            self.assertEqual(artifacts.json()["artifact_refs"], [])
+
+            review = client.get(f"/tasks/{task_id}/review")
+            self.assertEqual(review.status_code, 200)
+            self.assertIn("review", review.json())
+            self.assertIn("budget", review.json())
+
+            replay = client.get(f"/tasks/{task_id}/replay")
+            self.assertEqual(replay.status_code, 200)
+            self.assertEqual(replay.json()["task"]["task_id"], task_id)
+            self.assertTrue(replay.json()["events"])
+
+            trace = client.get(f"/tasks/{task_id}/trace")
+            self.assertEqual(trace.status_code, 200)
+            self.assertIn("trace", trace.json())
+
+            traces = client.get("/api/traces")
+            self.assertEqual(traces.status_code, 200)
+            self.assertIn("items", traces.json())
