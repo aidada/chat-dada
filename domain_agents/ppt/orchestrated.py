@@ -15,6 +15,7 @@ from typing import Any
 from capabilities.review_gates import ReviewGate
 from domain_agents.ppt.agent import PptDomainResult, STORYLINE_SYSTEM
 from domain_agents.research.tools import get_research_tools
+from task_platform.streaming import stream_nested_graph
 
 from workflows.orchestrator import build_orchestrated_graph
 from workflows.spec import DomainSpec, SubagentConfig
@@ -80,10 +81,13 @@ _graph = build_orchestrated_graph(PPT_SPEC)
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 
-def _safe_emit(event_type: str, content: str) -> None:
+def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
     try:
         from langgraph.config import get_stream_writer
-        get_stream_writer()({"event_type": event_type, "content": content})
+
+        payload = dict(content) if isinstance(content, dict) else {"content": content}
+        payload.setdefault("event_type", event_type)
+        get_stream_writer()(payload)
     except Exception:
         pass
 
@@ -101,20 +105,29 @@ async def run_ppt_domain_orchestrated(
 
     _log.info("Starting orchestrated PPT: query=%s task_id=%s", str(query)[:60], task_id)
 
-    result = await _graph.ainvoke({
-        "goal": str(query),
-        "task_id": str(task_id),
-        "report_profile": "",
-        "cost": 0.0,
-        "progress": 0.0,
-        "confidence": 0.0,
-        "max_cost": PPT_SPEC.max_cost,
-        "max_steps": PPT_SPEC.max_steps,
-        "intermediate_results": [],
-        "evaluations": [],
-        "step_history": [],
-        "coverage": {},
-    })
+    result = await stream_nested_graph(
+        _graph,
+        {
+            "goal": str(query),
+            "task_id": str(task_id),
+            "report_profile": "",
+            "cost": 0.0,
+            "progress": 0.0,
+            "confidence": 0.0,
+            "max_cost": PPT_SPEC.max_cost,
+            "max_steps": PPT_SPEC.max_steps,
+            "intermediate_results": [],
+            "evaluations": [],
+            "step_history": [],
+            "coverage": {},
+        },
+        config={"configurable": {"thread_id": str(task_id)}},
+        extra_payload={
+            "nested_graph": "ppt_orchestrated_graph",
+            "domain_name": "ppt",
+            "source": "domain_orchestrated_wrapper",
+        },
+    )
 
     content_text = result.get("final_result", "")
     strategy_trace = result.get("step_history", [])

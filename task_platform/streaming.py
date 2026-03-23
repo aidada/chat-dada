@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from typing import Any
+
+
+STREAM_SCHEMA_VERSION = "2026-03-23"
+_UPDATE_INTERNAL_KEYS = {"__interrupt__", "__metadata__"}
 
 
 def _jsonable(value: Any) -> Any:
@@ -11,6 +16,219 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [_jsonable(item) for item in value]
     return str(value)
+
+
+def _namespace(part: dict[str, Any]) -> tuple[str, ...]:
+    raw = part.get("ns") or ()
+    return tuple(str(item) for item in raw)
+
+
+def _graph_node_from_namespace(ns: Sequence[str]) -> str:
+    return ".".join(str(item) for item in ns) or "root"
+
+
+def _base_part_payload(
+    part: dict[str, Any],
+    *,
+    checkpoint_id: str = "",
+    graph_node: str | None = None,
+) -> dict[str, Any]:
+    ns = _namespace(part)
+    payload = {
+        "stream_schema_version": STREAM_SCHEMA_VERSION,
+        "stream_part_type": str(part.get("type", "")),
+        "graph_path": list(ns),
+        "graph_node": graph_node or _graph_node_from_namespace(ns),
+    }
+    if checkpoint_id:
+        payload["checkpoint_id"] = checkpoint_id
+    return payload
+
+
+def _coerce_message_data(data: Any) -> tuple[Any, dict[str, Any]]:
+    if isinstance(data, tuple) and len(data) == 2:
+        message, metadata = data
+        return message, metadata if isinstance(metadata, dict) else {"value": _jsonable(metadata)}
+    if isinstance(data, list) and len(data) == 2:
+        message, metadata = data
+        return message, metadata if isinstance(metadata, dict) else {"value": _jsonable(metadata)}
+    if isinstance(data, dict):
+        return data, {}
+    return data, {}
+
+
+def _extract_message_text(message: Any) -> str:
+    content = getattr(message, "content", None)
+    if content is None and isinstance(message, dict):
+        content = message.get("content", "")
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+        content = "".join(parts)
+    return str(content)
+
+
+def _normalize_custom_part(part: dict[str, Any], *, checkpoint_id: str = "") -> list[dict[str, Any]]:
+    data = part.get("data")
+    if isinstance(data, dict):
+        payload = {str(key): _jsonable(value) for key, value in data.items()}
+        event_type = str(payload.pop("event_type", payload.get("type") or "custom"))
+        payload.pop("type", None)
+    else:
+        payload = {"content": str(data)}
+        event_type = "custom"
+
+    if event_type == "file":
+        payload.setdefault("content", str(payload.get("name") or payload.get("url") or ""))
+    elif "content" not in payload and event_type not in {"task", "node", "checkpoint"}:
+        payload["content"] = str(data)
+
+    base = _base_part_payload(
+        part,
+        checkpoint_id=str(payload.get("checkpoint_id", checkpoint_id) or checkpoint_id),
+        graph_node=str(payload.get("graph_node", "") or "") or None,
+    )
+    merged = dict(payload)
+    for key, value in base.items():
+        merged.setdefault(key, value)
+    merged["event_type"] = event_type
+    return [merged]
+
+
+def _normalize_update_part(part: dict[str, Any], *, checkpoint_id: str = "") -> list[dict[str, Any]]:
+    data = part.get("data") or {}
+    events: list[dict[str, Any]] = []
+    base = _base_part_payload(part, checkpoint_id=checkpoint_id)
+
+    interrupts = data.get("__interrupt__")
+    if interrupts:
+        first = interrupts[0]
+        value = getattr(first, "value", first)
+        payload = dict(value if isinstance(value, dict) else {"content": str(value)})
+        payload.setdefault("content", str(payload.get("content", "")))
+        payload["interrupt_type"] = str(payload.get("interrupt_type", "human_input"))
+        payload["event_type"] = "question"
+        payload.update(base)
+        events.append(payload)
+
+    update_metadata = _jsonable(data.get("__metadata__", {})) if "__metadata__" in data else {}
+    for node_name, update in data.items():
+        if node_name in _UPDATE_INTERNAL_KEYS:
+            continue
+        payload = {
+            "event_type": "node",
+            "node_name": str(node_name),
+            "status": "updated",
+            "content": f"Node updated: {node_name}",
+            "update": _jsonable(update),
+        }
+        if update_metadata:
+            payload["update_metadata"] = update_metadata
+        payload.update(base)
+        events.append(payload)
+
+    return events
+
+
+def _normalize_message_part(part: dict[str, Any], *, checkpoint_id: str = "") -> list[dict[str, Any]]:
+    message, metadata = _coerce_message_data(part.get("data"))
+    content = _extract_message_text(message)
+    if not content:
+        return []
+
+    raw_metadata = _jsonable(metadata)
+    graph_node = ""
+    if isinstance(raw_metadata, dict):
+        graph_node = str(raw_metadata.get("langgraph_node", "") or "")
+
+    payload = {
+        "event_type": "token",
+        "content": content,
+        "message_metadata": raw_metadata,
+    }
+    payload.update(_base_part_payload(part, checkpoint_id=checkpoint_id, graph_node=graph_node or None))
+    return [payload]
+
+
+def _normalize_task_part(part: dict[str, Any], *, checkpoint_id: str = "") -> list[dict[str, Any]]:
+    data = dict(part.get("data") or {})
+    task_name = str(data.get("name", "") or "")
+    is_start = "input" in data and "triggers" in data
+
+    if is_start:
+        status = "started"
+        phase = "start"
+        content = f"Task started: {task_name or data.get('id', 'unknown')}"
+    else:
+        error = str(data.get("error", "") or "")
+        interrupts = _jsonable(data.get("interrupts", []) or [])
+        if error:
+            status = "failed"
+            content = f"Task failed: {task_name or data.get('id', 'unknown')}"
+        elif interrupts:
+            status = "interrupted"
+            content = f"Task interrupted: {task_name or data.get('id', 'unknown')}"
+        else:
+            status = "completed"
+            content = f"Task completed: {task_name or data.get('id', 'unknown')}"
+        phase = "finish"
+
+    payload = {
+        "event_type": "task",
+        "phase": phase,
+        "status": status,
+        "content": content,
+        "langgraph_task_id": str(data.get("id", "") or ""),
+        "task_name": task_name,
+    }
+
+    if is_start:
+        payload["input"] = _jsonable(data.get("input"))
+        payload["triggers"] = _jsonable(data.get("triggers", []) or [])
+    else:
+        payload["result"] = _jsonable(data.get("result", {}) or {})
+        payload["error"] = str(data.get("error", "") or "")
+        payload["interrupts"] = _jsonable(data.get("interrupts", []) or [])
+
+    payload.update(_base_part_payload(part, checkpoint_id=checkpoint_id))
+    return [payload]
+
+
+def _normalize_checkpoint_part(part: dict[str, Any], *, checkpoint_id: str = "") -> list[dict[str, Any]]:
+    data = dict(part.get("data") or {})
+    checkpoint_value = extract_checkpoint_id(part) or checkpoint_id
+    payload = {
+        "event_type": "checkpoint",
+        "status": "saved",
+        "content": f"Checkpoint saved: {checkpoint_value or 'unknown'}",
+        "checkpoint_id": checkpoint_value,
+        "next_nodes": _jsonable(data.get("next", []) or []),
+        "checkpoint_tasks": _jsonable(data.get("tasks", []) or []),
+        "checkpoint_metadata": _jsonable(data.get("metadata", {}) or {}),
+    }
+    payload.update(_base_part_payload(part, checkpoint_id=checkpoint_value))
+    return [payload]
+
+
+def normalize_stream_part(part: dict[str, Any], *, checkpoint_id: str = "") -> list[dict[str, Any]]:
+    part_type = str(part.get("type", ""))
+    if part_type == "custom":
+        return _normalize_custom_part(part, checkpoint_id=checkpoint_id)
+    if part_type == "updates":
+        return _normalize_update_part(part, checkpoint_id=checkpoint_id)
+    if part_type == "messages":
+        return _normalize_message_part(part, checkpoint_id=checkpoint_id)
+    if part_type == "tasks":
+        return _normalize_task_part(part, checkpoint_id=checkpoint_id)
+    if part_type == "checkpoints":
+        return _normalize_checkpoint_part(part, checkpoint_id=checkpoint_id)
+    return []
 
 
 def _base_payload(
@@ -39,67 +257,24 @@ def translate_stream_part(
     trace_metadata: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
     translated: list[tuple[str, dict[str, Any]]] = []
-    part_type = str(part.get("type", ""))
-    data = part.get("data") or {}
-    graph_node = ".".join(str(item) for item in (part.get("ns") or ())) or "root"
-    base = _base_payload(
-        thread_id=thread_id,
-        domain=domain,
-        graph_node=graph_node,
-        checkpoint_id=checkpoint_id,
-        trace_metadata=trace_metadata,
-    )
-
-    if part_type == "custom":
-        event_type = str(data.get("event_type") or data.get("type") or "step")
-        payload = dict(data)
-        payload.pop("event_type", None)
+    for normalized in normalize_stream_part(part, checkpoint_id=checkpoint_id):
+        event_type = str(normalized.pop("event_type", "custom"))
+        graph_node = str(normalized.get("graph_node", "") or "") or "root"
+        event_checkpoint = str(normalized.get("checkpoint_id", "") or checkpoint_id)
+        payload = dict(normalized)
+        payload.update(
+            _base_payload(
+                thread_id=thread_id,
+                domain=domain,
+                graph_node=graph_node,
+                checkpoint_id=event_checkpoint,
+                trace_metadata=trace_metadata,
+            )
+        )
         payload["type"] = event_type
-        payload.update(base)
+        if event_type == "file":
+            payload.setdefault("content", str(payload.get("name") or payload.get("url") or ""))
         translated.append((event_type, payload))
-        return translated
-
-    if part_type == "updates":
-        interrupts = data.get("__interrupt__")
-        if interrupts:
-            first = interrupts[0]
-            value = getattr(first, "value", first)
-            payload = dict(value if isinstance(value, dict) else {"content": str(value)})
-            payload.setdefault("content", str(payload.get("content", "")))
-            payload["interrupt_type"] = "human_input"
-            payload.update(base)
-            translated.append(("question", payload))
-        return translated
-
-    if part_type == "messages":
-        # Token-by-token LLM output: extract content from AIMessageChunk
-        message = data
-        if hasattr(message, "content"):
-            content = message.content
-        elif isinstance(data, dict):
-            content = data.get("content", "")
-        else:
-            content = ""
-        if isinstance(content, list):
-            text_parts = [
-                item.get("text", "") if isinstance(item, dict) else str(item)
-                for item in content
-            ]
-            content = "".join(text_parts)
-        content = str(content)
-        if content:
-            payload = {"content": content}
-            payload.update(base)
-            translated.append(("token", payload))
-        return translated
-
-    if part_type == "tasks":
-        if data.get("error"):
-            payload = {"content": str(data["error"])}
-            payload.update(base)
-            translated.append(("error", payload))
-        return translated
-
     return translated
 
 
@@ -110,3 +285,40 @@ def extract_checkpoint_id(part: dict[str, Any]) -> str:
     config = data.get("config") or {}
     configurable = config.get("configurable") or {}
     return str(configurable.get("checkpoint_id", "") or "")
+
+
+async def stream_nested_graph(
+    graph: Any,
+    input_data: Any,
+    *,
+    config: dict[str, Any] | None = None,
+    extra_payload: dict[str, Any] | None = None,
+    stream_mode: Iterable[str] = ("values", "updates", "messages", "custom", "tasks", "checkpoints"),
+    subgraphs: bool = True,
+) -> Any:
+    try:
+        from langgraph.config import get_stream_writer
+
+        writer = get_stream_writer()
+    except Exception:
+        writer = lambda _payload: None
+
+    final_values: Any = None
+    async for part in graph.astream(
+        input_data,
+        config=config,
+        version="v2",
+        stream_mode=list(stream_mode),
+        subgraphs=subgraphs,
+    ):
+        if part.get("type") == "values":
+            final_values = part.get("data")
+            continue
+
+        event_checkpoint = extract_checkpoint_id(part)
+        for normalized in normalize_stream_part(part, checkpoint_id=event_checkpoint):
+            payload = dict(normalized)
+            payload.update(extra_payload or {})
+            writer(payload)
+
+    return final_values

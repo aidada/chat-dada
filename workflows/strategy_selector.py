@@ -23,10 +23,10 @@ _log = logging.getLogger("chatdada.strategy_selector")
 # ── Strategy enum ────────────────────────────────────────────────────────────
 
 class StrategyName(str, Enum):
-    SEQUENTIAL = "sequential"
-    PARALLEL = "parallel"
-    ITERATIVE = "iterative"
-    PLANNING = "planning"
+    SEQUENTIAL = "sequential"   # 顺序
+    PARALLEL = "parallel"       # 并行
+    ITERATIVE = "iterative"     # 迭代
+    PLANNING = "planning"       # 规划
 
 
 # ── Selection result ─────────────────────────────────────────────────────────
@@ -317,6 +317,22 @@ def make_strategy_selector(strategy_hints: list[str] | None = None):
             result.source,
             result.reasoning,
         )
+
+        try:
+            from langgraph.config import get_stream_writer
+
+            get_stream_writer()(
+                {
+                    "event_type": "strategy",
+                    "strategy": result.strategy.value,
+                    "confidence": result.confidence,
+                    "reasoning": result.reasoning,
+                    "source": result.source,
+                    "content": f"Strategy selected: {result.strategy.value}",
+                }
+            )
+        except Exception:
+            pass
 
         return {
             "selected_strategy": result.strategy.value,

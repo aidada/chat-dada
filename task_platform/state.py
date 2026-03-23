@@ -14,6 +14,8 @@ class RouteDecisionPayload(TypedDict):
 
 
 class UIEventPayload(TypedDict, total=False):
+    stream_schema_version: str
+    stream_part_type: str
     event_type: str
     content: str
     name: str
@@ -22,8 +24,32 @@ class UIEventPayload(TypedDict, total=False):
     placeholder: str
     thread_id: str
     graph_node: str
+    graph_path: list[str]
     domain: str
     interrupt_type: str
+    node_name: str
+    status: str
+    phase: str
+    task_name: str
+    langgraph_task_id: str
+    nested_graph: str
+    strategy: str
+    subtask_id: str
+    source: str
+    message_metadata: dict[str, Any]
+    update_metadata: dict[str, Any]
+    update: Any
+    input: Any
+    result: Any
+    error: str
+    interrupts: list[Any]
+    triggers: list[str]
+    next_nodes: list[str]
+    checkpoint_metadata: dict[str, Any]
+    checkpoint_tasks: list[Any]
+    subtasks: list[dict[str, Any]]
+    confidence: float
+    reasoning: str
     artifact_refs: list[dict[str, Any]]
     checkpoint_id: str
     trace_metadata: dict[str, Any]

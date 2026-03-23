@@ -1,6 +1,4 @@
-"""
-Research tools — shared tool definitions used by research graphs, patent, and zero-report domains.
-"""
+"""科研领域工具集合。"""
 from __future__ import annotations
 
 from langchain_core.tools import tool
@@ -9,6 +7,7 @@ from capabilities.toolkits.browser_toolkit import browser_navigate_task
 from core.models import get_browser_use_llm
 from runtime.task_interaction import ask_user
 from tools.research_notes import save_research_note, recall_research_notes
+from tools.brave_search import run as run_brave_search
 
 try:
     from langchain_community.tools.tavily_search import TavilySearchResults
@@ -29,26 +28,55 @@ async def web_search(query: str) -> str:
 
 @tool
 async def academic_search(query: str) -> str:
-    """搜索学术论文（Semantic Scholar + arXiv）。"""
+    """搜索学术论文元信息，适合补齐作者、题目、引用线索和交叉验证。"""
     from tools.academic_search import run as search_academic
     result = await search_academic({"query": query})
     return result.get("result", "No results")
 
 
 @tool
-async def exa_deep_search(query: str) -> str:
-    """用 Exa 进行深度语义搜索，适合查找学术论文、研究报告和深度分析文章。支持 deep search 模式，返回全文摘要。"""
+async def brave_search(query: str) -> str:
+    """用 Brave Search 快速发现候选网页和来源。"""
+    result = await run_brave_search({"query": query})
+    return result.get("result", "No results")
+
+
+@tool
+async def exa_deep_search(
+    query: str,
+    mode: str = "summary",
+    output_format: str = "",
+    num_results: int = 8,
+    category: str = "research paper",
+    summary_query: str = "",
+    text_max_characters: int = 20000,
+    text_verbosity: str = "standard",
+    structured_schema_json: str = "",
+) -> str:
+    """用 Exa 做科研检索。
+
+    用法建议：
+    - 默认 `mode="summary"`：返回高密度摘要和 highlights，适合首轮广搜与证据摸底。
+    - `mode="full_text"`：抓取正文并返回结构化结果，适合核查实验细节、方法步骤、claim 边界。
+    - `structured_schema_json`：传 JSON Schema，让 Exa 返回结构化摘要。
+    """
     from tools.exa_search import run as search_exa
-    result = await search_exa({
-        "query": query,
-        "type": "deep",
-        "category": "research paper",
-        "num_results": 10,
-        "contents": {
-            "text": {"max_characters": 4000},
-            "highlights": {"query": query, "max_characters": 2000},
-        },
-    })
+
+    result = await search_exa(
+        {
+            "query": query,
+            "type": "deep",
+            "category": category,
+            "num_results": num_results,
+            "result_mode": mode,
+            "output_format": output_format,
+            "summary_query": summary_query or query,
+            "text_max_characters": text_max_characters,
+            "text_verbosity": text_verbosity,
+            "summary_schema": structured_schema_json,
+            "highlights_max_characters": 1800 if mode == "summary" else 1200,
+        }
+    )
     return result.get("result", "No results")
 
 
@@ -72,8 +100,16 @@ async def ask_user_clarification(
     return answer
 
 
-CORE_TOOLS = [academic_search, exa_deep_search, browser_navigate,
-              ask_user_clarification, save_research_note, recall_research_notes]
+CORE_TOOLS = [
+    exa_deep_search,
+    academic_search,
+    web_search,
+    brave_search,
+    browser_navigate,
+    ask_user_clarification,
+    save_research_note,
+    recall_research_notes,
+]
 
 
 def get_research_tools():

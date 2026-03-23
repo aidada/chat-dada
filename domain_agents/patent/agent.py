@@ -26,16 +26,19 @@ from domain_agents.patent.schemas import (
     TechnicalDisclosure,
 )
 from domain_agents.patent.tools import browser_verify_patent_page, get_patent_tools
+from task_platform.streaming import stream_nested_graph
 
 _log = logging.getLogger("chatdada.patent")
 
 
-def _safe_emit(event_type: str, content: str) -> None:
+def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
     try:
         from langgraph.config import get_stream_writer
 
         writer = get_stream_writer()
-        writer({"event_type": event_type, "content": content})
+        payload = dict(content) if isinstance(content, dict) else {"content": content}
+        payload.setdefault("event_type", event_type)
+        writer(payload)
     except Exception:
         pass
 
@@ -253,8 +256,14 @@ async def run_patent_domain(input_data: dict[str, Any]) -> PatentDomainResult:
         try:
             agent = await build_deepagents_patent_agent()
             _safe_emit("step", "🚀 Executing deepagents patent pipeline...")
-            response = await agent.ainvoke(
-                {"messages": [HumanMessage(content=f"请根据以下技术信息生成完整的专利草案（技术交底、权利要求树、说明书、prior-art 矩阵）：\n\n{query}")]}
+            response = await stream_nested_graph(
+                agent,
+                {"messages": [HumanMessage(content=f"请根据以下技术信息生成完整的专利草案（技术交底、权利要求树、说明书、prior-art 矩阵）：\n\n{query}")]},
+                extra_payload={
+                    "nested_graph": "patent_domain_agent",
+                    "domain_strategy": strategy,
+                    "source": "deepagent",
+                },
             )
             messages = response.get("messages", []) if isinstance(response, dict) else []
             for message in reversed(messages):

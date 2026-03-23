@@ -5,6 +5,8 @@ import json
 import os
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -52,12 +54,57 @@ async def fake_dispatcher(
     task_text: str, file_paths: list[str], mode: str = "auto", user_id: str = "anonymous"
 ) -> RouteDecision:
     route_name, reason, confidence = route_task_request(task_text, file_paths, mode)
-    executor = fake_chat_runner if route_name == "general_chat" else fake_orchestrator_runner
     return RouteDecision(
         route_name=route_name,
         reason=reason,
-        executor=executor,
         confidence=confidence,
+    )
+
+
+async def fake_run_general_chat(input_data, on_chunk=None):
+    query = input_data.get("query", "")
+    if on_chunk is not None:
+        await on_chunk(f"chat chunk for {query}")
+    return {"result": f"chat result for {query}"}
+
+
+def _emit_stream_event(payload: dict) -> None:
+    try:
+        from langgraph.config import get_stream_writer
+
+        get_stream_writer()(payload)
+    except Exception:
+        pass
+
+
+async def fake_domain_runner(input_data: dict) -> SimpleNamespace:
+    query = str(input_data.get("query", input_data.get("task", "")) or "")
+    _emit_stream_event({"event_type": "step", "content": "🧠 fake: analyzing"})
+
+    if "歧义" in query or "澄清方向" in query:
+        answer = await ask_user(
+            "你更想看理论可行性，还是工程实现与实验效果？",
+            context="这个选择会直接影响检索论文和输出结构。",
+            placeholder="例如：更关注工程实现与实验效果",
+        )
+        _emit_stream_event({"event_type": "step", "content": f"🧭 用户补充方向: {answer}"})
+        return SimpleNamespace(
+            result=f"interactive result: {answer}",
+            artifact_refs=[],
+            review={"passed": True, "issues": []},
+            budget={"action": "allow", "reason": "fake interactive domain"},
+            strategy="stubbed",
+        )
+
+    _emit_stream_event(
+        {"event_type": "file", "url": "/download/fake.txt", "name": "fake.txt", "content": "fake.txt"}
+    )
+    return SimpleNamespace(
+        result=f"domain result: {query}",
+        artifact_refs=[{"type": "file", "name": "fake.txt", "url": "/download/fake.txt"}],
+        review={"passed": True, "issues": []},
+        budget={"action": "allow", "reason": "fake domain"},
+        strategy="stubbed",
     )
 
 
@@ -84,6 +131,13 @@ async def wait_for_status(
             return snapshot
         await asyncio.sleep(0.05)
     raise AssertionError(f"Timed out waiting for task {task_id} to reach {statuses}")
+
+
+def assert_contains_event_types(events: list[dict], expected: list[str]) -> None:
+    actual = [event["type"] for event in events]
+    for event_type in expected:
+        if event_type not in actual:
+            raise AssertionError(f"Expected event type {event_type!r} in {actual!r}")
 
 
 def wait_for_terminal_http(client: TestClient, task_id: str, timeout: float = 5.0) -> dict:
@@ -117,6 +171,12 @@ def wait_for_status_http(
 
 class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self._patchers = [
+            patch("runtime.task_dispatcher.run_general_chat", side_effect=fake_run_general_chat),
+            patch("task_platform.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
+        ]
+        for patcher in self._patchers:
+            patcher.start()
         self.service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=fake_dispatcher)
         await self.service.connect()
         # Clean tables before each test for isolation
@@ -125,6 +185,8 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.service.close()
+        for patcher in reversed(self._patchers):
+            patcher.stop()
 
     async def test_submit_task_routes_to_orchestrator_when_files_are_present(self) -> None:
         snapshot = await self.service.submit_task(
@@ -137,18 +199,17 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
 
         final_snapshot = await wait_for_terminal(self.service, snapshot["task_id"])
         self.assertEqual(final_snapshot["status"], "succeeded")
-        self.assertEqual(final_snapshot["route_name"], "orchestrator")
+        self.assertEqual(final_snapshot["route_name"], "research")
         self.assertIn("attachments require tool-capable orchestration", final_snapshot["route_reason"])
-        self.assertIn("orchestrated for user-1", final_snapshot["result"])
+        self.assertIn("domain result", final_snapshot["result"])
 
         events = await self.service.get_events_after(snapshot["task_id"], 0)
-        self.assertEqual(
-            [event["type"] for event in events],
-            ["start", "step", "step", "file", "result", "monitoring"],
-        )
+        assert_contains_event_types(events, ["start", "step", "task", "node", "file", "result", "monitoring"])
         self.assertEqual(events[0]["seq"], 1)
-        self.assertIn("Route: orchestrator", events[1]["content"])
-        self.assertEqual(events[3]["name"], "fake.txt")
+        route_event = next(event for event in events if event["type"] == "step" and "Route: research" in event.get("content", ""))
+        self.assertIn("Route: research", route_event["content"])
+        file_event = next(event for event in events if event["type"] == "file")
+        self.assertEqual(file_event["name"], "fake.txt")
         self.assertEqual(events[-1]["type"], "monitoring")
 
     async def test_submit_task_routes_to_general_chat_for_simple_greeting(self) -> None:
@@ -164,10 +225,11 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_snapshot["status"], "succeeded")
         self.assertEqual(final_snapshot["route_name"], "general_chat")
         self.assertIn("direct chat", final_snapshot["route_reason"])
-        self.assertIn("chat for user-3", final_snapshot["result"])
+        self.assertIn("chat result", final_snapshot["result"])
 
         events = await self.service.get_events_after(snapshot["task_id"], 0)
-        self.assertIn("Route: general_chat", events[1]["content"])
+        route_event = next(event for event in events if event["type"] == "step" and "Route: general_chat" in event.get("content", ""))
+        self.assertIn("Route: general_chat", route_event["content"])
 
     async def test_task_can_pause_for_user_reply_and_resume(self) -> None:
         async def interactive_dispatcher(
@@ -179,7 +241,6 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
             return RouteDecision(
                 route_name="orchestrator",
                 reason="interactive research test",
-                executor=fake_interactive_runner,
                 confidence=1.0,
             )
 
@@ -209,10 +270,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("更关注工程实现与实验效果", final_snapshot["result"])
 
             events = await service.get_events_after(snapshot["task_id"], 0)
-            self.assertEqual(
-                [event["type"] for event in events],
-                ["start", "step", "step", "question", "user_reply", "step", "result", "monitoring"],
-            )
+            assert_contains_event_types(events, ["start", "step", "task", "node", "question", "user_reply", "result", "monitoring"])
         finally:
             await service.close()
 
@@ -256,11 +314,19 @@ class TaskRoutingTests(unittest.TestCase):
 class TaskEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
         self.original_service = main.task_service
+        self._patchers = [
+            patch("runtime.task_dispatcher.run_general_chat", side_effect=fake_run_general_chat),
+            patch("task_platform.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
+        ]
+        for patcher in self._patchers:
+            patcher.start()
         # TestClient lifespan will call connect()/close() automatically
         main.task_service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=fake_dispatcher)
 
     def tearDown(self) -> None:
         main.task_service = self.original_service
+        for patcher in reversed(self._patchers):
+            patcher.stop()
 
     def test_post_get_and_replay_events(self) -> None:
         with TestClient(main.app) as client:
@@ -317,7 +383,6 @@ class TaskEndpointTests(unittest.TestCase):
             return RouteDecision(
                 route_name="orchestrator",
                 reason="interactive research test",
-                executor=fake_interactive_runner,
                 confidence=1.0,
             )
 

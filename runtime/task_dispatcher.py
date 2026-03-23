@@ -143,6 +143,7 @@ async def run_general_chat_task(
     async def on_chunk(content: str) -> None:
         if not content:
             return
+        await on_step(json.dumps({"type": "token", "content": content}, ensure_ascii=False))
         await on_step(json.dumps({"type": "result_delta", "content": content}, ensure_ascii=False))
 
     result = await run_general_chat(

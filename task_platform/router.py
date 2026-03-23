@@ -91,6 +91,8 @@ def build_route_payload(
         execution_path = "zero_report"
     elif needs_clarification(task_text, decision):
         execution_path = "needs_clarification"
+    elif file_paths:
+        execution_path = "research"
     elif is_research_task(task_text, file_paths):
         execution_path = "research"
     else:

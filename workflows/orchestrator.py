@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from core.content_utils import extract_result_text
+from task_platform.streaming import stream_nested_graph
 from workflows.spec import DomainSpec
 from workflows.strategy_selector import make_strategy_selector
 
@@ -63,10 +64,13 @@ class OrchestratedDomainResult(BaseModel):
 
 # ── Shared helpers ───────────────────────────────────────────────────────────
 
-def _safe_emit(event_type: str, content: str) -> None:
+def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
     try:
         from langgraph.config import get_stream_writer
-        get_stream_writer()({"event_type": event_type, "content": content})
+
+        payload = dict(content) if isinstance(content, dict) else {"content": content}
+        payload.setdefault("event_type", event_type)
+        get_stream_writer()(payload)
     except Exception:
         pass
 
@@ -119,8 +123,14 @@ def make_sequential(spec: DomainSpec):
             if context
             else state["goal"]
         )
-        response = await agent.ainvoke(
-            {"messages": [HumanMessage(content=input_msg)]}
+        response = await stream_nested_graph(
+            agent,
+            {"messages": [HumanMessage(content=input_msg)]},
+            extra_payload={
+                "nested_graph": f"{spec.name}_sequential",
+                "strategy": "sequential",
+                "source": "deepagent",
+            },
         )
         output = _extract_last_ai_text(response)
 
@@ -148,6 +158,15 @@ def make_parallel(spec: DomainSpec):
         _safe_emit("step", f"⚡ Parallel: {len(pending)} 个子任务并行执行中...")
 
         async def run_one(subtask_id: str) -> dict[str, Any]:
+            _safe_emit(
+                "subtask",
+                {
+                    "subtask_id": subtask_id,
+                    "status": "started",
+                    "strategy": "parallel",
+                    "content": f"Subtask started: {subtask_id}",
+                },
+            )
             agent = create_deep_agent(
                 model=build_chat_model(spec.model_role),
                 system_prompt=f"{spec.system_prompt}\n\n聚焦子任务：{subtask_id}",
@@ -157,18 +176,45 @@ def make_parallel(spec: DomainSpec):
                 name=f"{spec.name}_worker_{subtask_id}",
             )
             try:
-                resp = await agent.ainvoke(
+                resp = await stream_nested_graph(
+                    agent,
                     {"messages": [HumanMessage(
                         content=f"{state['goal']}\n\n当前子任务：{subtask_id}",
-                    )]}
+                    )]},
+                    extra_payload={
+                        "nested_graph": f"{spec.name}_worker_{subtask_id}",
+                        "strategy": "parallel",
+                        "subtask_id": subtask_id,
+                        "source": "deepagent",
+                    },
+                )
+                output = _extract_last_ai_text(resp)
+                _safe_emit(
+                    "subtask",
+                    {
+                        "subtask_id": subtask_id,
+                        "status": "completed",
+                        "strategy": "parallel",
+                        "content": f"Subtask completed: {subtask_id}",
+                    },
                 )
                 return {
                     "subtask_id": subtask_id,
                     "status": "ok",
-                    "output": _extract_last_ai_text(resp),
+                    "output": output,
                 }
             except Exception as exc:
                 _log.warning("Parallel worker %s failed: %s", subtask_id, exc)
+                _safe_emit(
+                    "subtask",
+                    {
+                        "subtask_id": subtask_id,
+                        "status": "failed",
+                        "strategy": "parallel",
+                        "error": str(exc),
+                        "content": f"Subtask failed: {subtask_id}",
+                    },
+                )
                 return {
                     "subtask_id": subtask_id,
                     "status": "error",
@@ -199,10 +245,16 @@ def make_parallel(spec: DomainSpec):
                 checkpointer=False,
                 name=f"{spec.name}_synthesizer",
             )
-            resp = await synth_agent.ainvoke(
+            resp = await stream_nested_graph(
+                synth_agent,
                 {"messages": [HumanMessage(
                     content=f"目标：{state['goal']}\n\n各子任务结果：\n{findings}",
-                )]}
+                )]},
+                extra_payload={
+                    "nested_graph": f"{spec.name}_synthesizer",
+                    "strategy": "parallel",
+                    "source": "deepagent",
+                },
             )
             synthesis = _extract_last_ai_text(resp)
         else:
@@ -260,8 +312,14 @@ def make_iterative(spec: DomainSpec):
             checkpointer=False,
             name=f"{spec.name}_iterative",
         )
-        response = await agent.ainvoke(
-            {"messages": [HumanMessage(content=input_msg)]}
+        response = await stream_nested_graph(
+            agent,
+            {"messages": [HumanMessage(content=input_msg)]},
+            extra_payload={
+                "nested_graph": f"{spec.name}_iterative",
+                "strategy": "iterative",
+                "source": "deepagent",
+            },
         )
         output = _extract_last_ai_text(response)
 
@@ -299,10 +357,16 @@ def make_planning(spec: DomainSpec):
             checkpointer=False,
             name=f"{spec.name}_planner",
         )
-        response = await agent.ainvoke(
+        response = await stream_nested_graph(
+            agent,
             {"messages": [HumanMessage(
                 content=f"请为以下目标制定子任务计划：\n{state['goal']}",
-            )]}
+            )]},
+            extra_payload={
+                "nested_graph": f"{spec.name}_planner",
+                "strategy": "planning",
+                "source": "deepagent",
+            },
         )
         plan_text = _extract_last_ai_text(response)
 
@@ -324,6 +388,14 @@ def make_planning(spec: DomainSpec):
             subtasks = [{"id": "sub_1", "topic": state["goal"]}]
 
         _safe_emit("step", f"📋 Planning: 已分解为 {len(subtasks)} 个子任务")
+        _safe_emit(
+            "plan",
+            {
+                "status": "generated",
+                "subtasks": _json.loads(_json.dumps(subtasks)),
+                "content": f"Plan generated: {len(subtasks)} subtasks",
+            },
+        )
         return {
             "intermediate_results": [
                 {"strategy": "planning", "plan": subtasks},
@@ -414,6 +486,14 @@ def make_evaluator(spec: DomainSpec):
 
         if review.passed:
             _safe_emit("step", "✅ 评审通过")
+            _safe_emit(
+                "review",
+                {
+                    "status": "passed",
+                    "issues": [],
+                    "content": "Review passed",
+                },
+            )
             return {
                 "evaluations": [evaluation],
                 "final_result": output,
@@ -424,6 +504,14 @@ def make_evaluator(spec: DomainSpec):
         _safe_emit(
             "step",
             f"⚠️ 评审未通过 ({issue_count} 个问题)，准备迭代优化",
+        )
+        _safe_emit(
+            "review",
+            {
+                "status": "failed",
+                "issues": evaluation["issues"],
+                "content": f"Review failed with {issue_count} issue(s)",
+            },
         )
         return {
             "evaluations": [evaluation],

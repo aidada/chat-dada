@@ -1,124 +1,30 @@
-"""
-Deep Research Agent — configuration, data types, and constants.
-"""
+"""科研工作流配置与产物模板定义。"""
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Annotated
-from typing_extensions import TypedDict
-
-from langchain_core.messages import BaseMessage
-from langgraph.graph.message import add_messages
-
-
-class ResearchState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
-    query: str
-    step_count: int
-    report_profile: str
-    research_context: dict      # serialized ResearchContext — 唯一数据源
-    task_id: str                # research memory task ID
-    progress: dict              # serialized ProgressTracker
-    research_plan: dict         # serialized ResearchPlan (P1-1)
-    current_subtask: dict       # current subtask or {} (P1-1)
-
-
-CHECKPOINT_INTERVAL = 5
-SUMMARY_INTERVAL = 6
-
-
-@dataclass
-class ResearchConfig:
-    max_steps: int = 15
-    checkpoint_interval: int = 5
-    summary_interval: int = 6
-    max_parallel_workers: int = 3
-    raw_content_threshold: int = 8000
-    compact_snippet_length: int = 200
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "ResearchConfig":
-        return cls(**{k: data[k] for k in data if k in cls.__dataclass_fields__})
 
 
 DEFAULT_REPORT_PROFILE = "default"
 ACADEMIC_PAPER_GUIDANCE_PROFILE = "academic_paper_guidance"
 
+DEFAULT_DELIVERABLE_TYPE = "literature_review"
+ACADEMIC_DELIVERABLE_TYPE = "paper_guidance"
 
-@dataclass(frozen=True)
-class ReportProfile:
-    name: str
-    research_addendum: str
-    final_addendum: str
-    final_sections: tuple[str, ...]
-
-
-REPORT_PROFILES: dict[str, ReportProfile] = {
-    DEFAULT_REPORT_PROFILE: ReportProfile(
-        name=DEFAULT_REPORT_PROFILE,
-        research_addendum="",
-        final_addendum=(
-            "默认输出是一份问题导向的研究报告。\n"
-            "你必须使用 Markdown 二级标题，且至少包含：\n"
-            "`## 直接结论`\n"
-            "`## 证据链`\n"
-            "`## 机理与成立条件`\n"
-            "`## 工程判断`\n"
-            "`## 限制与证据缺口`\n"
-            "`## 参考来源`\n"
-            "开头必须是 `## 直接结论`，用 3-5 句直接回答“是否成立、为什么、依赖什么条件、工程上如何理解”。"
-        ),
-        final_sections=(
-            "## 直接结论",
-            "## 证据链",
-            "## 机理与成立条件",
-            "## 工程判断",
-            "## 限制与证据缺口",
-            "## 参考来源",
-        ),
-    ),
-    ACADEMIC_PAPER_GUIDANCE_PROFILE: ReportProfile(
-        name=ACADEMIC_PAPER_GUIDANCE_PROFILE,
-        research_addendum=(
-            "当前任务是“科研论文写作导向”的深度研究，不是普通报告。\n"
-            "检索时除结论本身外，还要额外提取：\n"
-            "1. 问题背景与研究动机如何铺垫；\n"
-            "2. 主流方法脉络、代表性论文及其局限；\n"
-            "3. 现有工作尚未解决的研究空白；\n"
-            "4. 能支撑后续论文写作的 claim、证据强度与风险边界；\n"
-            "5. 后续论文必须补的实验、baseline、ablation、误差分析与图表。\n"
-            "如果证据不足以支撑论文写作建议，必须明确标记“需要补证据后再写”。"
-        ),
-        final_addendum=(
-            "你现在输出的是“为后续论文写作服务的科研综述型报告”，不是普通研究报告。\n"
-            "硬性要求：\n"
-            "1. 先写 `## 文献综述正文`，使用连续段落，尽量模拟论文 introduction / 绪论 / related work 的写法，而不是项目符号堆砌。\n"
-            "2. 每个事实判断、方法归纳、趋势结论后都要尽量附引用编号，如 [1]、[2]；如果研究笔记里的出处信息不足以稳定编号，则在句末保留来源 URL 或明确说明出处信息不完整。\n"
-            "3. 综述之后必须单独给出“对后续论文写作的明确建议”，且必须回答：核心问题怎么定义、创新点怎么表述、Introduction 如何分段、Experiment 还需要补哪些关键实验。\n"
-            "4. 必须把“当前可以主张的点”和“当前不能写过头的点”分开写，防止把摘要级证据写成强结论。\n"
-            "5. 所有写作建议都必须基于前文文献证据，不得脱离证据自由发挥。\n"
-            "6. 如果某项建议依赖尚未补齐的实验、公式或正文细节，必须明确标注“需要补证据后再写”。\n"
-            "7. 末尾必须有 `## 参考文献`，按编号或可识别顺序列出题目、作者、年份、来源、链接；若信息缺失，必须标注缺失项。"
-        ),
-        final_sections=(
-            "## 文献综述正文",
-            "## 研究空白与可切入点",
-            "## 对后续论文写作的明确建议",
-            "## 当前可以主张的点",
-            "## 当前不能写过头的点",
-            "## 建议的论文结构",
-            "## 建议补充的实验与材料",
-            "## 参考文献",
-        ),
-    ),
-}
+DEFAULT_RESEARCH_MODE = "review"
 
 REPORT_PROFILE_ALIASES = {
-    "general": DEFAULT_REPORT_PROFILE,
     "default": DEFAULT_REPORT_PROFILE,
+    "general": DEFAULT_REPORT_PROFILE,
     "academic": ACADEMIC_PAPER_GUIDANCE_PROFILE,
     "academic_intro": ACADEMIC_PAPER_GUIDANCE_PROFILE,
     "academic_paper": ACADEMIC_PAPER_GUIDANCE_PROFILE,
     "academic_paper_guidance": ACADEMIC_PAPER_GUIDANCE_PROFILE,
     "paper": ACADEMIC_PAPER_GUIDANCE_PROFILE,
+}
+
+REPORT_PROFILE_TO_DELIVERABLE = {
+    DEFAULT_REPORT_PROFILE: DEFAULT_DELIVERABLE_TYPE,
+    ACADEMIC_PAPER_GUIDANCE_PROFILE: ACADEMIC_DELIVERABLE_TYPE,
 }
 
 ACADEMIC_PROFILE_KEYWORDS = (
@@ -144,3 +50,181 @@ ACADEMIC_PROFILE_KEYWORDS = (
     "科研写作",
     "后续论文怎么写",
 )
+
+
+@dataclass(frozen=True)
+class DeliverableProfile:
+    """最终产物模板。
+
+    用来约束 planner 必须包含哪些模块，以及 synthesizer 最终要长成什么结构。
+    """
+
+    name: str
+    label: str
+    description: str
+    required_modules: tuple[str, ...]
+    final_sections: tuple[str, ...]
+    evaluator_focus: tuple[str, ...]
+
+
+@dataclass
+class ResearchConfig:
+    """科研工作流的运行时参数。"""
+
+    max_worker_rounds: int = 3
+    max_parallel_workers: int = 3
+    max_revision_cycles: int = 2
+    clarification_attempts: int = 1
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "ResearchConfig":
+        payload = data or {}
+        return cls(**{k: payload[k] for k in payload if k in cls.__dataclass_fields__})
+
+
+DELIVERABLE_PROFILES: dict[str, DeliverableProfile] = {
+    DEFAULT_DELIVERABLE_TYPE: DeliverableProfile(
+        name=DEFAULT_DELIVERABLE_TYPE,
+        label="文献综述",
+        description="输出一份面向研究决策的文献综述与研究建议。",
+        required_modules=(
+            "problem_definition",
+            "related_work",
+            "argument_map",
+            "contributions",
+            "limitations",
+        ),
+        final_sections=(
+            "## 研究问题定义",
+            "## 相关工作与证据综述",
+            "## 研究空白与论证链",
+            "## 可主张的贡献",
+            "## 局限性与风险",
+            "## 参考文献",
+        ),
+        evaluator_focus=(
+            "citation_authenticity_traceability",
+            "citation_relevance_coverage",
+            "citation_recency",
+            "argument_chain_completeness",
+            "intent_alignment",
+        ),
+    ),
+    ACADEMIC_DELIVERABLE_TYPE: DeliverableProfile(
+        name=ACADEMIC_DELIVERABLE_TYPE,
+        label="论文写作指导",
+        description="输出可直接服务论文、科研方案、实验规划的结构化草案。",
+        required_modules=(
+            "problem_definition",
+            "related_work",
+            "method_candidates",
+            "experiment_design",
+            "argument_map",
+            "contributions",
+            "limitations",
+        ),
+        final_sections=(
+            "## 文献综述正文",
+            "## 研究空白与可切入点",
+            "## 方法与实验路径建议",
+            "## 对后续论文写作的明确建议",
+            "## 当前可以主张的点",
+            "## 当前不能写过头的点",
+            "## 建议的论文结构",
+            "## 参考文献",
+        ),
+        evaluator_focus=(
+            "citation_authenticity_traceability",
+            "citation_relevance_coverage",
+            "citation_recency",
+            "methodological_rigor",
+            "experimental_feasibility",
+            "argument_chain_completeness",
+            "intent_alignment",
+        ),
+    ),
+    "paper_outline": DeliverableProfile(
+        name="paper_outline",
+        label="论文提纲",
+        description="输出论文结构、段落目标与证据缺口清单。",
+        required_modules=(
+            "problem_definition",
+            "related_work",
+            "argument_map",
+            "contributions",
+        ),
+        final_sections=(
+            "## 论文主线",
+            "## Introduction 分段建议",
+            "## Related Work 组织建议",
+            "## Method 与 Experiment 结构建议",
+            "## 证据缺口与补充建议",
+        ),
+        evaluator_focus=(
+            "citation_relevance_coverage",
+            "argument_chain_completeness",
+            "intent_alignment",
+        ),
+    ),
+    "research_proposal": DeliverableProfile(
+        name="research_proposal",
+        label="研究方案",
+        description="输出研究目标、方法、实验设计与风险评估。",
+        required_modules=(
+            "problem_definition",
+            "method_candidates",
+            "experiment_design",
+            "contributions",
+            "limitations",
+        ),
+        final_sections=(
+            "## 研究目标与问题定义",
+            "## 方法候选与选择理由",
+            "## 实验设计与评估指标",
+            "## 预期贡献",
+            "## 风险与局限性",
+        ),
+        evaluator_focus=(
+            "methodological_rigor",
+            "experimental_feasibility",
+            "intent_alignment",
+        ),
+    ),
+}
+
+
+def normalize_report_profile(report_profile: str | None) -> str:
+    """把外部传入的 profile 名称归一化。"""
+    normalized = str(report_profile or "").strip().lower()
+    if not normalized:
+        return DEFAULT_REPORT_PROFILE
+    return REPORT_PROFILE_ALIASES.get(normalized, normalized)
+
+
+def looks_like_academic_paper_task(query: str) -> bool:
+    """根据关键词判断当前是否偏论文/科研写作任务。"""
+    lowered = str(query or "").lower()
+    return any(keyword in lowered for keyword in ACADEMIC_PROFILE_KEYWORDS)
+
+
+def resolve_report_profile(query: str, requested_profile: str | None = None) -> str:
+    """根据显式指定值和 query 内容决定 report_profile。"""
+    raw_requested = str(requested_profile or "").strip()
+    normalized = normalize_report_profile(requested_profile) if raw_requested else ""
+    if normalized in REPORT_PROFILE_TO_DELIVERABLE:
+        return normalized
+    if looks_like_academic_paper_task(query):
+        return ACADEMIC_PAPER_GUIDANCE_PROFILE
+    return DEFAULT_REPORT_PROFILE
+
+
+def resolve_deliverable_type(query: str, requested_profile: str | None = None) -> str:
+    """把旧的 report_profile 输入映射到新的产物类型。"""
+    profile = resolve_report_profile(query, requested_profile)
+    return REPORT_PROFILE_TO_DELIVERABLE.get(profile, DEFAULT_DELIVERABLE_TYPE)
+
+
+def get_deliverable_profile(deliverable_type: str | None) -> DeliverableProfile:
+    """获取某种产物类型对应的模板。未知值回落到默认综述模板。"""
+    key = str(deliverable_type or "").strip().lower() or DEFAULT_DELIVERABLE_TYPE
+    return DELIVERABLE_PROFILES.get(key, DELIVERABLE_PROFILES[DEFAULT_DELIVERABLE_TYPE])

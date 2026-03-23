@@ -26,16 +26,19 @@ from domain_agents.zero_report.schemas import (
     ZeroReportDraft,
 )
 from domain_agents.zero_report.tools import browser_collect_zero_report_context, get_zero_report_tools
+from task_platform.streaming import stream_nested_graph
 
 _log = logging.getLogger("chatdada.zero_report")
 
 
-def _safe_emit(event_type: str, content: str) -> None:
+def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
     try:
         from langgraph.config import get_stream_writer
 
         writer = get_stream_writer()
-        writer({"event_type": event_type, "content": content})
+        payload = dict(content) if isinstance(content, dict) else {"content": content}
+        payload.setdefault("event_type", event_type)
+        writer(payload)
     except Exception:
         pass
 
@@ -232,8 +235,14 @@ async def run_zero_report_domain(input_data: dict[str, Any]) -> ZeroReportDomain
         try:
             agent = await build_deepagents_zero_report_agent()
             _safe_emit("step", "🚀 Executing deepagents zero-report pipeline...")
-            response = await agent.ainvoke(
-                {"messages": [HumanMessage(content=f"请对以下事件进行归零分析，输出时间线、根因树、整改矩阵和归零报告草稿：\n\n{query}")]}
+            response = await stream_nested_graph(
+                agent,
+                {"messages": [HumanMessage(content=f"请对以下事件进行归零分析，输出时间线、根因树、整改矩阵和归零报告草稿：\n\n{query}")]},
+                extra_payload={
+                    "nested_graph": "zero_report_domain_agent",
+                    "domain_strategy": strategy,
+                    "source": "deepagent",
+                },
             )
             messages = response.get("messages", []) if isinstance(response, dict) else []
             for message in reversed(messages):

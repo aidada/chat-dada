@@ -5,14 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from capabilities.planner import ResearchPlan, ResearchSubtask
 from domain_agents.patent.agent import run_patent_domain
-from domain_agents.research.agent import run_research_domain
+from domain_agents.research.orchestrated import run_research_domain_orchestrated
 from domain_agents.zero_report.agent import run_zero_report_domain
 from runtime.task_dispatcher import RouteDecision
+from runtime.task_dispatcher import run_general_chat_task
 from runtime.task_interaction import ask_user, reset_task_interaction_handler, set_task_interaction_handler
 from task_platform.router import build_route_payload
-from task_platform.streaming import extract_checkpoint_id, translate_stream_part
+from task_platform.streaming import extract_checkpoint_id, stream_nested_graph, translate_stream_part
 
 
 class StreamingAdapterTests(unittest.TestCase):
@@ -24,16 +24,19 @@ class StreamingAdapterTests(unittest.TestCase):
             checkpoint_id="ckpt_1",
             trace_metadata={"task_id": "task_1"},
         )
-        self.assertEqual(events, [("file", {
-            "type": "file",
-            "name": "a.txt",
-            "url": "/download/a.txt",
-            "thread_id": "task_1",
-            "domain": "research",
-            "graph_node": "root",
-            "checkpoint_id": "ckpt_1",
-            "trace_metadata": {"task_id": "task_1"},
-        })])
+        self.assertEqual(len(events), 1)
+        event_type, payload = events[0]
+        self.assertEqual(event_type, "file")
+        self.assertEqual(payload["type"], "file")
+        self.assertEqual(payload["name"], "a.txt")
+        self.assertEqual(payload["url"], "/download/a.txt")
+        self.assertEqual(payload["thread_id"], "task_1")
+        self.assertEqual(payload["domain"], "research")
+        self.assertEqual(payload["graph_node"], "root")
+        self.assertEqual(payload["checkpoint_id"], "ckpt_1")
+        self.assertEqual(payload["trace_metadata"], {"task_id": "task_1"})
+        self.assertEqual(payload["stream_part_type"], "custom")
+        self.assertEqual(payload["graph_path"], [])
 
     def test_interrupt_update_translates_to_question(self) -> None:
         class _Interrupt:
@@ -51,12 +54,28 @@ class StreamingAdapterTests(unittest.TestCase):
         self.assertEqual(events[0][1]["content"], "need answer")
         self.assertEqual(events[0][1]["interrupt_type"], "human_input")
 
-    def test_messages_part_translates_to_token(self) -> None:
+    def test_updates_part_translates_to_node_event(self) -> None:
+        events = translate_stream_part(
+            {"type": "updates", "ns": ("outer",), "data": {"run_patent": {"status": "ok"}}},
+            thread_id="task_updates",
+            domain="patent",
+            checkpoint_id="ckpt_node",
+            trace_metadata={"task_id": "task_updates"},
+        )
+        self.assertEqual(len(events), 1)
+        event_type, payload = events[0]
+        self.assertEqual(event_type, "node")
+        self.assertEqual(payload["node_name"], "run_patent")
+        self.assertEqual(payload["status"], "updated")
+        self.assertEqual(payload["update"], {"status": "ok"})
+        self.assertEqual(payload["graph_node"], "outer")
+
+    def test_messages_tuple_part_translates_to_token(self) -> None:
         class FakeChunk:
             content = "hello"
 
         events = translate_stream_part(
-            {"type": "messages", "data": FakeChunk()},
+            {"type": "messages", "data": (FakeChunk(), {"langgraph_node": "writer"})},
             thread_id="task_3",
             domain="research",
             checkpoint_id="ckpt_3",
@@ -65,6 +84,8 @@ class StreamingAdapterTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0][0], "token")
         self.assertEqual(events[0][1]["content"], "hello")
+        self.assertEqual(events[0][1]["message_metadata"]["langgraph_node"], "writer")
+        self.assertEqual(events[0][1]["graph_node"], "writer")
 
     def test_messages_dict_translates_to_token(self) -> None:
         events = translate_stream_part(
@@ -88,6 +109,79 @@ class StreamingAdapterTests(unittest.TestCase):
         )
         self.assertEqual(events, [])
 
+    def test_task_start_part_translates_to_task_event(self) -> None:
+        events = translate_stream_part(
+            {
+                "type": "tasks",
+                "ns": ("research", "parallel"),
+                "data": {
+                    "id": "lg_task_1",
+                    "name": "parallel_worker",
+                    "input": {"subtask": "sub_1"},
+                    "triggers": ["channel_a"],
+                },
+            },
+            thread_id="task_6",
+            domain="research",
+            checkpoint_id="ckpt_task",
+            trace_metadata={"task_id": "task_6"},
+        )
+        self.assertEqual(len(events), 1)
+        event_type, payload = events[0]
+        self.assertEqual(event_type, "task")
+        self.assertEqual(payload["phase"], "start")
+        self.assertEqual(payload["status"], "started")
+        self.assertEqual(payload["langgraph_task_id"], "lg_task_1")
+        self.assertEqual(payload["task_name"], "parallel_worker")
+
+    def test_task_result_part_translates_to_task_event(self) -> None:
+        events = translate_stream_part(
+            {
+                "type": "tasks",
+                "data": {
+                    "id": "lg_task_2",
+                    "name": "parallel_worker",
+                    "error": None,
+                    "interrupts": [],
+                    "result": {"worker_results": [{"status": "ok"}]},
+                },
+            },
+            thread_id="task_7",
+            domain="research",
+            checkpoint_id="ckpt_task_result",
+            trace_metadata={"task_id": "task_7"},
+        )
+        self.assertEqual(len(events), 1)
+        event_type, payload = events[0]
+        self.assertEqual(event_type, "task")
+        self.assertEqual(payload["phase"], "finish")
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["result"], {"worker_results": [{"status": "ok"}]})
+
+    def test_checkpoint_part_translates_to_checkpoint_event(self) -> None:
+        events = translate_stream_part(
+            {
+                "type": "checkpoints",
+                "data": {
+                    "config": {"configurable": {"checkpoint_id": "cp_999"}},
+                    "next": ("persist_summary",),
+                    "tasks": [{"id": "task_a"}],
+                    "metadata": {"source": "loop"},
+                },
+            },
+            thread_id="task_8",
+            domain="research",
+            checkpoint_id="",
+            trace_metadata={"task_id": "task_8"},
+        )
+        self.assertEqual(len(events), 1)
+        event_type, payload = events[0]
+        self.assertEqual(event_type, "checkpoint")
+        self.assertEqual(payload["checkpoint_id"], "cp_999")
+        self.assertEqual(payload["status"], "saved")
+        self.assertEqual(payload["next_nodes"], ["persist_summary"])
+        self.assertEqual(payload["checkpoint_tasks"], [{"id": "task_a"}])
+
     def test_checkpoint_id_is_extracted(self) -> None:
         checkpoint_id = extract_checkpoint_id(
             {
@@ -98,77 +192,134 @@ class StreamingAdapterTests(unittest.TestCase):
         self.assertEqual(checkpoint_id, "cp_123")
 
 
+class NestedGraphStreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nested_graph_events_are_forwarded_to_parent_writer(self) -> None:
+        collected: list[dict] = []
+
+        class FakeGraph:
+            async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
+                class FakeChunk:
+                    content = "hello"
+
+                yield {"type": "tasks", "data": {"id": "t1", "name": "worker", "input": {"x": 1}, "triggers": ["start"]}}
+                yield {"type": "messages", "data": (FakeChunk(), {"langgraph_node": "worker"})}
+                yield {"type": "checkpoints", "data": {"config": {"configurable": {"checkpoint_id": "cp_nested"}}}}
+                yield {"type": "values", "data": {"messages": []}}
+
+        with patch("langgraph.config.get_stream_writer", return_value=collected.append):
+            result = await stream_nested_graph(
+                FakeGraph(),
+                {"messages": []},
+                extra_payload={"nested_graph": "demo_nested"},
+            )
+
+        self.assertEqual(result, {"messages": []})
+        self.assertEqual([payload["event_type"] for payload in collected], ["task", "token", "checkpoint"])
+        self.assertEqual(collected[0]["nested_graph"], "demo_nested")
+        self.assertEqual(collected[1]["content"], "hello")
+        self.assertEqual(collected[2]["checkpoint_id"], "cp_nested")
+
+
+class GeneralChatStreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_general_chat_emits_token_and_result_delta(self) -> None:
+        collected: list[str] = []
+
+        async def fake_on_step(step: str) -> None:
+            collected.append(step)
+
+        async def fake_run_general_chat(input_data, on_chunk=None):
+            if on_chunk is not None:
+                await on_chunk("partial")
+            return {"result": "done"}
+
+        with patch("runtime.task_dispatcher.run_general_chat", side_effect=fake_run_general_chat):
+            result = await run_general_chat_task("hello", fake_on_step, user_id="u1")
+
+        self.assertEqual(result, "done")
+        self.assertEqual(len(collected), 3)
+        self.assertEqual(collected[0], "💬 正在回答...")
+        self.assertIn('"type": "token"', collected[1])
+        self.assertIn('"type": "result_delta"', collected[2])
+
+
 class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
-    async def test_parallel_research_domain_produces_reviewed_artifacts(self) -> None:
-        task_id = "research_test_parallel"
-        task_dir = Path("data/research") / task_id
-        if task_dir.exists():
-            shutil.rmtree(task_dir)
+    async def test_research_domain_wrapper_returns_reviewed_artifacts(self) -> None:
+        from tempfile import TemporaryDirectory
+        from unittest.mock import AsyncMock
+        from capabilities.memory import ResearchMemory as BaseResearchMemory
 
-        plan = ResearchPlan(
-            original_query="test query",
-            clarified_goal="test query",
-            subtasks=[
-                ResearchSubtask(
-                    id="sub_1",
-                    topic="topic one",
-                    search_angles=["angle one"],
-                    priority=1,
-                    max_rounds=1,
-                    completion_criteria="done",
-                ),
-                ResearchSubtask(
-                    id="sub_2",
-                    topic="topic two",
-                    search_angles=["angle two"],
-                    priority=1,
-                    max_rounds=1,
-                    completion_criteria="done",
-                ),
-            ],
-        )
+        with TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir)
 
-        async def fake_worker(subtask_dict, tools, memory=None):
-            if memory is not None:
-                memory.save_finding(0, "worker", subtask_dict["topic"], f"finding for {subtask_dict['id']}", [])
-            return f"finding for {subtask_dict['id']}"
+            def _memory_factory(task_id: str):
+                return BaseResearchMemory(task_id, root=tmp_root)
 
-        try:
             with (
-                patch("domain_agents.research.agent.generate_research_plan", return_value=plan),
-                patch("domain_agents.research.worker.run_worker", side_effect=fake_worker),
                 patch(
-                    "domain_agents.research.utils._synthesize_parallel_findings",
-                    return_value="final synthesized report with enough detail to pass the review gate and preserve artifacts.",
-                ),
+                    "domain_agents.research.orchestrated.stream_nested_graph",
+                    new=AsyncMock(
+                        return_value={
+                            "final_result": "## 文献综述正文\n\n研究结果 https://example.com/paper",
+                            "aggregated_draft": "## 草案\n\n中间稿",
+                            "workflow_trace": ["intake", "planner", "dispatch_modules", "aggregate_draft", "evaluate_draft", "synthesize_final"],
+                            "plan": {"modules": [{"module_id": "related_work", "title": "相关工作"}]},
+                            "module_outputs": {"related_work": {"content": "文献条目 https://example.com/paper"}},
+                            "evaluations": [{"passed": True, "issues": []}],
+                        }
+                    ),
+                ) as mocked,
+                patch("domain_agents.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
             ):
-                result = await run_research_domain(
-                    {
-                        "query": "test query",
-                        "task_id": task_id,
-                        "parallel": True,
-                        "use_deepagents": False,
-                    }
-                )
-        finally:
-            if task_dir.exists():
-                shutil.rmtree(task_dir)
+                result = await run_research_domain_orchestrated({"query": "test query", "task_id": "research_test"})
+                report_exists = (tmp_root / "research_test" / "final_report.md").exists()
 
+        mocked.assert_awaited_once()
         self.assertEqual(result.status, "ok")
-        self.assertEqual(result.strategy, "graph_parallel")
-        self.assertIn("final synthesized report", result.result)
+        self.assertIn("研究结果", result.result)
         self.assertTrue(result.review["passed"])
         self.assertTrue(any(ref["name"] == "final_report.md" for ref in result.artifact_refs))
+        self.assertTrue(any(ref["name"] == "evidence.json" for ref in result.artifact_refs))
+        self.assertTrue(report_exists)
 
     async def test_deepagents_builder_uses_subagents(self) -> None:
-        with patch("deepagents.create_deep_agent") as mocked:
-            from domain_agents.research.agent import build_deepagents_research_agent
+        self.skipTest("research domain no longer exposes a deepagents compatibility builder")
 
-            mocked.return_value = object()
-            result = await build_deepagents_research_agent()
+    async def test_research_orchestrated_wrapper_uses_stream_bridge(self) -> None:
+        from tempfile import TemporaryDirectory
+        from unittest.mock import AsyncMock, patch
+        from capabilities.memory import ResearchMemory as BaseResearchMemory
 
-        self.assertIsNotNone(result)
-        self.assertTrue(mocked.called)
+        with TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir)
+
+            def _memory_factory(task_id: str):
+                return BaseResearchMemory(task_id, root=tmp_root)
+
+            with (
+                patch(
+                    "domain_agents.research.orchestrated.stream_nested_graph",
+                    new=AsyncMock(
+                        return_value={
+                            "final_result": "research final https://example.com",
+                            "step_history": [{"strategy": "planning"}, {"strategy": "sequential"}],
+                            "evaluations": [{"passed": True, "issues": []}],
+                        }
+                    ),
+                ) as mocked,
+                patch("domain_agents.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+            ):
+                from domain_agents.research.orchestrated import run_research_domain_orchestrated
+
+                result = await run_research_domain_orchestrated({"query": "研究主题", "task_id": "task_r"})
+                report_exists = (tmp_root / "task_r" / "final_report.md").exists()
+
+        mocked.assert_awaited_once()
+        self.assertEqual(result.status, "ok")
+        self.assertIn("research final", result.result)
+        self.assertEqual(result.strategy, "research_workflow(planning → sequential)")
+        self.assertTrue(any(ref["name"] == "final_report.md" for ref in result.artifact_refs))
+        self.assertTrue(any(ref["name"] == "evidence.json" for ref in result.artifact_refs))
+        self.assertTrue(report_exists)
 
 
 class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
@@ -198,7 +349,10 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.budget["action"], "allow")
 
     async def test_deepagents_patent_builder_uses_subagents(self) -> None:
-        with patch("deepagents.create_deep_agent") as mocked:
+        with (
+            patch("deepagents.create_deep_agent") as mocked,
+            patch("core.models.build_chat_model", return_value=object()),
+        ):
             from domain_agents.patent.agent import build_deepagents_patent_agent
 
             mocked.return_value = object()
@@ -214,6 +368,39 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("claim_drafter", names)
         self.assertIn("specification_drafter", names)
         self.assertIn("patent_reviewer", names)
+
+    async def test_patent_orchestrated_wrapper_uses_stream_bridge(self) -> None:
+        from tempfile import TemporaryDirectory
+        from unittest.mock import AsyncMock, patch
+
+        with TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir)
+            with (
+                patch(
+                    "domain_agents.patent.orchestrated.stream_nested_graph",
+                    new=AsyncMock(
+                        return_value={
+                            "final_result": "patent final",
+                            "step_history": [{"strategy": "sequential"}],
+                            "evaluations": [{"passed": True, "issues": []}],
+                        }
+                    ),
+                ) as mocked,
+                patch("domain_agents.patent.agent.PATENT_DATA_ROOT", tmp_root),
+                patch("domain_agents.patent.orchestrated.PATENT_DATA_ROOT", tmp_root),
+            ):
+                from domain_agents.patent.orchestrated import run_patent_domain_orchestrated
+
+                result = await run_patent_domain_orchestrated({"query": "专利任务", "task_id": "task_p"})
+                report_exists = (tmp_root / "task_p" / "patent_draft.md").exists()
+
+        mocked.assert_awaited_once()
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.result, "patent final")
+        self.assertIn("orchestrated(sequential)", result.budget["reason"])
+        self.assertTrue(any(ref["name"] == "patent_draft.md" for ref in result.artifact_refs))
+        self.assertTrue(any(ref["name"] == "claim_tree.json" for ref in result.artifact_refs))
+        self.assertTrue(report_exists)
 
     def test_router_can_select_patent_domain(self) -> None:
         decision = RouteDecision(
@@ -256,7 +443,10 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.budget["action"], "allow")
 
     async def test_deepagents_zero_report_builder_uses_subagents(self) -> None:
-        with patch("deepagents.create_deep_agent") as mocked:
+        with (
+            patch("deepagents.create_deep_agent") as mocked,
+            patch("core.models.build_chat_model", return_value=object()),
+        ):
             from domain_agents.zero_report.agent import build_deepagents_zero_report_agent
 
             mocked.return_value = object()
@@ -272,6 +462,40 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("root_cause_analyst", names)
         self.assertIn("corrective_action_planner", names)
         self.assertIn("report_reviewer", names)
+
+    async def test_zero_report_orchestrated_wrapper_uses_stream_bridge(self) -> None:
+        from tempfile import TemporaryDirectory
+        from unittest.mock import AsyncMock, patch
+
+        with TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir)
+            with (
+                patch(
+                    "domain_agents.zero_report.orchestrated.stream_nested_graph",
+                    new=AsyncMock(
+                        return_value={
+                            "final_result": "zero report final",
+                            "step_history": [{"strategy": "planning"}, {"strategy": "iterative"}],
+                            "evaluations": [{"passed": False, "issues": [{"message": "missing owner"}]}],
+                        }
+                    ),
+                ) as mocked,
+                patch("domain_agents.zero_report.agent.ZERO_REPORT_DATA_ROOT", tmp_root),
+                patch("domain_agents.zero_report.orchestrated.ZERO_REPORT_DATA_ROOT", tmp_root),
+            ):
+                from domain_agents.zero_report.orchestrated import run_zero_report_domain_orchestrated
+
+                result = await run_zero_report_domain_orchestrated({"query": "归零任务", "task_id": "task_z"})
+                report_exists = (tmp_root / "task_z" / "zero_report.md").exists()
+
+        mocked.assert_awaited_once()
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.result, "zero report final")
+        self.assertFalse(result.review["passed"])
+        self.assertIn("orchestrated(planning → iterative)", result.budget["reason"])
+        self.assertTrue(any(ref["name"] == "zero_report.md" for ref in result.artifact_refs))
+        self.assertTrue(any(ref["name"] == "timeline.json" for ref in result.artifact_refs))
+        self.assertTrue(report_exists)
 
     def test_router_can_select_zero_report_domain(self) -> None:
         decision = RouteDecision(
@@ -373,7 +597,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
     """Integration tests: root graph interrupt → resume via Command(resume=...)."""
 
     async def test_interrupt_and_resume_through_root_graph(self) -> None:
-        from unittest.mock import AsyncMock
+        from unittest.mock import patch
         from langgraph.checkpoint.memory import InMemorySaver
         from langgraph.types import Command
         from task_platform.root_graph import build_root_graph
@@ -425,17 +649,31 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
 
         # Resume with user answer
         resumed_events = []
-        async for part in graph.astream(
-            Command(resume="请做深度研究"),
-            config=config,
-            version="v2",
-            stream_mode=["updates"],
-        ):
-            data = part.get("data") or {}
-            if data.get("__interrupt__"):
-                # Second interrupt is acceptable (e.g., domain agent may interrupt)
-                break
-            resumed_events.append(part)
+        async def fake_research_runner(input_data):
+            return type(
+                "FakeResearchResult",
+                (),
+                {
+                    "result": f"stubbed research for {input_data['query']}",
+                    "artifact_refs": [],
+                    "review": {"passed": True},
+                    "budget": {"action": "allow"},
+                    "strategy": "stubbed",
+                },
+            )()
+
+        with patch("task_platform.root_graph.domain_registry.get", return_value=fake_research_runner):
+            async for part in graph.astream(
+                Command(resume="请做深度研究"),
+                config=config,
+                version="v2",
+                stream_mode=["updates"],
+            ):
+                data = part.get("data") or {}
+                if data.get("__interrupt__"):
+                    # Second interrupt is acceptable (e.g., domain agent may interrupt)
+                    break
+                resumed_events.append(part)
 
         # After resume, graph should have re-routed (route_domain runs again)
         state = await graph.aget_state(config)
@@ -584,9 +822,9 @@ class EvidenceCollectionTests(unittest.TestCase):
 
 class ResearchEvidenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_research_builds_evidence_from_urls_in_report(self) -> None:
-        from domain_agents.research.agent import _build_evidence_and_citations
+        from domain_agents.research.utils import build_evidence_and_citations
 
-        evidence, citations = _build_evidence_and_citations(
+        evidence, citations = build_evidence_and_citations(
             "test_task",
             "Report with https://example.com/paper1 and https://example.com/paper2 as sources.",
         )
@@ -595,13 +833,13 @@ class ResearchEvidenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("https://example.com/paper1", evidence.sources())
 
     async def test_research_builds_evidence_from_worker_results(self) -> None:
-        from domain_agents.research.agent import _build_evidence_and_citations
+        from domain_agents.research.utils import build_evidence_and_citations
 
         workers = [
             {"subtask_id": "s1", "topic": "ML", "findings": "Found at https://arxiv.org/abs/1234"},
             {"subtask_id": "s2", "topic": "NLP", "findings": "No URLs here"},
         ]
-        evidence, citations = _build_evidence_and_citations("test_task", "final text", workers)
+        evidence, citations = build_evidence_and_citations("test_task", "final text", workers)
         url_evidence = evidence.by_type("url")
         self.assertTrue(any("arxiv" in e.source for e in url_evidence))
         self.assertTrue(any(c.url == "https://arxiv.org/abs/1234" for c in citations.all()))
