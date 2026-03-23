@@ -39,13 +39,13 @@ class DomainRegistry:
 
 registry = DomainRegistry()
 
-# Register known domains
-from domain_agents.patent.agent import run_patent_domain  # noqa: E402
+# Register known domains — all using orchestrated versions
+from domain_agents.patent.orchestrated import run_patent_domain_orchestrated  # noqa: E402
+from domain_agents.ppt.orchestrated import run_ppt_domain_orchestrated  # noqa: E402
 from domain_agents.research.orchestrated import run_research_domain_orchestrated  # noqa: E402
-from domain_agents.zero_report.agent import run_zero_report_domain  # noqa: E402
-from domain_agents.ppt.agent import run_ppt_domain  # noqa: E402
+from domain_agents.zero_report.orchestrated import run_zero_report_domain_orchestrated  # noqa: E402
 
 registry.register("research", run_research_domain_orchestrated, aliases=["deep_research", "research"])
-registry.register("patent", run_patent_domain, aliases=["patent", "专利"])
-registry.register("zero_report", run_zero_report_domain, aliases=["zero_report", "zero report", "postmortem", "归零"])
-registry.register("ppt", run_ppt_domain, aliases=["ppt", "幻灯片", "powerpoint"])
+registry.register("patent", run_patent_domain_orchestrated, aliases=["patent", "专利"])
+registry.register("zero_report", run_zero_report_domain_orchestrated, aliases=["zero_report", "zero report", "postmortem", "归零"])
+registry.register("ppt", run_ppt_domain_orchestrated, aliases=["ppt", "幻灯片", "powerpoint"])
