@@ -33,6 +33,10 @@
 !ppt_engine/**
 !orchestrator/
 !orchestrator/**
+!workflows/
+!workflows/**
+!domain_agents/
+!domain_agents/**
 !memory/
 !memory/**
 !tools/

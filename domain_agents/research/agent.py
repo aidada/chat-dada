@@ -326,16 +326,6 @@ async def run_research_domain(input_data: dict[str, Any]) -> ResearchDomainResul
                 final_text = extract_result_text(getattr(message, "content", ""))
                 if final_text:
                     break
-    #         if not final_text:
-    #             _safe_emit("step", "⚠️ Deepagents produced no output, falling back to legacy research")
-    #             final_text = await _run_legacy_research(input_data)
-    #             strategy = "legacy_fallback"
-        # except Exception:
-            # _safe_emit("step", "⚠️ Deepagents failed, falling back to legacy research")
-    #         final_text = await _run_legacy_research(input_data)
-    #         strategy = "legacy_fallback"
-    # else:
-    #     final_text = await _run_legacy_research(input_data)
 
     if task_id:
         ResearchMemory(task_id).save_final_report(final_text)
