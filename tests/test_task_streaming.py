@@ -313,7 +313,10 @@ class TaskRoutingTests(unittest.TestCase):
 
 class TaskEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.original_service = main.task_service
+        from apps.web import runtime as web_runtime
+
+        self._web_runtime = web_runtime
+        self.original_service = web_runtime.task_service
         self._patchers = [
             patch("runtime.task_dispatcher.run_general_chat", side_effect=fake_run_general_chat),
             patch("task_platform.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
@@ -321,10 +324,10 @@ class TaskEndpointTests(unittest.TestCase):
         for patcher in self._patchers:
             patcher.start()
         # TestClient lifespan will call connect()/close() automatically
-        main.task_service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=fake_dispatcher)
+        web_runtime.task_service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=fake_dispatcher)
 
     def tearDown(self) -> None:
-        main.task_service = self.original_service
+        self._web_runtime.task_service = self.original_service
         for patcher in reversed(self._patchers):
             patcher.stop()
 

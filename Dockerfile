@@ -13,6 +13,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:3.13-slim
 
 WORKDIR /app
+ENV FRONTEND_DIST_DIR=/app/frontend-dist
 
 # Copy installed packages from builder
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
@@ -20,5 +21,6 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application code (filtered by .dockerignore)
 COPY . .
+RUN mkdir -p /app/frontend-dist/assets
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

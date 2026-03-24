@@ -63,6 +63,14 @@
 !Dockerfile
 !scripts/
 !scripts/**
+!apps/
+!apps/**
+!domain/
+!domain/**
+!infra/
+!infra/**
+!agent_runtime/
+!agent_runtime/**
 
 # Virtual environment
 .venv/

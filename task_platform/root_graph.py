@@ -8,12 +8,12 @@ from langgraph.config import get_stream_writer
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 
+from agent_runtime.interaction import reset_graph_interrupt_bridge, set_graph_interrupt_bridge
 from task_platform.domain_registry import registry as domain_registry
 from task_platform.interrupts import request_interrupt
 from task_platform.router import build_route_payload
 from task_platform.state import RootState
 from task_platform.tracing import build_trace_metadata
-from runtime.task_interaction import reset_graph_interrupt_bridge, set_graph_interrupt_bridge
 
 
 Dispatcher = Callable[[str, list[str], str, str], Awaitable[Any]]
@@ -107,7 +107,7 @@ def _interrupt_bridge(payload: dict[str, Any]) -> str:
 
 async def run_general_chat(state: RootState) -> dict[str, Any]:
     from runtime.task_dispatcher import run_general_chat_task
-    from runtime.task_runtime import parse_step_payload
+    from agent_runtime.task_execution import parse_step_payload
 
     async def on_step(step_info: str) -> None:
         event_type, payload = parse_step_payload(step_info)

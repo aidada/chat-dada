@@ -18,6 +18,10 @@ from typing import Any
 import asyncpg
 
 from core.models import get_llm, response_text
+from infra.db.repositories.conversation_repo import ConversationRepository
+from infra.db.repositories.task_event_repo import TaskEventRepository
+from infra.db.repositories.task_repo import TaskRunRepository
+from infra.db.session import SessionFactory
 from langchain_core.messages import HumanMessage, SystemMessage
 
 log = logging.getLogger("chatdada.context")
@@ -112,6 +116,20 @@ async def _get_conversation_rounds(pool: asyncpg.Pool, conversation_id: str) -> 
             )
         )
     return rounds
+
+
+async def _get_conversation_rounds_via_repo(conversation_id: str) -> list[_Round]:
+    async with SessionFactory() as session:
+        repo = ConversationRepository(session)
+        rows = await repo.get_rounds(conversation_id)
+    return [
+        _Round(
+            task_id=row["task_id"],
+            user_query=row["task_text"] or "",
+            assistant_reply=row["result_content"] or "",
+        )
+        for row in rows
+    ]
 
 
 def _format_rounds_raw(rounds: list[_Round]) -> str:
@@ -220,7 +238,10 @@ class ConversationContextBuilder:
         if not conversation_id:
             return ConversationContext()
 
-        rounds = await _get_conversation_rounds(self._pool, conversation_id)
+        if isinstance(self._pool, asyncpg.Pool):
+            rounds = await _get_conversation_rounds_via_repo(conversation_id)
+        else:
+            rounds = await _get_conversation_rounds(self._pool, conversation_id)
         # Exclude the current round (last task that hasn't finished yet)
         # Only consider rounds with a reply as completed rounds
         completed = [r for r in rounds if r.assistant_reply]
@@ -299,13 +320,17 @@ class ConversationContextBuilder:
         """Get cached summary or generate a new one incrementally."""
         from runtime.task_runtime import TaskRunStore
 
-        # Use pool directly for lightweight queries
-        row = await self._pool.fetchrow(
-            "SELECT context_summary, summary_through_seq FROM conversations WHERE id = $1",
-            conversation_id,
-        )
-        existing_summary = (row["context_summary"] or "") if row else ""
-        through_seq = (row["summary_through_seq"] or 0) if row else 0
+        if isinstance(self._pool, asyncpg.Pool):
+            async with SessionFactory() as session:
+                repo = ConversationRepository(session)
+                existing_summary, through_seq = await repo.get_summary(conversation_id)
+        else:
+            row = await self._pool.fetchrow(
+                "SELECT context_summary, summary_through_seq FROM conversations WHERE id = $1",
+                conversation_id,
+            )
+            existing_summary = (row["context_summary"] or "") if row else ""
+            through_seq = (row["summary_through_seq"] or 0) if row else 0
 
         if not rounds_to_summarize:
             return existing_summary
@@ -338,16 +363,22 @@ class ConversationContextBuilder:
         # Estimate new through_seq based on total rounds
         new_through_seq = total_older * 3  # rough estimate
         try:
-            await self._pool.execute(
-                """
-                UPDATE conversations
-                SET context_summary = $1, summary_through_seq = $2, updated_at = now()
-                WHERE id = $3
-                """,
-                summary,
-                new_through_seq,
-                conversation_id,
-            )
+            if isinstance(self._pool, asyncpg.Pool):
+                async with SessionFactory() as session:
+                    repo = ConversationRepository(session)
+                    await repo.update_summary(conversation_id, summary, new_through_seq)
+                    await session.commit()
+            else:
+                await self._pool.execute(
+                    """
+                    UPDATE conversations
+                    SET context_summary = $1, summary_through_seq = $2, updated_at = now()
+                    WHERE id = $3
+                    """,
+                    summary,
+                    new_through_seq,
+                    conversation_id,
+                )
         except Exception as exc:
             log.warning("Failed to cache summary: %s", exc)
 
@@ -393,6 +424,36 @@ async def generate_embeddings_async(pool: asyncpg.Pool, task_id: str) -> None:
     Called after task completion to enable future vector retrieval.
     """
     try:
+        if isinstance(pool, asyncpg.Pool):
+            async with SessionFactory() as session:
+                event_repo = TaskEventRepository(session)
+                task_repo = TaskRunRepository(session)
+                rows = await event_repo.list_pending_embeddings(task_id=task_id)
+                user_query = await task_repo.get_task_text(task_id)
+                if not rows:
+                    return
+
+                for row in rows:
+                    payload = dict(row.payload or {})
+                    content = str(payload.get("content", "") or "")
+                    if not content.strip():
+                        continue
+
+                    text_to_embed = content
+                    if row.event_type == "result" and user_query:
+                        text_to_embed = f"问题: {user_query[:200]}\n回答: {content[:600]}"
+
+                    embedding = await _embed_text(text_to_embed[:2000])
+                    if embedding is None:
+                        continue
+
+                    embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
+                    await event_repo.set_embedding(task_id=row.task_id, seq=row.seq, embedding=embedding_str)
+
+                await session.commit()
+                log.info("Generated embeddings for task %s (%d events)", task_id, len(rows))
+                return
+
         rows = await pool.fetch(
             """
             SELECT task_id, seq, event_type, payload->>'content' AS content

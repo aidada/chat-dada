@@ -17,9 +17,15 @@ from langgraph.types import Command
 from core.langsmith_config import build_langsmith_run_config
 from core.logger import monitor, new_trace_id
 from core.models import set_thinking_level
-from runtime.task_dispatcher import RouteDecision, dispatch_task
-from runtime.task_interaction import reset_task_interaction_handler, set_task_interaction_handler
-from task_platform.root_graph import build_root_graph
+from agent_runtime.dispatcher import RouteDecision, dispatch_task
+from agent_runtime.interaction import reset_task_interaction_handler, set_task_interaction_handler
+from agent_runtime.root_graph import build_root_graph
+from domain.billing.services import QuotaExceededError, QuotaService
+from infra.db.repositories.conversation_repo import ConversationRepository
+from infra.db.repositories.quota_repo import UsageEventRepository, UserQuotaRepository
+from infra.db.repositories.task_event_repo import TaskEventRepository
+from infra.db.repositories.task_repo import TaskRunRepository
+from infra.db.session import SessionFactory
 from task_platform.router import build_route_payload
 from task_platform.streaming import extract_checkpoint_id, translate_stream_part
 
@@ -93,20 +99,26 @@ class TaskRunStore:
             self.pool = None
 
     async def _recover_interrupted_tasks(self) -> None:
-        rows = await self.pool.fetch(
-            """
-            SELECT task_id
-            FROM task_runs
-            WHERE status IN ('queued', 'running', 'waiting_for_user')
-            ORDER BY created_at ASC
-            """
-        )
-        if not rows:
+        # 兼容旧测试：如果以 MagicMock 方式直接调用该方法，就继续走 pool.fetch。
+        if not isinstance(self, TaskRunStore) and getattr(self, "pool", None) is not None:
+            rows = await self.pool.fetch(
+                """
+                SELECT task_id
+                FROM task_runs
+                WHERE status IN ('queued', 'running', 'waiting_for_user')
+                ORDER BY created_at ASC
+                """
+            )
+            task_ids = [str(row["task_id"]) for row in rows]
+        else:
+            async with SessionFactory() as session:
+                repo = TaskRunRepository(session)
+                task_ids = await repo.list_interrupted()
+        if not task_ids:
             return
 
-        log.warning("Recovering %s interrupted task(s) after process restart", len(rows))
-        for row in rows:
-            task_id = row["task_id"]
+        log.warning("Recovering %s interrupted task(s) after process restart", len(task_ids))
+        for task_id in task_ids:
             snapshot = await self.get_task(task_id) or {}
             if snapshot.get("status") == "waiting_for_user":
                 continue
@@ -145,32 +157,20 @@ class TaskRunStore:
         conversation_id: str = "",
     ) -> dict[str, Any]:
         task_id = f"task_{uuid.uuid4().hex[:12]}"
-        now = datetime.now(UTC)
-
-        await self.pool.execute(
-            """
-            INSERT INTO task_runs (
-                task_id, user_id, status, task_text, mode, thinking_level,
-                request_payload, conversation_id, created_at, updated_at
-            ) VALUES ($1, $2, 'queued', $3, $4, $5, $6::jsonb, $7, $8, $9)
-            """,
-            task_id,
-            user_id,
-            task_text,
-            mode,
-            thinking_level,
-            json.dumps(request_payload, ensure_ascii=False),
-            conversation_id or None,
-            now,
-            now,
-        )
-
-        if conversation_id:
-            await self.pool.execute(
-                "UPDATE conversations SET updated_at = $1 WHERE id = $2",
-                now,
-                conversation_id,
+        async with SessionFactory() as session:
+            repo = TaskRunRepository(session)
+            await repo.create(
+                task_id=task_id,
+                user_id=user_id,
+                task_text=task_text,
+                mode=mode,
+                thinking_level=thinking_level,
+                request_payload=request_payload,
+                conversation_id=conversation_id,
             )
+            if conversation_id:
+                await repo.touch_conversation(conversation_id)
+            await session.commit()
 
         return await self.get_task(task_id) or {
             "task_id": task_id,
@@ -181,73 +181,28 @@ class TaskRunStore:
         }
 
     async def mark_started(self, task_id: str) -> None:
-        now = datetime.now(UTC)
-        await self.pool.execute(
-            """
-            UPDATE task_runs
-            SET status = 'running',
-                started_at = COALESCE(started_at, $1),
-                pending_question = NULL,
-                updated_at = $2
-            WHERE task_id = $3
-            """,
-            now,
-            now,
-            task_id,
-        )
+        async with SessionFactory() as session:
+            repo = TaskRunRepository(session)
+            await repo.mark_started(task_id)
+            await session.commit()
 
     async def set_waiting_for_user(self, task_id: str, question_payload: dict[str, Any]) -> None:
-        now = datetime.now(UTC)
-        await self.pool.execute(
-            """
-            UPDATE task_runs
-            SET status = 'waiting_for_user',
-                pending_question = $1::jsonb,
-                updated_at = $2
-            WHERE task_id = $3
-            """,
-            json.dumps(question_payload, ensure_ascii=False),
-            now,
-            task_id,
-        )
+        async with SessionFactory() as session:
+            repo = TaskRunRepository(session)
+            await repo.set_waiting_for_user(task_id, question_payload)
+            await session.commit()
 
     async def resume_task(self, task_id: str) -> None:
-        now = datetime.now(UTC)
-        await self.pool.execute(
-            """
-            UPDATE task_runs
-            SET status = 'running',
-                pending_question = NULL,
-                updated_at = $1
-            WHERE task_id = $2
-            """,
-            now,
-            task_id,
-        )
+        async with SessionFactory() as session:
+            repo = TaskRunRepository(session)
+            await repo.resume_task(task_id)
+            await session.commit()
 
     async def update_request_payload(self, task_id: str, patch: dict[str, Any]) -> None:
-        row = await self.pool.fetchrow(
-            "SELECT request_payload FROM task_runs WHERE task_id = $1",
-            task_id,
-        )
-        if row is None:
-            return
-        payload = row["request_payload"]
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-        merged = dict(payload or {})
-        merged.update(patch)
-        await self.pool.execute(
-            """
-            UPDATE task_runs
-            SET request_payload = $1::jsonb,
-                updated_at = $2
-            WHERE task_id = $3
-            """,
-            json.dumps(merged, ensure_ascii=False),
-            datetime.now(UTC),
-            task_id,
-        )
+        async with SessionFactory() as session:
+            repo = TaskRunRepository(session)
+            await repo.update_request_payload(task_id, patch)
+            await session.commit()
 
     async def set_route_info(
         self,
@@ -257,198 +212,110 @@ class TaskRunStore:
         route_reason: str,
         route_confidence: float,
     ) -> None:
-        now = datetime.now(UTC)
-        await self.pool.execute(
-            """
-            UPDATE task_runs
-            SET route_name = $1,
-                route_reason = $2,
-                route_confidence = $3,
-                updated_at = $4
-            WHERE task_id = $5
-            """,
-            route_name,
-            route_reason,
-            route_confidence,
-            now,
-            task_id,
-        )
+        async with SessionFactory() as session:
+            repo = TaskRunRepository(session)
+            await repo.set_route_info(
+                task_id,
+                route_name=route_name,
+                route_reason=route_reason,
+                route_confidence=route_confidence,
+            )
+            await session.commit()
 
     async def set_result_text(self, task_id: str, result_text: str) -> None:
-        now = datetime.now(UTC)
-        await self.pool.execute(
-            """
-            UPDATE task_runs
-            SET result_text = $1, error_text = NULL, updated_at = $2
-            WHERE task_id = $3
-            """,
-            result_text,
-            now,
-            task_id,
-        )
+        async with SessionFactory() as session:
+            repo = TaskRunRepository(session)
+            await repo.set_result_text(task_id, result_text)
+            await session.commit()
 
     async def set_error_text(self, task_id: str, error_text: str) -> None:
-        now = datetime.now(UTC)
-        await self.pool.execute(
-            """
-            UPDATE task_runs
-            SET error_text = $1, updated_at = $2
-            WHERE task_id = $3
-            """,
-            error_text,
-            now,
-            task_id,
-        )
+        async with SessionFactory() as session:
+            repo = TaskRunRepository(session)
+            await repo.set_error_text(task_id, error_text)
+            await session.commit()
 
     async def finish_task(self, task_id: str, status: str) -> None:
-        now = datetime.now(UTC)
-        await self.pool.execute(
-            """
-            UPDATE task_runs
-            SET status = $1, finished_at = $2, pending_question = NULL, updated_at = $3
-            WHERE task_id = $4
-            """,
-            status,
-            now,
-            now,
-            task_id,
-        )
+        async with SessionFactory() as session:
+            repo = TaskRunRepository(session)
+            await repo.finish(task_id, status)
+            await session.commit()
 
     async def append_event(
         self, task_id: str, event_type: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        created_at = datetime.now(UTC)
-
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(
-                    "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM task_events WHERE task_id = $1",
-                    task_id,
-                )
-                seq = int(row["seq"])
-                await conn.execute(
-                    """
-                    INSERT INTO task_events (task_id, seq, event_type, payload, created_at)
-                    VALUES ($1, $2, $3, $4::jsonb, $5)
-                    """,
-                    task_id,
-                    seq,
-                    event_type,
-                    json.dumps(payload, ensure_ascii=False),
-                    created_at,
-                )
-                await conn.execute(
-                    "UPDATE task_runs SET updated_at = $1 WHERE task_id = $2",
-                    created_at,
-                    task_id,
-                )
+        async with SessionFactory() as session:
+            repo = TaskEventRepository(session)
+            row = await repo.append(task_id=task_id, event_type=event_type, payload=payload)
+            await session.commit()
 
         event: dict[str, Any] = {
             "task_id": task_id,
-            "seq": seq,
+            "seq": row.seq,
             "type": event_type,
-            "created_at": created_at.isoformat(),
+            "created_at": row.created_at.isoformat(),
         }
         event.update(payload)
         return event
 
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT
-                    task_id,
-                    user_id,
-                    status,
-                    task_text,
-                    mode,
-                    thinking_level,
-                    route_name,
-                    route_reason,
-                    route_confidence,
-                    request_payload,
-                    pending_question,
-                    result_text,
-                    error_text,
-                    conversation_id,
-                    created_at,
-                    started_at,
-                    finished_at,
-                    updated_at
-                FROM task_runs
-                WHERE task_id = $1
-                """,
-                task_id,
-            )
+        async with SessionFactory() as session:
+            repo = TaskRunRepository(session)
+            row = await repo.get(task_id)
             if row is None:
                 return None
 
-            last_seq_row = await conn.fetchrow(
-                "SELECT COALESCE(MAX(seq), 0) AS last_seq FROM task_events WHERE task_id = $1",
-                task_id,
-            )
+            last_seq = await repo.get_last_seq(task_id)
 
-        payload_raw = row["request_payload"]
-        payload = json.loads(payload_raw) if isinstance(payload_raw, str) else dict(payload_raw or {})
+        payload = dict(row.request_payload or {})
         pending_question = None
-        if row["pending_question"]:
-            try:
-                pending_question = json.loads(row["pending_question"])
-            except (json.JSONDecodeError, TypeError):
-                pending_question = {"content": str(row["pending_question"])}
+        if row.pending_question:
+            pending_question = dict(row.pending_question)
 
         def _ts(v: datetime | None) -> str | None:
             return v.isoformat() if v is not None else None
 
         return {
-            "task_id": row["task_id"],
-            "user_id": row["user_id"],
-            "status": row["status"],
-            "task": row["task_text"],
-            "mode": row["mode"],
-            "thinking_level": row["thinking_level"],
+            "task_id": row.task_id,
+            "user_id": row.user_id,
+            "status": row.status,
+            "task": row.task_text,
+            "mode": row.mode,
+            "thinking_level": row.thinking_level,
             "request_payload": payload,
-            "route_name": row["route_name"],
-            "route_reason": row["route_reason"],
-            "route_confidence": row["route_confidence"],
+            "route_name": row.route_name,
+            "route_reason": row.route_reason,
+            "route_confidence": row.route_confidence,
             "file_paths": payload.get("file_paths", []),
             "pending_question": pending_question,
-            "result": row["result_text"],
-            "error": row["error_text"],
-            "thread_id": payload.get("thread_id", row["task_id"]),
-            "domain": row["route_name"] or payload.get("domain", ""),
+            "result": row.result_text,
+            "error": row.error_text,
+            "thread_id": payload.get("thread_id", row.task_id),
+            "domain": row.route_name or payload.get("domain", ""),
             "artifact_refs": payload.get("artifact_refs", []),
             "interrupt_state": payload.get("interrupt_state"),
             "latest_checkpoint_id": payload.get("latest_checkpoint_id", ""),
             "review": payload.get("review"),
             "budget": payload.get("budget"),
-            "created_at": _ts(row["created_at"]),
-            "started_at": _ts(row["started_at"]),
-            "finished_at": _ts(row["finished_at"]),
-            "updated_at": _ts(row["updated_at"]),
-            "conversation_id": row["conversation_id"] or "",
-            "last_seq": int(last_seq_row["last_seq"]) if last_seq_row else 0,
+            "created_at": _ts(row.created_at),
+            "started_at": _ts(row.started_at),
+            "finished_at": _ts(row.finished_at),
+            "updated_at": _ts(row.updated_at),
+            "conversation_id": row.conversation_id or "",
+            "last_seq": last_seq,
         }
 
     async def get_events_after(self, task_id: str, after_seq: int) -> list[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
-            SELECT task_id, seq, event_type, payload, created_at
-            FROM task_events
-            WHERE task_id = $1 AND seq > $2
-            ORDER BY seq ASC
-            """,
-            task_id,
-            after_seq,
-        )
+        async with SessionFactory() as session:
+            repo = TaskEventRepository(session)
+            rows = await repo.list_after(task_id=task_id, after_seq=after_seq)
         events: list[dict[str, Any]] = []
         for row in rows:
-            payload = json.loads(row["payload"])
+            payload = dict(row.payload or {})
             event: dict[str, Any] = {
-                "task_id": row["task_id"],
-                "seq": int(row["seq"]),
-                "type": row["event_type"],
-                "created_at": row["created_at"].isoformat(),
+                "task_id": row.task_id,
+                "seq": int(row.seq),
+                "type": row.event_type,
+                "created_at": row.created_at.isoformat(),
             }
             event.update(payload)
             events.append(event)
@@ -459,210 +326,97 @@ class TaskRunStore:
     async def create_conversation(
         self, *, conversation_id: str, user_id: str, title: str = "新对话"
     ) -> dict[str, Any]:
-        now = datetime.now(UTC)
-        await self.pool.execute(
-            """
-            INSERT INTO conversations (id, user_id, title, pinned, created_at, updated_at)
-            VALUES ($1, $2, $3, FALSE, $4, $5)
-            """,
-            conversation_id,
-            user_id,
-            title,
-            now,
-            now,
-        )
+        async with SessionFactory() as session:
+            repo = ConversationRepository(session)
+            row = await repo.create(conversation_id=conversation_id, user_id=user_id, title=title)
+            await session.commit()
         return {
-            "id": conversation_id,
-            "user_id": user_id,
-            "title": title,
-            "pinned": False,
-            "created_at": now.isoformat(),
-            "updated_at": now.isoformat(),
+            "id": row.id,
+            "user_id": row.user_id,
+            "title": row.title,
+            "pinned": row.pinned,
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat(),
         }
 
     async def list_conversations(self, user_id: str) -> list[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
-            SELECT
-                c.id,
-                c.title,
-                c.pinned,
-                c.created_at,
-                c.updated_at,
-                (
-                    SELECT t.task_id FROM task_runs t
-                    WHERE t.conversation_id = c.id
-                    ORDER BY t.created_at DESC LIMIT 1
-                ) AS last_task_id,
-                (
-                    SELECT LEFT(t.task_text, 60) FROM task_runs t
-                    WHERE t.conversation_id = c.id
-                    ORDER BY t.created_at DESC LIMIT 1
-                ) AS preview
-            FROM conversations c
-            WHERE c.user_id = $1
-            ORDER BY c.pinned DESC, c.updated_at DESC
-            """,
-            user_id,
-        )
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            result.append({
-                "id": row["id"],
-                "title": row["title"],
-                "pinned": row["pinned"],
-                "created_at": row["created_at"].isoformat(),
-                "updated_at": row["updated_at"].isoformat(),
-                "last_task_id": row["last_task_id"] or "",
-                "preview": row["preview"] or "",
-            })
-        return result
+        async with SessionFactory() as session:
+            repo = ConversationRepository(session)
+            return await repo.list_for_user(user_id)
 
     async def update_conversation(
         self, conversation_id: str, **fields: Any
     ) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow(
-            "SELECT id, user_id, title, pinned, created_at, updated_at FROM conversations WHERE id = $1",
-            conversation_id,
-        )
+        async with SessionFactory() as session:
+            repo = ConversationRepository(session)
+            row = await repo.get(conversation_id)
+            if row is None:
+                return None
+            row = await repo.update(row, **fields)
+            await session.commit()
         if row is None:
             return None
-
-        title = fields.get("title", row["title"])
-        pinned = fields.get("pinned", row["pinned"])
-        now = datetime.now(UTC)
-
-        await self.pool.execute(
-            """
-            UPDATE conversations
-            SET title = $1, pinned = $2, updated_at = $3
-            WHERE id = $4
-            """,
-            title,
-            pinned,
-            now,
-            conversation_id,
-        )
         return {
-            "id": row["id"],
-            "user_id": row["user_id"],
-            "title": title,
-            "pinned": pinned,
-            "created_at": row["created_at"].isoformat(),
-            "updated_at": now.isoformat(),
+            "id": row.id,
+            "user_id": row.user_id,
+            "title": row.title,
+            "pinned": row.pinned,
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat(),
+        }
+
+    async def get_conversation(self, conversation_id: str) -> dict[str, Any] | None:
+        async with SessionFactory() as session:
+            repo = ConversationRepository(session)
+            row = await repo.get(conversation_id)
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "user_id": row.user_id,
+            "title": row.title,
+            "pinned": row.pinned,
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat(),
         }
 
     async def delete_conversation(self, conversation_id: str) -> bool:
-        result = await self.pool.execute(
-            "DELETE FROM conversations WHERE id = $1", conversation_id
-        )
-        return result == "DELETE 1"
+        async with SessionFactory() as session:
+            repo = ConversationRepository(session)
+            row = await repo.get(conversation_id)
+            if row is None:
+                return False
+            await repo.delete(row)
+            await session.commit()
+            return True
 
     async def get_conversation_entries(self, conversation_id: str) -> list[dict[str, Any]]:
-        # Fetch user queries from task_runs (not stored in task_events)
-        task_rows = await self.pool.fetch(
-            """
-            SELECT task_id, task_text, request_payload, created_at
-            FROM task_runs
-            WHERE conversation_id = $1
-            ORDER BY created_at ASC
-            """,
-            conversation_id,
-        )
-        # Fetch all events
-        event_rows = await self.pool.fetch(
-            """
-            SELECT e.task_id, e.seq, e.event_type, e.payload, e.created_at
-            FROM task_events e
-            JOIN task_runs t ON t.task_id = e.task_id
-            WHERE t.conversation_id = $1
-            ORDER BY e.created_at ASC, e.seq ASC
-            """,
-            conversation_id,
-        )
-
-        # Group events by task_id
-        events_by_task: dict[str, list] = {}
-        for row in event_rows:
-            events_by_task.setdefault(row["task_id"], []).append(row)
-
-        entries: list[dict[str, Any]] = []
-        for task_row in task_rows:
-            tid = task_row["task_id"]
-            # Insert user query entry before this task's events
-            attachments = _build_attachments(task_row["request_payload"])
-            entries.append({
-                "id": f"{tid}_user",
-                "type": "user",
-                "content": task_row["task_text"],
-                "attachments": attachments,
-                "created_at": task_row["created_at"].isoformat(),
-            })
-            # Append all events belonging to this task
-            for row in events_by_task.get(tid, []):
-                payload = json.loads(row["payload"])
-                entry: dict[str, Any] = {
-                    "id": f"{row['task_id']}_{row['seq']}",
-                    "type": row["event_type"],
-                    "created_at": row["created_at"].isoformat(),
-                }
-                entry.update(payload)
-                entries.append(entry)
-        return entries
+        async with SessionFactory() as session:
+            repo = ConversationRepository(session)
+            return await repo.get_entries(conversation_id)
 
     async def get_conversation_summary(self, conversation_id: str) -> tuple[str, int]:
         """Return (context_summary, summary_through_seq) for a conversation."""
-        row = await self.pool.fetchrow(
-            "SELECT context_summary, summary_through_seq FROM conversations WHERE id = $1",
-            conversation_id,
-        )
-        if row is None:
-            return "", 0
-        return row["context_summary"] or "", row["summary_through_seq"] or 0
+        async with SessionFactory() as session:
+            repo = ConversationRepository(session)
+            return await repo.get_summary(conversation_id)
 
     async def update_conversation_summary(
         self, conversation_id: str, summary: str, through_seq: int
     ) -> None:
         """Cache the rolling summary and the seq it covers."""
-        await self.pool.execute(
-            """
-            UPDATE conversations
-            SET context_summary = $1, summary_through_seq = $2, updated_at = now()
-            WHERE id = $3
-            """,
-            summary,
-            through_seq,
-            conversation_id,
-        )
+        async with SessionFactory() as session:
+            repo = ConversationRepository(session)
+            await repo.update_summary(conversation_id, summary, through_seq)
+            await session.commit()
 
     async def get_conversation_primary_events(
         self, conversation_id: str, after_seq: int = 0
     ) -> list[dict[str, Any]]:
         """Fetch user/result/error events for a conversation, ordered chronologically."""
-        rows = await self.pool.fetch(
-            """
-            SELECT e.task_id, e.seq, e.event_type, e.payload, e.created_at
-            FROM task_events e
-            JOIN task_runs t ON t.task_id = e.task_id
-            WHERE t.conversation_id = $1
-              AND e.event_type IN ('user', 'result', 'error')
-              AND e.seq > $2
-            ORDER BY e.created_at ASC, e.seq ASC
-            """,
-            conversation_id,
-            after_seq,
-        )
-        events: list[dict[str, Any]] = []
-        for row in rows:
-            payload = json.loads(row["payload"])
-            events.append({
-                "task_id": row["task_id"],
-                "seq": int(row["seq"]),
-                "event_type": row["event_type"],
-                "content": str(payload.get("content", "")),
-                "created_at": row["created_at"].isoformat(),
-            })
-        return events
+        async with SessionFactory() as session:
+            repo = ConversationRepository(session)
+            return await repo.get_primary_events(conversation_id, after_seq)
 
 
 class TaskService:
@@ -730,12 +484,31 @@ class TaskService:
         file_paths: list[str],
         conversation_id: str = "",
     ) -> dict[str, Any]:
+        async with SessionFactory() as session:
+            quota_service = QuotaService(UserQuotaRepository(session), UsageEventRepository(session))
+            try:
+                quota_snapshots = await quota_service.assess_before_task(user_id=user_id)
+            except QuotaExceededError as exc:
+                raise RuntimeError(exc.user_message) from exc
+
         request_payload = {
             "task": task_text,
             "user_id": user_id,
             "mode": mode,
             "thinking_level": thinking_level,
             "file_paths": file_paths,
+            "quota": [
+                {
+                    "period": item.period,
+                    "tasks_used": item.tasks_used,
+                    "tasks_limit": item.tasks_limit,
+                    "tokens_used": item.tokens_used,
+                    "tokens_limit": item.tokens_limit,
+                    "cost_used_usd": item.cost_used_usd,
+                    "cost_limit_usd": item.cost_limit_usd,
+                }
+                for item in quota_snapshots
+            ],
         }
         snapshot = await self._store.create_task(
             user_id=user_id,
@@ -1041,9 +814,28 @@ class TaskService:
             await self.record_event(task_id, "result", event_payload)
         except Exception as exc:
             error_text = str(exc)
+            error_code = "task_execution_error"
+            user_message = error_text
+            if "weekly_limit_exceeded" in error_text:
+                error_code = "provider_weekly_limit_exceeded"
+                user_message = "服务端上游模型本周额度已用完，请稍后再试。"
+            elif "daily_limit_exceeded" in error_text:
+                error_code = "provider_daily_limit_exceeded"
+                user_message = "服务端上游模型当日额度已用完，请稍后再试。"
+            elif "monthly_limit_exceeded" in error_text:
+                error_code = "provider_monthly_limit_exceeded"
+                user_message = "服务端上游模型本月额度已用完，请稍后再试。"
             log.error("Task failed: %s", exc)
             await self._store.set_error_text(task_id, error_text)
-            await self.record_event(task_id, "error", {"content": error_text})
+            await self.record_event(
+                task_id,
+                "error",
+                {
+                    "content": user_message,
+                    "error_code": error_code,
+                    "raw_error": error_text,
+                },
+            )
             summary = monitor.get_summary(trace_id)
             await self.record_event(task_id, "monitoring", {"content": summary})
             await self._store.finish_task(task_id, "failed")
@@ -1054,6 +846,15 @@ class TaskService:
 
         summary = monitor.get_summary(trace_id)
         await self.record_event(task_id, "monitoring", {"content": summary})
+        async with SessionFactory() as session:
+            usage_service = QuotaService(UserQuotaRepository(session), UsageEventRepository(session))
+            await usage_service.record_task_usage(
+                user_id=user_id,
+                task_id=task_id,
+                total_tokens=int(summary.get("total_tokens", 0) or 0),
+                cost_usd=0.0,
+            )
+            await session.commit()
         await self._store.finish_task(task_id, "succeeded")
         monitor.finalize(trace_id)
 

@@ -10,7 +10,7 @@ from langgraph.graph import StateGraph
 from capabilities.memory import ResearchMemory
 from core.content_utils import normalize_markdown_report
 from core.models import get_llm
-from runtime.task_interaction import ask_user
+from agent_runtime.interaction import ask_user
 
 from domain_agents.research.config import ResearchConfig, get_deliverable_profile
 from domain_agents.research.prompts import (

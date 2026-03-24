@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
+from agent_runtime.interaction import ask_user
 from capabilities.toolkits.browser_toolkit import browser_navigate_task
 from core.models import get_browser_use_llm
-from runtime.task_interaction import ask_user
 from tools.research_notes import save_research_note, recall_research_notes
 from tools.brave_search import run as run_brave_search
 

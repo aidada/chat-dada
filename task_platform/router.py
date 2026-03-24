@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from runtime.task_dispatcher import RouteDecision
+from agent_runtime.dispatcher import RouteDecision
 
 from task_platform.state import RouteDecisionPayload
 

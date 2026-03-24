@@ -1,3 +1,4 @@
+alembic>=1.16.5
 aiofiles==25.1.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
@@ -83,6 +84,8 @@ ollama==0.6.1
 openai==2.16.0
 openpyxl==3.1.5
 orjson==3.11.7
+pgvector>=0.4.2
+pwdlib[argon2]>=0.3.0
 ormsgpack==1.12.2
 packaging==26.0
 pfzy==0.3.4

@@ -5,7 +5,9 @@ description = "Chat DaDa — AI assistant with multi-agent orchestration"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "alembic>=1.16.5",
     "asyncpg>=0.29.0",
+    "authlib>=1.6.6",
     "boto3>=1.42.0",
     "browser-use>=0.11.13",
     "deepagents>=0.4.11",
@@ -30,10 +32,14 @@ dependencies = [
     "python-multipart>=0.0.6",
     "python-pptx>=1.0.0",
     "redis>=7.0",
+    "sqlalchemy>=2.0.48",
     "tavily-python>=0.3.0",
     "uvicorn[standard]>=0.4.0",
     "vsdx>=0.6.0",
     "websockets>=12.0",
+    "pwdlib[argon2]>=0.3.0",
+    "itsdangerous>=2.2.0",
+    "pgvector>=0.4.2",
 ]
 
 [tool.pytest.ini_options]
