@@ -24,3 +24,6 @@ class TaskExecutionService:
 
     async def reply(self, task_id: str, answer: str):
         return await self.task_service.reply_to_task(task_id, answer)
+
+    async def cancel(self, task_id: str):
+        return await self.task_service.cancel_running_task(task_id)

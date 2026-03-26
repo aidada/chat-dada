@@ -112,7 +112,7 @@ async def run_research_domain_orchestrated(input_data: dict[str, Any]) -> Resear
         },
     )
 
-    final_text = str(result.get("final_result", "") or "")
+    final_text = str(result.get("final_result", "") or result.get("aggregated_draft", "") or "")
     latest_review = (result.get("evaluations") or [{}])[-1]
     artifact_refs = _persist_workflow_artifacts(task_id, {**result, "query": query, "report_profile": report_profile})
     workflow_trace = [str(item) for item in result.get("workflow_trace", []) if str(item).strip()]

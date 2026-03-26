@@ -5,7 +5,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from apps.web import runtime as web_runtime
-from apps.web.deps import ensure_owner_or_404, get_current_user, get_task_execution_service
+from apps.web.deps import (
+    ensure_owner_or_404,
+    get_current_user,
+    get_task_execution_service,
+    resolve_current_user_once,
+)
 from domain.tasks.services import TaskExecutionService
 
 router = APIRouter(tags=["tasks"])
@@ -40,14 +45,17 @@ async def create_task(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    snapshot = await task_service.submit(
-        task_text=task_text,
-        user_id=user_id,
-        mode=mode,
-        thinking_level=thinking_level,
-        file_paths=file_paths,
-        conversation_id=payload.conversation_id,
-    )
+    try:
+        snapshot = await task_service.submit(
+            task_text=task_text,
+            user_id=user_id,
+            mode=mode,
+            thinking_level=thinking_level,
+            file_paths=file_paths,
+            conversation_id=payload.conversation_id,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     return JSONResponse({"task_id": snapshot["task_id"], "status": snapshot["status"]}, status_code=202)
 
 
@@ -170,14 +178,33 @@ async def reply_task(
     return JSONResponse({"task_id": snapshot["task_id"], "status": snapshot["status"]}, status_code=202)
 
 
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(
+    task_id: str,
+    current_user=Depends(get_current_user),
+    task_service: TaskExecutionService = Depends(get_task_execution_service),
+):
+    snapshot = await task_service.get(task_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    ensure_owner_or_404(resource_user_id=str(snapshot.get("user_id", "")), current_user=current_user)
+    try:
+        snapshot = await task_service.cancel(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse({"task_id": snapshot["task_id"], "status": snapshot["status"]}, status_code=202)
+
+
 @router.get("/tasks/{task_id}/events")
 async def stream_task_events(
     request: Request,
     task_id: str,
     after_seq: int | None = Query(default=None, ge=0),
-    current_user=Depends(get_current_user),
     task_service: TaskExecutionService = Depends(get_task_execution_service),
 ):
+    current_user = await resolve_current_user_once(request)
     snapshot = await task_service.get(task_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -186,4 +213,5 @@ async def stream_task_events(
         request,
         task_id,
         web_runtime.parse_after_seq(request, after_seq),
+        snapshot=snapshot,
     )

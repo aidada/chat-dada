@@ -55,12 +55,82 @@ def collect_urls(text: str) -> list[str]:
     return list(dict.fromkeys(_URL_RE.findall(str(text or ""))))
 
 
-def fallback_brief(query: str, requested_profile: str | None, input_data: dict[str, Any]) -> dict[str, Any]:
-    deliverable_type = str(
-        input_data.get("deliverable_type") or resolve_deliverable_type(query, requested_profile)
-    ).strip() or DEFAULT_DELIVERABLE_TYPE
+def _normalize_string_list(value: Any, *, empty_markers: set[str] | None = None) -> list[str]:
+    markers = {marker.lower() for marker in (empty_markers or set())}
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        if raw.lower() in markers:
+            return []
+        parts = re.split(r"[,\n/、，;；]\s*", raw)
+        return [part.strip() for part in parts if part.strip() and part.strip().lower() not in markers]
+    if isinstance(value, list):
+        items: list[str] = []
+        for item in value:
+            items.extend(_normalize_string_list(item, empty_markers=empty_markers))
+        return items
+    text = str(value).strip()
+    if not text or text.lower() in markers:
+        return []
+    return [text]
 
-    research_mode = str(input_data.get("research_mode") or "").strip().lower()
+
+def _normalize_text_items(value: Any, *, empty_markers: set[str] | None = None) -> list[str]:
+    markers = {marker.lower() for marker in (empty_markers or set())}
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        return [] if not raw or raw.lower() in markers else [raw]
+    if isinstance(value, list):
+        items: list[str] = []
+        for item in value:
+            items.extend(_normalize_text_items(item, empty_markers=empty_markers))
+        return items
+    text = str(value).strip()
+    if not text or text.lower() in markers:
+        return []
+    return [text]
+
+
+def _normalize_scalar_text(value: Any, *, empty_markers: set[str] | None = None) -> str:
+    markers = {marker.lower() for marker in (empty_markers or set())}
+    if value in (None, "", [], {}):
+        return ""
+    if isinstance(value, str):
+        raw = value.strip()
+        return "" if not raw or raw.lower() in markers else raw
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            normalized = _normalize_scalar_text(item, empty_markers=empty_markers)
+            if normalized and normalized not in parts:
+                parts.append(normalized)
+        return " / ".join(parts)
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, item in value.items():
+            normalized = _normalize_scalar_text(item, empty_markers=empty_markers)
+            if not normalized:
+                continue
+            label = str(key).strip()
+            parts.append(f"{label}: {normalized}" if label else normalized)
+        return "; ".join(parts)
+    text = str(value).strip()
+    return "" if not text or text.lower() in markers else text
+
+
+def fallback_brief(query: str, requested_profile: str | None, input_data: dict[str, Any]) -> dict[str, Any]:
+    deliverable_type = (
+        _normalize_scalar_text(input_data.get("deliverable_type"))
+        or resolve_deliverable_type(query, requested_profile)
+        or DEFAULT_DELIVERABLE_TYPE
+    )
+
+    research_mode = _normalize_scalar_text(input_data.get("research_mode")).lower()
     lowered = query.lower()
     if not research_mode:
         if any(token in lowered for token in ("实验", "empirical", "benchmark", "ablation", "定量")):
@@ -95,17 +165,28 @@ def fallback_brief(query: str, requested_profile: str | None, input_data: dict[s
     else:
         user_constraints = []
 
+    clarification_history = input_data.get("clarification_history") or []
+    for item in clarification_history:
+        if not isinstance(item, dict):
+            continue
+        question = _normalize_scalar_text(item.get("question"))
+        answer = _normalize_scalar_text(item.get("answer"))
+        if answer:
+            detail = f"{question} -> {answer}" if question else answer
+            if detail not in user_constraints:
+                user_constraints.append(detail)
+
     profile = get_deliverable_profile(deliverable_type)
     brief = ResearchBrief(
         raw_query=query,
-        clarified_goal=str(input_data.get("clarified_goal") or query).strip(),
-        discipline=str(input_data.get("discipline") or "").strip(),
+        clarified_goal=_normalize_scalar_text(input_data.get("clarified_goal")) or query,
+        discipline=_normalize_scalar_text(input_data.get("discipline")),
         deliverable_type=deliverable_type,
         research_mode=research_mode,
-        time_scope=str(input_data.get("time_scope") or "recent + seminal"),
+        time_scope=_normalize_scalar_text(input_data.get("time_scope")) or "recent + seminal",
         literature_languages=[str(item) for item in languages],
-        citation_style=str(input_data.get("citation_style") or "APA"),
-        output_language=str(input_data.get("output_language") or "zh-CN"),
+        citation_style=_normalize_scalar_text(input_data.get("citation_style")) or "APA",
+        output_language=_normalize_scalar_text(input_data.get("output_language")) or "zh-CN",
         user_constraints=user_constraints,
         success_criteria=[
             "模块化中间稿可评估",
@@ -138,12 +219,36 @@ def merge_brief(base: dict[str, Any], override: dict[str, Any], input_data: dict
         if input_data.get(key):
             merged[key] = input_data[key]
 
-    merged["deliverable_type"] = str(merged.get("deliverable_type") or DEFAULT_DELIVERABLE_TYPE)
-    merged["clarified_goal"] = str(merged.get("clarified_goal") or merged.get("raw_query") or "")
-    merged["user_constraints"] = [str(item) for item in merged.get("user_constraints", []) if str(item).strip()]
-    merged["preferred_emphasis"] = [str(item) for item in merged.get("preferred_emphasis", []) if str(item).strip()]
-    merged["success_criteria"] = [str(item) for item in merged.get("success_criteria", []) if str(item).strip()]
-    merged["unresolved_questions"] = [str(item) for item in merged.get("unresolved_questions", []) if str(item).strip()]
+    merged["raw_query"] = _normalize_scalar_text(merged.get("raw_query"))
+    merged["clarified_goal"] = _normalize_scalar_text(merged.get("clarified_goal")) or merged["raw_query"]
+    merged["discipline"] = _normalize_scalar_text(merged.get("discipline"))
+    merged["deliverable_type"] = (
+        _normalize_scalar_text(merged.get("deliverable_type")) or DEFAULT_DELIVERABLE_TYPE
+    )
+    merged["research_mode"] = _normalize_scalar_text(merged.get("research_mode")) or DEFAULT_RESEARCH_MODE
+    merged["time_scope"] = _normalize_scalar_text(merged.get("time_scope")) or "recent + seminal"
+    merged["literature_languages"] = _normalize_string_list(
+        merged.get("literature_languages"),
+        empty_markers={"未指定", "none", "n/a", "na"},
+    ) or ["en", "zh"]
+    merged["citation_style"] = _normalize_scalar_text(merged.get("citation_style")) or "APA"
+    merged["output_language"] = _normalize_scalar_text(merged.get("output_language")) or "zh-CN"
+    merged["user_constraints"] = _normalize_string_list(
+        merged.get("user_constraints"),
+        empty_markers={"未指定", "none", "n/a", "na"},
+    )
+    merged["preferred_emphasis"] = _normalize_string_list(
+        merged.get("preferred_emphasis"),
+        empty_markers={"未指定", "none", "n/a", "na"},
+    )
+    merged["success_criteria"] = _normalize_string_list(
+        merged.get("success_criteria"),
+        empty_markers={"未指定", "none", "n/a", "na"},
+    )
+    merged["unresolved_questions"] = _normalize_text_items(
+        merged.get("unresolved_questions"),
+        empty_markers={"未指定", "none", "n/a", "na"},
+    )
     return ResearchBrief(**merged).model_dump()
 
 
@@ -385,6 +490,20 @@ def lock_module_snapshot(module_outputs: dict[str, dict[str, Any]], module_ids: 
 def feedback_action(feedback: str | None) -> str:
     text = str(feedback or "").strip().lower()
     if not text:
+        return "accept"
+    if any(
+        token in text
+        for token in (
+            "无修改",
+            "没有修改",
+            "没修改",
+            "无需修改",
+            "不需要修改",
+            "不用修改",
+            "保持不变",
+            "按原计划",
+        )
+    ):
         return "accept"
     if any(token in text for token in ("重做", "重来", "改方向", "换成", "不是这个", "replan", "重新规划")):
         return "replan"

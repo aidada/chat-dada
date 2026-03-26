@@ -19,6 +19,7 @@ INTAKE_SYSTEM_PROMPT = """你是科研任务 intake 规划员。
 1. 把用户输入整理成结构化科研 brief。
 2. 明确产物类型、研究模式、文献语言、时间范围、引用风格、用户关注点。
 3. 只有在关键约束缺失且会改变后续工作流时，才提出 unresolved_questions。
+4. 如果 clarification_history 里已经回答过某类问题，不要重复生成同类 unresolved_questions；应把这些回答视为已知约束。
 
 输出 JSON，字段：
 - raw_query
@@ -214,6 +215,17 @@ def _brief_context_block(input_data: dict) -> str:
             lines.append(f"- {key}: {value}")
     if input_data.get("constraints"):
         lines.append(f"- constraints: {input_data['constraints']}")
+    clarification_history = input_data.get("clarification_history") or []
+    if clarification_history:
+        lines.append("- clarification_history:")
+        for item in clarification_history:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question", "") or "").strip()
+            answer = str(item.get("answer", "") or "").strip()
+            if question or answer:
+                lines.append(f"  - Q: {question}")
+                lines.append(f"    A: {answer}")
     return "\n".join(lines) or "(无显式补充约束)"
 
 

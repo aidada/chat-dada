@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import unittest
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from apps.web.deps import get_auth_service, get_current_user
+from apps.web.deps import get_auth_service, get_current_user, resolve_current_user_once
 from apps.web.routers.auth import router as auth_router
 
 
@@ -28,6 +29,9 @@ class _FakeUser:
 
 
 class _FakeAuthService:
+    def __init__(self, session=None) -> None:
+        self.session = session
+
     async def register_with_password(self, *, email: str, password: str, display_name: str = ""):
         return _FakeUser(email=email, display_name=display_name or "registered")
 
@@ -39,6 +43,19 @@ class _FakeAuthService:
 
     async def logout_by_session_token(self, token: str) -> None:
         return None
+
+    async def get_user_by_session_token(self, token: str):
+        if token == "session-token":
+            return _FakeUser(), object()
+        return None, None
+
+
+class _FakeSessionContext:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class AuthRouteTests(unittest.TestCase):
@@ -79,6 +96,21 @@ class AuthRouteTests(unittest.TestCase):
         response = self.client.post("/auth/logout", cookies={"chat_dada_session": "session-token"})
         self.assertEqual(response.status_code, 200)
         self.assertIn("chat_dada_session=", response.headers.get("set-cookie", ""))
+
+    def test_resolve_current_user_once_uses_short_lived_session(self) -> None:
+        class _Request:
+            cookies = {"chat_dada_session": "session-token"}
+
+        async def _run():
+            with patch("apps.web.deps.auth.SessionFactory", return_value=_FakeSessionContext()):
+                with patch("apps.web.deps.auth.AuthService", _FakeAuthService):
+                    user = await resolve_current_user_once(_Request())
+            return user
+
+        import asyncio
+
+        user = asyncio.run(_run())
+        self.assertEqual(user.id, "user_1")
 
 
 if __name__ == "__main__":

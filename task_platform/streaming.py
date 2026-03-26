@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from langgraph.types import Command
+
 
 STREAM_SCHEMA_VERSION = "2026-03-23"
 _UPDATE_INTERNAL_KEYS = {"__interrupt__", "__metadata__"}
@@ -134,6 +136,43 @@ def _normalize_update_part(part: dict[str, Any], *, checkpoint_id: str = "") -> 
         events.append(payload)
 
     return events
+
+
+def _extract_interrupt_payload(part: dict[str, Any]) -> dict[str, Any] | None:
+    data = part.get("data") or {}
+    interrupts = data.get("__interrupt__")
+    if not interrupts:
+        return None
+    first = interrupts[0]
+    value = getattr(first, "value", first)
+    payload = dict(value if isinstance(value, dict) else {"content": str(value)})
+    payload.setdefault("content", str(payload.get("content", "")))
+    payload["interrupt_type"] = str(payload.get("interrupt_type", "human_input"))
+    return payload
+
+
+def _sync_parent_interrupt_state(consumed_count: int) -> None:
+    if consumed_count <= 0:
+        return
+    try:
+        from langgraph.types import interrupt
+        for _ in range(consumed_count):
+            interrupt({"_sync_only": True})
+    except Exception:
+        return
+
+
+def _merge_update_values(final_values: Any, part: dict[str, Any]) -> Any:
+    data = part.get("data") or {}
+    merged = dict(final_values) if isinstance(final_values, dict) else {}
+    for node_name, update in data.items():
+        if node_name in _UPDATE_INTERNAL_KEYS:
+            continue
+        if isinstance(update, dict):
+            merged.update(_jsonable(update))
+        else:
+            merged[str(node_name)] = _jsonable(update)
+    return merged or final_values
 
 
 def _normalize_message_part(part: dict[str, Any], *, checkpoint_id: str = "") -> list[dict[str, Any]]:
@@ -303,9 +342,23 @@ async def stream_nested_graph(
     except Exception:
         writer = lambda _payload: None
 
+    consumed_interrupts = 0
+    nested_resume_value: Any = None
+    try:
+        from langgraph.config import get_config
+
+        configurable = get_config().get("configurable", {}) or {}
+        consumed_interrupts = int(configurable.get("nested_interrupt_count", 0) or 0)
+        nested_resume_value = configurable.get("nested_resume_value")
+    except Exception:
+        consumed_interrupts = 0
+        nested_resume_value = None
+    _sync_parent_interrupt_state(consumed_interrupts)
+
     final_values: Any = None
+    pending_interrupt_payload: dict[str, Any] | None = None
     async for part in graph.astream(
-        input_data,
+        Command(resume=nested_resume_value) if nested_resume_value is not None else input_data,
         config=config,
         version="v2",
         stream_mode=list(stream_mode),
@@ -314,11 +367,32 @@ async def stream_nested_graph(
         if part.get("type") == "values":
             final_values = part.get("data")
             continue
+        if part.get("type") == "updates":
+            interrupt_payload = _extract_interrupt_payload(part)
+            if interrupt_payload is not None:
+                pending_interrupt_payload = pending_interrupt_payload or interrupt_payload
+            final_values = _merge_update_values(final_values, part)
 
         event_checkpoint = extract_checkpoint_id(part)
         for normalized in normalize_stream_part(part, checkpoint_id=event_checkpoint):
             payload = dict(normalized)
             payload.update(extra_payload or {})
             writer(payload)
+
+    if pending_interrupt_payload is not None:
+        from task_platform.interrupts import request_interrupt
+
+        request_interrupt(pending_interrupt_payload)
+
+    if config and hasattr(graph, "aget_state"):
+        try:
+            state_snapshot = await graph.aget_state(config)
+            snapshot_values = getattr(state_snapshot, "values", None)
+            if isinstance(final_values, dict) and isinstance(snapshot_values, dict):
+                final_values = {**final_values, **snapshot_values}
+            elif snapshot_values not in (None, {}):
+                final_values = snapshot_values
+        except Exception:
+            pass
 
     return final_values

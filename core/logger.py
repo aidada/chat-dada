@@ -152,6 +152,7 @@ class MonitoringCollector:
         llm_count = 0
         total_tokens = 0
         error_count = 0
+        llm_usage_map: dict[str, dict[str, Any]] = {}
 
         for ev in events:
             if ev.event == "end" and ev.duration_ms:
@@ -160,6 +161,22 @@ class MonitoringCollector:
             if ev.layer == "llm" and ev.event == "end":
                 llm_count += 1
                 total_tokens += ev.metadata.get("tokens", 0)
+                model = str(ev.metadata.get("model", "") or "")
+                bucket = llm_usage_map.setdefault(
+                    model,
+                    {
+                        "model": model,
+                        "role": str(ev.metadata.get("role", "") or ""),
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "calls": 0,
+                    },
+                )
+                bucket["input_tokens"] += int(ev.metadata.get("input_tokens", 0) or 0)
+                bucket["output_tokens"] += int(ev.metadata.get("output_tokens", 0) or 0)
+                bucket["total_tokens"] += int(ev.metadata.get("tokens", 0) or 0)
+                bucket["calls"] += 1
             if ev.event == "error":
                 error_count += 1
 
@@ -174,6 +191,7 @@ class MonitoringCollector:
             "total_duration_ms": round(total_duration, 1),
             "llm_call_count": llm_count,
             "total_tokens": total_tokens,
+            "llm_usage": list(llm_usage_map.values()),
             "error_count": error_count,
             "events": [
                 {
@@ -249,6 +267,67 @@ def _extract_total_tokens(usage: Any) -> int:
     if isinstance(usage, dict):
         return int(usage.get("total_tokens", 0) or 0)
     return int(getattr(usage, "total_tokens", 0) or 0)
+
+
+def _extract_token_breakdown(usage: Any) -> tuple[int, int, int]:
+    if not usage:
+        return 0, 0, 0
+    if isinstance(usage, dict):
+        input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens", 0) or input_tokens + output_tokens)
+        return input_tokens, output_tokens, total_tokens
+    input_tokens = int(getattr(usage, "input_tokens", 0) or getattr(usage, "prompt_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or getattr(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", 0) or input_tokens + output_tokens)
+    return input_tokens, output_tokens, total_tokens
+
+
+def _find_usage_payload(result: Any) -> Any:
+    direct = getattr(result, "usage_metadata", None)
+    if direct:
+        return direct
+
+    response_metadata = getattr(result, "response_metadata", None)
+    if isinstance(response_metadata, dict):
+        for key in ("usage_metadata", "usage", "token_usage"):
+            payload = response_metadata.get(key)
+            if payload:
+                return payload
+
+    generations = getattr(result, "generations", None)
+    if isinstance(generations, list):
+        for group in generations:
+            if not isinstance(group, list):
+                continue
+            for generation in group:
+                message = getattr(generation, "message", None)
+                if message is None and isinstance(generation, dict):
+                    message = generation.get("message")
+                if message is None:
+                    continue
+                payload = getattr(message, "usage_metadata", None)
+                if payload:
+                    return payload
+                message_response_metadata = getattr(message, "response_metadata", None)
+                if isinstance(message_response_metadata, dict):
+                    for key in ("usage_metadata", "usage", "token_usage"):
+                        payload = message_response_metadata.get(key)
+                        if payload:
+                            return payload
+                if isinstance(message, dict):
+                    kwargs = message.get("kwargs")
+                    if isinstance(kwargs, dict):
+                        payload = kwargs.get("usage_metadata")
+                        if payload:
+                            return payload
+                        message_response_metadata = kwargs.get("response_metadata")
+                        if isinstance(message_response_metadata, dict):
+                            for key in ("usage_metadata", "usage", "token_usage"):
+                                payload = message_response_metadata.get(key)
+                                if payload:
+                                    return payload
+    return None
 
 
 def _prepare_responses_kwargs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[tuple[Any, ...], dict[str, Any]]:
@@ -364,12 +443,17 @@ class _LoggingLLM:
             result = await self._llm.ainvoke(*args, **kwargs)
             dur = (time.time() - t0) * 1000
 
-            tokens = _extract_total_tokens(getattr(result, "usage_metadata", None))
+            usage_payload = _find_usage_payload(result)
+            input_tokens, output_tokens, tokens = _extract_token_breakdown(usage_payload)
+            usage_available = usage_payload is not None
 
             meta = {
                 "model": self._model,
                 "role": self._role,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "tokens": tokens,
+                "usage_available": usage_available,
                 "duration_ms": round(dur, 1),
             }
             if is_verbose() and hasattr(result, "content"):
@@ -379,7 +463,8 @@ class _LoggingLLM:
                 timestamp=time.time(), trace_id=tid, layer="llm",
                 name=label, event="end", duration_ms=dur, metadata=meta,
             ))
-            log.info(f"{label} done ({dur:.0f}ms, {tokens} tokens)")
+            usage_text = f"{tokens} tokens" if usage_available else "usage unavailable"
+            log.info(f"{label} done ({dur:.0f}ms, {usage_text})")
             return result
 
         except Exception as exc:
@@ -408,15 +493,23 @@ class _LoggingLLM:
 
         t0 = time.time()
         tokens = 0
+        input_tokens = 0
+        output_tokens = 0
+        usage_available = False
         preview_parts: list[str] = []
 
         try:
             async for chunk in self._llm.astream(*args, **kwargs):
-                usage = getattr(chunk, "usage_metadata", None)
+                usage = _find_usage_payload(chunk)
                 if usage:
-                    chunk_tokens = _extract_total_tokens(usage)
+                    usage_available = True
+                    chunk_input_tokens, chunk_output_tokens, chunk_tokens = _extract_token_breakdown(usage)
                     if chunk_tokens:
                         tokens = chunk_tokens
+                    if chunk_input_tokens:
+                        input_tokens = chunk_input_tokens
+                    if chunk_output_tokens:
+                        output_tokens = chunk_output_tokens
 
                 if is_verbose() and len("".join(preview_parts)) < 200:
                     chunk_text = _extract_llm_content(chunk)
@@ -429,7 +522,10 @@ class _LoggingLLM:
             meta = {
                 "model": self._model,
                 "role": self._role,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "tokens": tokens,
+                "usage_available": usage_available,
                 "duration_ms": round(dur, 1),
             }
             if is_verbose() and preview_parts:
@@ -439,7 +535,8 @@ class _LoggingLLM:
                 timestamp=time.time(), trace_id=tid, layer="llm",
                 name=label, event="end", duration_ms=dur, metadata=meta,
             ))
-            log.info(f"{label} stream done ({dur:.0f}ms, {tokens} tokens)")
+            usage_text = f"{tokens} tokens" if usage_available else "usage unavailable"
+            log.info(f"{label} stream done ({dur:.0f}ms, {usage_text})")
 
         except Exception as exc:
             dur = (time.time() - t0) * 1000

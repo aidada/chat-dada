@@ -11,9 +11,9 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import main
-from runtime.task_dispatcher import RouteDecision, route_task_request
-from runtime.task_interaction import ask_user
-from runtime.task_runtime import TaskService
+from agent_runtime.dispatcher import RouteDecision, route_task_request
+from agent_runtime.interaction import ask_user
+from agent_runtime.task_execution import TaskService
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql://chatdada:chatdada@localhost:5432/chatdada"
@@ -108,6 +108,19 @@ async def fake_domain_runner(input_data: dict) -> SimpleNamespace:
     )
 
 
+async def slow_domain_runner(input_data: dict) -> SimpleNamespace:
+    query = str(input_data.get("query", input_data.get("task", "")) or "")
+    _emit_stream_event({"event_type": "step", "content": "⏳ fake: running"})
+    await asyncio.sleep(30)
+    return SimpleNamespace(
+        result=f"slow domain result: {query}",
+        artifact_refs=[],
+        review={"passed": True, "issues": []},
+        budget={"action": "allow", "reason": "slow fake domain"},
+        strategy="stubbed",
+    )
+
+
 async def wait_for_terminal(service: TaskService, task_id: str, timeout: float = 5.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -172,8 +185,8 @@ def wait_for_status_http(
 class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._patchers = [
-            patch("runtime.task_dispatcher.run_general_chat", side_effect=fake_run_general_chat),
-            patch("task_platform.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
+            patch("agent_runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat),
+            patch("agent_runtime.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
         ]
         for patcher in self._patchers:
             patcher.start()
@@ -274,6 +287,44 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await service.close()
 
+    async def test_running_task_can_be_cancelled(self) -> None:
+        async def orchestrator_dispatcher(
+            task_text: str,
+            file_paths: list[str],
+            mode: str = "auto",
+            user_id: str = "anonymous",
+        ) -> RouteDecision:
+            return RouteDecision(
+                route_name="orchestrator",
+                reason="cancel test",
+                confidence=1.0,
+            )
+
+        self.service._dispatcher = orchestrator_dispatcher
+        with patch("agent_runtime.root_graph.domain_registry.get", return_value=slow_domain_runner):
+            snapshot = await self.service.submit_task(
+                task_text="帮我执行一个很慢的任务",
+                user_id="user-8",
+                mode="agent",
+                thinking_level="medium",
+                file_paths=[],
+            )
+
+            await wait_for_status(self.service, snapshot["task_id"], {"running"})
+            cancelled = await self.service.cancel_running_task(snapshot["task_id"])
+            self.assertEqual(cancelled["status"], "cancelled")
+
+            final_snapshot = await wait_for_terminal(self.service, snapshot["task_id"])
+            self.assertEqual(final_snapshot["status"], "cancelled")
+
+            events = await self.service.get_events_after(snapshot["task_id"], 0)
+            self.assertTrue(
+                any(
+                    event["type"] == "task" and event.get("status") == "cancelled"
+                    for event in events
+                )
+            )
+
 
 class TaskRoutingTests(unittest.TestCase):
     def test_mode_chat_forces_general_chat(self) -> None:
@@ -310,6 +361,12 @@ class TaskRoutingTests(unittest.TestCase):
         self.assertIn("research", reason)
         self.assertGreater(confidence, 0.5)
 
+    def test_auto_routes_capability_question_about_paper_writing_to_general_chat(self) -> None:
+        route_name, reason, confidence = route_task_request("你能帮我写论文吗？", [], "auto")
+        self.assertEqual(route_name, "general_chat")
+        self.assertIn("capability inquiry", reason)
+        self.assertGreater(confidence, 0.8)
+
 
 class TaskEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -318,8 +375,8 @@ class TaskEndpointTests(unittest.TestCase):
         self._web_runtime = web_runtime
         self.original_service = web_runtime.task_service
         self._patchers = [
-            patch("runtime.task_dispatcher.run_general_chat", side_effect=fake_run_general_chat),
-            patch("task_platform.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
+            patch("agent_runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat),
+            patch("agent_runtime.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
         ]
         for patcher in self._patchers:
             patcher.start()

@@ -85,6 +85,30 @@ def _plan_summary(plan: dict[str, Any]) -> str:
     )
 
 
+def _revision_targets_summary(targets: list[dict[str, Any]]) -> str:
+    if not targets:
+        return "- （当前未生成具体修订项）"
+    lines: list[str] = []
+    for item in targets:
+        module_id = str(item.get("module_id", "") or "unknown")
+        reason = str(item.get("reason", "") or "未提供原因")
+        priority = str(item.get("priority", "") or "medium")
+        actions = [str(action).strip() for action in item.get("actions", []) if str(action).strip()]
+        action_text = "；".join(actions[:2]) if actions else "按评审意见补强"
+        lines.append(f"- {module_id} [{priority}]: {reason}；建议：{action_text}")
+    return "\n".join(lines)
+
+
+def _draft_preview(text: str, limit: int = 1200) -> str:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return "（当前没有可展示的草稿正文）"
+    preview = stripped[:limit]
+    if len(stripped) > limit:
+        preview += "\n...\n（草稿过长，已截断）"
+    return preview
+
+
 async def intake_node(state: ResearchWorkflowState) -> dict[str, Any]:
     """任务接收阶段：把原始 query 归一化为科研 brief。"""
     query = str(state.get("query", "") or "").strip()
@@ -359,12 +383,23 @@ async def evaluate_draft_node(state: ResearchWorkflowState) -> dict[str, Any]:
 async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
     """检查点 B：中间稿评审后的人工纠偏点。"""
     latest = (state.get("evaluations") or [{}])[-1]
+    revision_targets = list(state.get("revision_targets", []) or [])
+    question = (
+        "当前草案评审未通过。\n\n"
+        f"评审摘要：{latest.get('summary', '未提供')}\n\n"
+        "待修订模块：\n"
+        f"{_revision_targets_summary(revision_targets)}\n\n"
+        "当前草稿摘录：\n"
+        f"{_draft_preview(str(state.get('aggregated_draft', '') or ''))}\n\n"
+        "如果需要改方向请直接说明；否则回复“继续修订”或“继续”。"
+    )
     answer = await ask_user(
-        "当前草案评审未通过。如果需要改方向请直接说明；否则系统将按评审结果继续修订。",
+        question,
         context=json.dumps(
             {
                 "summary": latest.get("summary", ""),
                 "revision_targets": latest.get("revision_targets", []),
+                "aggregated_draft": str(state.get("aggregated_draft", "") or ""),
             },
             ensure_ascii=False,
             indent=2,
@@ -377,14 +412,15 @@ async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
         feedback_history.append({"checkpoint": "checkpoint_b", "content": answer})
 
     action = feedback_action(answer)
-    revision_targets = list(state.get("revision_targets", []) or [])
     if action == "revise":
         revision_targets.extend(feedback_to_revision_targets(str(answer), dict(state.get("plan", {}) or {})))
 
     _safe_emit("checkpoint", {"status": "visited", "checkpoint": "checkpoint_b"})
     return {
         "feedback_history": feedback_history,
-        "needs_replan": action == "replan",
+        # evaluator 已经判定方向不对时，不能被“继续修订”无意清零；
+        # 否则系统会沿着错误计划反复做局部修补。
+        "needs_replan": bool(state.get("needs_replan")) or action == "replan",
         "revision_targets": revision_targets,
         "active_checkpoint": "checkpoint_b",
         "workflow_trace": _append_trace(state, "checkpoint_b"),

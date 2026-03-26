@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from functools import cached_property
@@ -35,6 +36,8 @@ class WebSettings:
         "https://accounts.google.com/.well-known/openid-configuration",
     )
     google_callback_url: str = os.environ.get("GOOGLE_CALLBACK_URL", "")
+    admin_emails_raw: str = os.environ.get("ADMIN_EMAILS", "")
+    model_pricing_json: str = os.environ.get("MODEL_PRICING_JSON", "")
 
     @cached_property
     def cors_allowed_origins(self) -> list[str]:
@@ -50,6 +53,36 @@ class WebSettings:
         if self.google_callback_url:
             return self.google_callback_url
         return f"{self.app_base_url.rstrip('/')}/auth/google/callback"
+
+    @cached_property
+    def admin_emails(self) -> set[str]:
+        return {
+            item.strip().lower()
+            for item in self.admin_emails_raw.split(",")
+            if item.strip()
+        }
+
+    @cached_property
+    def model_pricing(self) -> dict[str, dict[str, float]]:
+        raw = self.model_pricing_json.strip()
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        normalized: dict[str, dict[str, float]] = {}
+        for key, value in data.items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+            normalized[key] = {
+                str(metric): float(amount)
+                for metric, amount in value.items()
+                if isinstance(metric, str) and isinstance(amount, (int, float))
+            }
+        return normalized
 
     @cached_property
     def startup_warnings(self) -> list[str]:
@@ -69,6 +102,8 @@ class WebSettings:
                 warnings.append("FRONTEND_REDIRECT_URL 指向与 APP_BASE_URL 不同的域名，请确认 cookie domain 和 CORS 设置。")
         if self.app_session_secret == "dev-session-secret-change-me":
             warnings.append("APP_SESSION_SECRET 仍是默认开发值，生产环境必须替换。")
+        if self.model_pricing_json and not self.model_pricing:
+            warnings.append("MODEL_PRICING_JSON 解析失败，cost_usd 将退化为 0。")
         return warnings
 
 

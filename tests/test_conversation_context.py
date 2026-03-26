@@ -1,11 +1,11 @@
-"""Tests for runtime.conversation_context module."""
+"""Tests for domain.conversations.context module."""
 
 from __future__ import annotations
 
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from runtime.conversation_context import (
+from domain.conversations.context import (
     ConversationContext,
     ConversationContextBuilder,
     _Round,
@@ -137,7 +137,7 @@ class BuildContextIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("问题0", ctx.text)
         self.assertIn("回答2", ctx.text)
 
-    @patch("runtime.conversation_context._generate_summary")
+    @patch("domain.conversations.context._generate_summary")
     async def test_summary_strategy_for_many_rounds(self, mock_summary):
         """6-20 rounds should use summary strategy."""
         mock_summary.return_value = "这是一段摘要"

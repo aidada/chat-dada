@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from capabilities.review_gates import ReviewResult
 from domain_agents.research.config import (
@@ -10,7 +11,7 @@ from domain_agents.research.config import (
     resolve_report_profile,
 )
 from domain_agents.research.reviewers import ResearchReviewGate
-from domain_agents.research.workflow import build_research_workflow_graph
+from domain_agents.research.workflow import build_research_workflow_graph, checkpoint_b_node
 
 
 class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
@@ -59,3 +60,38 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(review.passed)
         self.assertTrue(review.revision_targets)
         self.assertTrue(any(target.module_id == "related_work" for target in review.revision_targets))
+
+    async def test_checkpoint_b_preserves_evaluator_replan_signal(self) -> None:
+        state = {
+            "needs_replan": True,
+            "revision_targets": [
+                {
+                    "module_id": "problem_definition",
+                    "reason": "当前草案与用户目标不对齐",
+                    "priority": "high",
+                    "actions": ["重新校准任务定义"],
+                }
+            ],
+            "evaluations": [
+                {
+                    "summary": "评审未通过，需要改方向。",
+                    "revision_targets": [
+                        {
+                            "module_id": "problem_definition",
+                            "reason": "当前草案与用户目标不对齐",
+                            "priority": "high",
+                            "actions": ["重新校准任务定义"],
+                        }
+                    ],
+                }
+            ],
+            "aggregated_draft": "## 草稿\n\n当前仍偏综述。",
+            "feedback_history": [],
+            "plan": {"modules": [{"module_id": "problem_definition"}]},
+            "workflow_trace": [],
+        }
+
+        with patch("domain_agents.research.workflow.ask_user", return_value="继续修订"):
+            result = await checkpoint_b_node(state)
+
+        self.assertTrue(result["needs_replan"])

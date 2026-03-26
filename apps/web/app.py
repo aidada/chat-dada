@@ -12,6 +12,7 @@ from apps.web.middleware import install_session_middleware, register_exception_h
 from apps.web.routers.auth import router as auth_router
 from apps.web.routers.conversations import router as conversation_router
 from apps.web.routers.files import router as file_router
+from apps.web.routers.quotas import router as quota_router
 from apps.web.routers.system import router as system_router
 from apps.web.routers.tasks import router as task_router
 from apps.web.runtime import FRONTEND_ASSETS_DIR, OUTPUTS_DIR, task_service
@@ -54,6 +55,7 @@ for warning in settings.startup_warnings:
 
 app.include_router(auth_router)
 app.include_router(file_router)
+app.include_router(quota_router)
 app.include_router(task_router)
 app.include_router(conversation_router)
 app.include_router(system_router)

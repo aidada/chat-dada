@@ -124,33 +124,46 @@ class ConversationRepository:
         ]
 
     async def get_rounds(self, conversation_id: str) -> list[dict[str, str]]:
-        result_content_subq = (
-            select(TaskEvent.payload["content"].astext)
-            .where(TaskEvent.task_id == TaskRun.task_id, TaskEvent.event_type == "result")
-            .order_by(TaskEvent.seq.desc())
-            .limit(1)
-            .scalar_subquery()
-        )
-        stmt: Select = (
-            select(
-                TaskRun.task_id,
-                TaskRun.task_text,
-                result_content_subq.label("result_content"),
+        task_rows = (
+            await self.session.execute(
+                select(TaskRun.task_id, TaskRun.task_text, TaskRun.created_at)
+                .where(
+                    TaskRun.conversation_id == conversation_id,
+                    TaskRun.status.in_(("succeeded", "failed", "running", "queued")),
+                )
+                .order_by(TaskRun.created_at.asc())
             )
-            .where(
-                TaskRun.conversation_id == conversation_id,
-                TaskRun.status.in_(("succeeded", "failed", "running", "queued")),
+        ).all()
+        if not task_rows:
+            return []
+
+        task_ids = [str(row.task_id) for row in task_rows]
+        event_rows = (
+            await self.session.execute(
+                select(TaskEvent.task_id, TaskEvent.seq, TaskEvent.payload)
+                .where(
+                    TaskEvent.task_id.in_(task_ids),
+                    TaskEvent.event_type == "result",
+                )
+                .order_by(TaskEvent.task_id.asc(), TaskEvent.seq.desc())
             )
-            .order_by(TaskRun.created_at.asc())
-        )
-        rows = (await self.session.execute(stmt)).all()
+        ).all()
+
+        latest_results: dict[str, str] = {}
+        for row in event_rows:
+            task_id = str(row.task_id)
+            if task_id in latest_results:
+                continue
+            payload = dict(row.payload or {})
+            latest_results[task_id] = str(payload.get("content", "") or "")
+
         return [
             {
-                "task_id": row.task_id,
+                "task_id": str(row.task_id),
                 "task_text": row.task_text or "",
-                "result_content": row.result_content or "",
+                "result_content": latest_results.get(str(row.task_id), ""),
             }
-            for row in rows
+            for row in task_rows
         ]
 
     async def get_entries(self, conversation_id: str) -> list[dict[str, Any]]:
@@ -195,6 +208,7 @@ class ConversationRepository:
             for row in events_by_task.get(task_row.task_id, []):
                 entry = {
                     "id": f"{row.task_id}_{row.seq}",
+                    "task_id": row.task_id,
                     "type": row.event_type,
                     "created_at": row.created_at.isoformat(),
                 }

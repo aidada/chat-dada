@@ -104,6 +104,18 @@ class TaskRunRepository:
         row.updated_at = now
         await self.session.flush()
 
+    async def cancel(self, task_id: str, *, error_text: str = "") -> None:
+        row = await self.get(task_id)
+        if row is None:
+            return
+        now = datetime.now(UTC)
+        row.status = "cancelled"
+        row.error_text = error_text or row.error_text
+        row.pending_question = None
+        row.finished_at = now
+        row.updated_at = now
+        await self.session.flush()
+
     async def update_request_payload(self, task_id: str, patch: dict[str, Any]) -> None:
         row = await self.get(task_id)
         if row is None:

@@ -8,14 +8,28 @@ from unittest.mock import patch
 from domain_agents.patent.agent import run_patent_domain
 from domain_agents.research.orchestrated import run_research_domain_orchestrated
 from domain_agents.zero_report.agent import run_zero_report_domain
-from runtime.task_dispatcher import RouteDecision
-from runtime.task_dispatcher import run_general_chat_task
-from runtime.task_interaction import ask_user, reset_task_interaction_handler, set_task_interaction_handler
-from task_platform.router import build_route_payload
+from agent_runtime.dispatcher import RouteDecision
+from agent_runtime.dispatcher import build_route_payload, run_general_chat_task
+from agent_runtime.interaction import (
+    ask_user,
+    reset_preloaded_user_replies,
+    reset_task_interaction_handler,
+    set_preloaded_user_replies,
+    set_task_interaction_handler,
+)
+from agent_runtime.task_execution import _merge_nested_interrupt_pending
 from task_platform.streaming import extract_checkpoint_id, stream_nested_graph, translate_stream_part
 
 
 class StreamingAdapterTests(unittest.TestCase):
+    def test_nested_interrupt_pending_is_sticky_across_duplicate_question_events(self) -> None:
+        self.assertTrue(
+            _merge_nested_interrupt_pending(True, {"content": "same question"})
+        )
+        self.assertTrue(
+            _merge_nested_interrupt_pending(False, {"nested_graph": "research_workflow"})
+        )
+
     def test_custom_part_translates_to_existing_event_shape(self) -> None:
         events = translate_stream_part(
             {"type": "custom", "data": {"event_type": "file", "name": "a.txt", "url": "/download/a.txt"}},
@@ -37,6 +51,16 @@ class StreamingAdapterTests(unittest.TestCase):
         self.assertEqual(payload["trace_metadata"], {"task_id": "task_1"})
         self.assertEqual(payload["stream_part_type"], "custom")
         self.assertEqual(payload["graph_path"], [])
+
+
+class InteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ask_user_consumes_preloaded_replies_before_interrupting(self) -> None:
+        token = set_preloaded_user_replies(["answer a", "answer b"])
+        try:
+            self.assertEqual(await ask_user("q1"), "answer a")
+            self.assertEqual(await ask_user("q2"), "answer b")
+        finally:
+            reset_preloaded_user_replies(token)
 
     def test_interrupt_update_translates_to_question(self) -> None:
         class _Interrupt:
@@ -219,6 +243,93 @@ class NestedGraphStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(collected[1]["content"], "hello")
         self.assertEqual(collected[2]["checkpoint_id"], "cp_nested")
 
+    async def test_nested_graph_falls_back_to_state_snapshot_when_values_missing(self) -> None:
+        class FakeStateSnapshot:
+            values = {"final_result": "from snapshot", "aggregated_draft": "draft"}
+
+        class FakeGraph:
+            async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
+                yield {"type": "custom", "data": {"event_type": "step", "content": "running"}}
+
+            async def aget_state(self, config):
+                return FakeStateSnapshot()
+
+        result = await stream_nested_graph(FakeGraph(), {"messages": []}, config={"configurable": {"thread_id": "t1"}})
+        self.assertEqual(result, {"final_result": "from snapshot", "aggregated_draft": "draft"})
+
+    async def test_nested_graph_merges_update_payloads_into_final_values(self) -> None:
+        class FakeGraph:
+            async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
+                yield {
+                    "type": "updates",
+                    "data": {
+                        "synthesize_final": {
+                            "final_result": "from updates",
+                            "aggregated_draft": "draft from updates",
+                        }
+                    },
+                }
+
+        result = await stream_nested_graph(FakeGraph(), {"messages": []})
+        self.assertEqual(
+            result,
+            {"final_result": "from updates", "aggregated_draft": "draft from updates"},
+        )
+
+    async def test_nested_graph_propagates_interrupts_to_parent_graph(self) -> None:
+        class FakeInterrupt:
+            value = {
+                "content": "need answer",
+                "context": "ctx",
+                "interrupt_type": "human_input",
+            }
+
+        class FakeGraph:
+            async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
+                yield {"type": "updates", "data": {"__interrupt__": (FakeInterrupt(),)}}
+
+        with patch("task_platform.interrupts.request_interrupt", side_effect=RuntimeError("propagated")) as mocked:
+            with self.assertRaisesRegex(RuntimeError, "propagated"):
+                await stream_nested_graph(FakeGraph(), {"messages": []})
+        mocked.assert_called_once_with(
+            {
+                "content": "need answer",
+                "context": "ctx",
+                "interrupt_type": "human_input",
+            }
+        )
+
+    async def test_nested_graph_syncs_consumed_parent_interrupts_from_config(self) -> None:
+        class FakeGraph:
+            async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
+                if False:
+                    yield None
+                return
+
+        with (
+            patch("langgraph.config.get_config", return_value={"configurable": {"nested_interrupt_count": 2}}),
+            patch("task_platform.streaming._sync_parent_interrupt_state") as mocked_sync,
+        ):
+            result = await stream_nested_graph(FakeGraph(), {"messages": []})
+
+        self.assertIsNone(result)
+        mocked_sync.assert_called_once_with(2)
+
+    async def test_nested_graph_uses_resume_command_when_config_provides_resume_value(self) -> None:
+        seen = {}
+
+        class FakeGraph:
+            async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
+                seen["input_data"] = input_data
+                if False:
+                    yield None
+                return
+
+        with patch("langgraph.config.get_config", return_value={"configurable": {"nested_resume_value": "reply"}}):
+            await stream_nested_graph(FakeGraph(), {"messages": []})
+
+        self.assertEqual(getattr(seen["input_data"], "resume", None), "reply")
+
 
 class GeneralChatStreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_general_chat_emits_token_and_result_delta(self) -> None:
@@ -232,7 +343,7 @@ class GeneralChatStreamingTests(unittest.IsolatedAsyncioTestCase):
                 await on_chunk("partial")
             return {"result": "done"}
 
-        with patch("runtime.task_dispatcher.run_general_chat", side_effect=fake_run_general_chat):
+        with patch("agent_runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat):
             result = await run_general_chat_task("hello", fake_on_step, user_id="u1")
 
         self.assertEqual(result, "done")
@@ -320,6 +431,34 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(ref["name"] == "final_report.md" for ref in result.artifact_refs))
         self.assertTrue(any(ref["name"] == "evidence.json" for ref in result.artifact_refs))
         self.assertTrue(report_exists)
+
+    async def test_research_orchestrated_wrapper_falls_back_to_aggregated_draft(self) -> None:
+        from tempfile import TemporaryDirectory
+        from unittest.mock import AsyncMock, patch
+        from capabilities.memory import ResearchMemory as BaseResearchMemory
+
+        with TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir)
+
+            def _memory_factory(task_id: str):
+                return BaseResearchMemory(task_id, root=tmp_root)
+
+            with (
+                patch(
+                    "domain_agents.research.orchestrated.stream_nested_graph",
+                    new=AsyncMock(
+                        return_value={
+                            "aggregated_draft": "## 中间稿\n\n可作为最终兜底输出",
+                            "evaluations": [{"passed": True, "issues": []}],
+                        }
+                    ),
+                ),
+                patch("domain_agents.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+            ):
+                result = await run_research_domain_orchestrated({"query": "研究主题", "task_id": "task_r_fallback"})
+
+        self.assertEqual(result.status, "ok")
+        self.assertIn("可作为最终兜底输出", result.result)
 
 
 class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
@@ -544,7 +683,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         store.append_event = AsyncMock()
         store.finish_task = AsyncMock()
 
-        from runtime.task_runtime import TaskRunStore
+        from agent_runtime.task_execution import TaskRunStore
         await TaskRunStore._recover_interrupted_tasks(store)
 
         store.finish_task.assert_called_once_with("task_running", "failed")
@@ -566,7 +705,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         store.append_event = AsyncMock()
         store.finish_task = AsyncMock()
 
-        from runtime.task_runtime import TaskRunStore
+        from agent_runtime.task_execution import TaskRunStore
         await TaskRunStore._recover_interrupted_tasks(store)
 
         store.finish_task.assert_called_once_with("task_1", "failed")
@@ -600,7 +739,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
         from langgraph.checkpoint.memory import InMemorySaver
         from langgraph.types import Command
-        from task_platform.root_graph import build_root_graph
+        from agent_runtime.root_graph import build_root_graph
 
         async def fake_dispatcher(task_text, file_paths, mode, user_id):
             return RouteDecision(
@@ -647,45 +786,151 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(interrupted, "Graph should have interrupted for clarification")
 
-        # Resume with user answer
-        resumed_events = []
-        async def fake_research_runner(input_data):
-            return type(
-                "FakeResearchResult",
-                (),
-                {
-                    "result": f"stubbed research for {input_data['query']}",
-                    "artifact_refs": [],
-                    "review": {"passed": True},
-                    "budget": {"action": "allow"},
-                    "strategy": "stubbed",
-                },
-            )()
+    async def test_nested_domain_can_interrupt_twice_and_then_finish(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
 
-        with patch("task_platform.root_graph.domain_registry.get", return_value=fake_research_runner):
+        from langgraph.checkpoint.memory import InMemorySaver
+        from langgraph.types import Command
+
+        from agent_runtime.root_graph import build_root_graph
+
+        class FakeInterrupt:
+            def __init__(self, value):
+                self.value = value
+
+        class FakeNestedGraph:
+            def __init__(self):
+                self.phases: dict[str, int] = {}
+
+            async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
+                thread_id = str((config or {}).get("configurable", {}).get("thread_id", "default"))
+                phase = self.phases.get(thread_id, 0)
+                if phase == 0:
+                    self.phases[thread_id] = 1
+                    yield {
+                        "type": "updates",
+                        "data": {
+                            "__interrupt__": (
+                                FakeInterrupt({"content": "q1", "interrupt_type": "human_input"}),
+                            )
+                        },
+                    }
+                    return
+                if phase == 1:
+                    self.phases[thread_id] = 2
+                    yield {
+                        "type": "updates",
+                        "data": {
+                            "__interrupt__": (
+                                FakeInterrupt({"content": "q2", "interrupt_type": "human_input"}),
+                            )
+                        },
+                    }
+                    return
+                self.phases[thread_id] = 3
+                yield {
+                    "type": "updates",
+                    "data": {
+                        "synthesize_final": {
+                            "final_result": "nested final result",
+                            "artifact_refs": [],
+                        }
+                    },
+                }
+                yield {
+                    "type": "values",
+                    "data": {
+                        "final_result": "nested final result",
+                        "artifact_refs": [],
+                    },
+                }
+
+        nested_graph = FakeNestedGraph()
+
+        async def fake_dispatcher(task_text, file_paths, mode, user_id):
+            return RouteDecision(
+                route_name="research",
+                reason="nested interrupt test",
+                confidence=1.0,
+            )
+
+        async def fake_runner(input_data):
+            result = await stream_nested_graph(
+                nested_graph,
+                {"query": input_data.get("query", "")},
+                config={"configurable": {"thread_id": input_data["task_id"]}},
+                extra_payload={"nested_graph": "fake_nested"},
+            )
+            return SimpleNamespace(
+                result=str((result or {}).get("final_result", "") or "研究工作流未生成最终结果。"),
+                artifact_refs=[],
+                review={},
+                strategy="fake_nested",
+            )
+
+        checkpointer = InMemorySaver()
+        graph = build_root_graph(dispatcher=fake_dispatcher, checkpointer=checkpointer)
+        base_config = {"configurable": {"thread_id": "nested_interrupt_resume"}}
+        initial_state = {
+            "task_id": "nested_interrupt_resume",
+            "thread_id": "nested_interrupt_resume",
+            "user_id": "test_user",
+            "mode": "auto",
+            "thinking_level": "high",
+            "task_text": "研究 test nested interrupt flow",
+            "execution_task": "研究 test nested interrupt flow",
+            "file_paths": [],
+            "conversation_id": "",
+            "conversation_context": "",
+            "request_payload": {},
+        }
+
+        with patch("agent_runtime.root_graph.domain_registry.get", return_value=fake_runner):
+            interrupted_payloads: list[dict] = []
             async for part in graph.astream(
-                Command(resume="请做深度研究"),
-                config=config,
+                initial_state,
+                config={**base_config, "configurable": {**base_config["configurable"], "nested_interrupt_count": 0}},
                 version="v2",
                 stream_mode=["updates"],
             ):
                 data = part.get("data") or {}
                 if data.get("__interrupt__"):
-                    # Second interrupt is acceptable (e.g., domain agent may interrupt)
+                    interrupted_payloads.append(data["__interrupt__"][0].value)
                     break
-                resumed_events.append(part)
 
-        # After resume, graph should have re-routed (route_domain runs again)
-        state = await graph.aget_state(config)
-        values = getattr(state, "values", {}) or {}
-        # The clarification answer should be in request_payload
-        rp = values.get("request_payload", {})
-        self.assertEqual(rp.get("clarification_answer"), "请做深度研究")
+            self.assertEqual(interrupted_payloads[0]["content"], "q1")
+
+            async for part in graph.astream(
+                Command(resume="answer1"),
+                config={**base_config, "configurable": {**base_config["configurable"], "nested_interrupt_count": 1}},
+                version="v2",
+                stream_mode=["updates"],
+            ):
+                data = part.get("data") or {}
+                if data.get("__interrupt__"):
+                    interrupted_payloads.append(data["__interrupt__"][0].value)
+                    break
+
+            self.assertEqual(interrupted_payloads[1]["content"], "q2")
+
+            async for _part in graph.astream(
+                Command(resume="answer2"),
+                config={**base_config, "configurable": {**base_config["configurable"], "nested_interrupt_count": 1}},
+                version="v2",
+                stream_mode=["updates"],
+            ):
+                pass
+
+            state_snapshot = await graph.aget_state(
+                {**base_config, "configurable": {**base_config["configurable"], "nested_interrupt_count": 1}}
+            )
+            self.assertEqual(state_snapshot.values.get("final_result"), "nested final result")
 
     async def test_non_interrupt_path_completes(self) -> None:
         """High-confidence tasks should complete without interruption."""
         from langgraph.checkpoint.memory import InMemorySaver
-        from task_platform.root_graph import build_root_graph
+        from agent_runtime.root_graph import build_root_graph
 
         async def fake_dispatcher(task_text, file_paths, mode, user_id):
             return RouteDecision(
@@ -719,7 +964,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
         config = {"configurable": {"thread_id": "test_no_interrupt"}}
 
         interrupted = False
-        with patch("runtime.task_dispatcher.run_general_chat_task", new=fake_general_chat):
+        with patch("agent_runtime.dispatcher.run_general_chat_task", new=fake_general_chat):
             async for part in graph.astream(
                 initial_state,
                 config=config,

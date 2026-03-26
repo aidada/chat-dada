@@ -1,33 +1,23 @@
-"""
-Conversation Context Builder — injects conversation history into LLM prompts.
-
-Three-stage progressive strategy based on conversation length:
-- ≤5 rounds: full raw text (zero overhead)
-- 6-20 rounds: rolling summary + recent 3 rounds raw
-- >20 rounds: rolling summary + recent 3 rounds raw + pgvector retrieval top-3
-"""
-
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 import asyncpg
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.models import get_llm, response_text
 from infra.db.repositories.conversation_repo import ConversationRepository
 from infra.db.repositories.task_event_repo import TaskEventRepository
 from infra.db.repositories.task_repo import TaskRunRepository
 from infra.db.session import SessionFactory
-from langchain_core.messages import HumanMessage, SystemMessage
 
 log = logging.getLogger("chatdada.context")
 
 MAX_CONTEXT_TOKENS = 8000
-SUMMARY_MAX_CHARS = 4500  # ~3K tokens
+SUMMARY_MAX_CHARS = 4500
 RECENT_ROUNDS = 3
 RETRIEVAL_TOP_K = 3
 CONTENT_TRUNCATE_CHARS = 400
@@ -55,17 +45,13 @@ SUMMARY_PROMPT = """请将以下对话历史压缩为简洁摘要，保留：
 
 @dataclass
 class ConversationContext:
-    """Container for built conversation context."""
-
     text: str = ""
     round_count: int = 0
-    strategy: str = "none"  # none, raw, summary, summary+retrieval
+    strategy: str = "none"
 
 
 @dataclass
 class _Round:
-    """A conversation round (one user query + one assistant response)."""
-
     task_id: str
     user_query: str = ""
     assistant_reply: str = ""
@@ -78,12 +64,10 @@ def _truncate(text: str, max_chars: int = CONTENT_TRUNCATE_CHARS) -> str:
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~1.5 chars per token for mixed CJK/English."""
     return int(len(text) / 1.5)
 
 
 def _needs_retrieval(message: str) -> bool:
-    """Check if the message references earlier conversation content."""
     if len(message) < 15:
         return True
     msg_lower = message.lower()
@@ -91,7 +75,6 @@ def _needs_retrieval(message: str) -> bool:
 
 
 async def _get_conversation_rounds(pool: asyncpg.Pool, conversation_id: str) -> list[_Round]:
-    """Fetch all conversation rounds (user query + result) ordered chronologically."""
     rows = await pool.fetch(
         """
         SELECT t.task_id, t.task_text,
@@ -106,16 +89,14 @@ async def _get_conversation_rounds(pool: asyncpg.Pool, conversation_id: str) -> 
         """,
         conversation_id,
     )
-    rounds: list[_Round] = []
-    for row in rows:
-        rounds.append(
-            _Round(
-                task_id=row["task_id"],
-                user_query=row["task_text"] or "",
-                assistant_reply=row["result_content"] or "",
-            )
+    return [
+        _Round(
+            task_id=row["task_id"],
+            user_query=row["task_text"] or "",
+            assistant_reply=row["result_content"] or "",
         )
-    return rounds
+        for row in rows
+    ]
 
 
 async def _get_conversation_rounds_via_repo(conversation_id: str) -> list[_Round]:
@@ -133,7 +114,6 @@ async def _get_conversation_rounds_via_repo(conversation_id: str) -> list[_Round
 
 
 def _format_rounds_raw(rounds: list[_Round]) -> str:
-    """Format rounds as raw conversation text."""
     parts: list[str] = []
     for r in rounds:
         if r.user_query:
@@ -144,7 +124,6 @@ def _format_rounds_raw(rounds: list[_Round]) -> str:
 
 
 async def _generate_summary(existing_summary: str, new_entries_text: str) -> str:
-    """Call LLM to merge existing summary + new entries into a new summary."""
     llm = get_llm("orchestrator", temperature=0)
     prompt = SUMMARY_PROMPT.format(
         existing_summary=existing_summary or "（无）",
@@ -156,14 +135,12 @@ async def _generate_summary(existing_summary: str, new_entries_text: str) -> str
     ]
     response = await llm.ainvoke(messages)
     summary = response_text(response).strip()
-    # Enforce max length
     if len(summary) > SUMMARY_MAX_CHARS:
         summary = summary[: SUMMARY_MAX_CHARS - 1] + "…"
     return summary
 
 
 async def _embed_text(text: str) -> list[float] | None:
-    """Generate embedding using Gemini Embedding 2 (1536 dimensions)."""
     try:
         from google import genai
 
@@ -192,7 +169,6 @@ async def _retrieve_relevant(
     exclude_task_ids: set[str],
     top_k: int = RETRIEVAL_TOP_K,
 ) -> list[dict[str, str]]:
-    """Retrieve most relevant historical events via pgvector cosine similarity."""
     embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
     rows = await pool.fetch(
         """
@@ -208,7 +184,7 @@ async def _retrieve_relevant(
         """,
         embedding_str,
         conversation_id,
-        top_k + len(exclude_task_ids),  # fetch extra to filter
+        top_k + len(exclude_task_ids),
     )
     results: list[dict[str, str]] = []
     for row in rows:
@@ -225,16 +201,10 @@ async def _retrieve_relevant(
 
 
 class ConversationContextBuilder:
-    """Builds conversation context for LLM prompt injection."""
-
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
     async def build(self, conversation_id: str, current_message: str) -> ConversationContext:
-        """Build conversation context string for prompt injection.
-
-        Returns a ConversationContext with .text ready for injection.
-        """
         if not conversation_id:
             return ConversationContext()
 
@@ -242,47 +212,29 @@ class ConversationContextBuilder:
             rounds = await _get_conversation_rounds_via_repo(conversation_id)
         else:
             rounds = await _get_conversation_rounds(self._pool, conversation_id)
-        # Exclude the current round (last task that hasn't finished yet)
-        # Only consider rounds with a reply as completed rounds
         completed = [r for r in rounds if r.assistant_reply]
         round_count = len(completed)
 
         if round_count == 0:
             return ConversationContext(round_count=0, strategy="none")
-
         if round_count <= 5:
             return self._build_raw(completed)
-
         if round_count <= 20:
             return await self._build_with_summary(conversation_id, completed)
-
-        return await self._build_with_summary_and_retrieval(
-            conversation_id, completed, current_message
-        )
+        return await self._build_with_summary_and_retrieval(conversation_id, completed, current_message)
 
     def _build_raw(self, rounds: list[_Round]) -> ConversationContext:
-        """Stage 1: ≤5 rounds — full raw text."""
         text = f"[对话历史]\n{_format_rounds_raw(rounds)}"
         text = self._truncate_to_budget(text)
-        return ConversationContext(
-            text=text, round_count=len(rounds), strategy="raw"
-        )
+        return ConversationContext(text=text, round_count=len(rounds), strategy="raw")
 
-    async def _build_with_summary(
-        self, conversation_id: str, rounds: list[_Round]
-    ) -> ConversationContext:
-        """Stage 2: 6-20 rounds — summary + recent raw."""
+    async def _build_with_summary(self, conversation_id: str, rounds: list[_Round]) -> ConversationContext:
         recent = rounds[-RECENT_ROUNDS:]
         older = rounds[:-RECENT_ROUNDS]
-
         summary = await self._get_or_update_summary(conversation_id, older)
         recent_text = _format_rounds_raw(recent)
-
-        parts = [f"[对话历史摘要]\n{summary}", f"[最近对话]\n{recent_text}"]
-        text = self._truncate_to_budget("\n\n".join(parts))
-        return ConversationContext(
-            text=text, round_count=len(rounds), strategy="summary"
-        )
+        text = self._truncate_to_budget(f"[对话历史摘要]\n{summary}\n\n[最近对话]\n{recent_text}")
+        return ConversationContext(text=text, round_count=len(rounds), strategy="summary")
 
     async def _build_with_summary_and_retrieval(
         self,
@@ -290,36 +242,23 @@ class ConversationContextBuilder:
         rounds: list[_Round],
         current_message: str,
     ) -> ConversationContext:
-        """Stage 3: >20 rounds — summary + recent raw + optional vector retrieval."""
         recent = rounds[-RECENT_ROUNDS:]
         older = rounds[:-RECENT_ROUNDS]
         recent_task_ids = {r.task_id for r in recent}
 
         summary = await self._get_or_update_summary(conversation_id, older)
         recent_text = _format_rounds_raw(recent)
-
         parts = [f"[对话历史摘要]\n{summary}", f"[最近对话]\n{recent_text}"]
 
-        # Only do retrieval if message seems referential
         if _needs_retrieval(current_message):
-            retrieval_results = await self._try_retrieve(
-                conversation_id, current_message, recent_task_ids
-            )
+            retrieval_results = await self._try_retrieve(conversation_id, current_message, recent_task_ids)
             if retrieval_results:
-                retrieval_text = self._format_retrieval(retrieval_results)
-                parts.insert(1, f"[相关历史片段]\n{retrieval_text}")
+                parts.insert(1, f"[相关历史片段]\n{self._format_retrieval(retrieval_results)}")
 
         text = self._truncate_to_budget("\n\n".join(parts))
-        return ConversationContext(
-            text=text, round_count=len(rounds), strategy="summary+retrieval"
-        )
+        return ConversationContext(text=text, round_count=len(rounds), strategy="summary+retrieval")
 
-    async def _get_or_update_summary(
-        self, conversation_id: str, rounds_to_summarize: list[_Round]
-    ) -> str:
-        """Get cached summary or generate a new one incrementally."""
-        from runtime.task_runtime import TaskRunStore
-
+    async def _get_or_update_summary(self, conversation_id: str, rounds_to_summarize: list[_Round]) -> str:
         if isinstance(self._pool, asyncpg.Pool):
             async with SessionFactory() as session:
                 repo = ConversationRepository(session)
@@ -335,21 +274,12 @@ class ConversationContextBuilder:
         if not rounds_to_summarize:
             return existing_summary
 
-        # Figure out how many rounds are new (not yet summarized)
-        # Use a simple heuristic: if we have N rounds and through_seq covers some,
-        # the new rounds are those beyond what's been summarized
         total_older = len(rounds_to_summarize)
-
-        # Estimate how many rounds through_seq covers
-        # Each round produces ~2-4 events, so through_seq / 3 is a rough estimate
         estimated_summarized = through_seq // 3 if through_seq > 0 else 0
         new_count = max(0, total_older - estimated_summarized)
-
         if new_count < 3 and existing_summary:
-            # Not enough new rounds to warrant re-summarizing
             return existing_summary
 
-        # Take the new rounds for incremental summarization
         new_rounds = rounds_to_summarize[-new_count:] if new_count > 0 else rounds_to_summarize
         new_entries_text = _format_rounds_raw(new_rounds)
 
@@ -359,9 +289,7 @@ class ConversationContextBuilder:
             log.warning("Summary generation failed: %s", exc)
             return existing_summary
 
-        # Cache the summary
-        # Estimate new through_seq based on total rounds
-        new_through_seq = total_older * 3  # rough estimate
+        new_through_seq = total_older * 3
         try:
             if isinstance(self._pool, asyncpg.Pool):
                 async with SessionFactory() as session:
@@ -390,39 +318,27 @@ class ConversationContextBuilder:
         query: str,
         exclude_task_ids: set[str],
     ) -> list[dict[str, str]]:
-        """Attempt vector retrieval, return empty list on any failure."""
         try:
             embedding = await _embed_text(query)
             if embedding is None:
                 return []
-            return await _retrieve_relevant(
-                self._pool, conversation_id, embedding, exclude_task_ids
-            )
+            return await _retrieve_relevant(self._pool, conversation_id, embedding, exclude_task_ids)
         except Exception as exc:
             log.warning("Vector retrieval failed: %s", exc)
             return []
 
     def _format_retrieval(self, results: list[dict[str, str]]) -> str:
-        parts: list[str] = []
-        for r in results:
-            parts.append(f"Q: {r['query']}\nA: {r['reply']}")
-        return "\n\n".join(parts)
+        return "\n\n".join(f"Q: {r['query']}\nA: {r['reply']}" for r in results)
 
     def _truncate_to_budget(self, text: str) -> str:
-        """Truncate text to fit within MAX_CONTEXT_TOKENS budget."""
         estimated = _estimate_tokens(text)
         if estimated <= MAX_CONTEXT_TOKENS:
             return text
-        # Truncate to approximate character limit
         max_chars = int(MAX_CONTEXT_TOKENS * 1.5)
-        return text[:max_chars - 1] + "…"
+        return text[: max_chars - 1] + "…"
 
 
 async def generate_embeddings_async(pool: asyncpg.Pool, task_id: str) -> None:
-    """Generate embeddings for a completed task's events (fire-and-forget).
-
-    Called after task completion to enable future vector retrieval.
-    """
     try:
         if isinstance(pool, asyncpg.Pool):
             async with SessionFactory() as session:
@@ -446,9 +362,7 @@ async def generate_embeddings_async(pool: asyncpg.Pool, task_id: str) -> None:
                     embedding = await _embed_text(text_to_embed[:2000])
                     if embedding is None:
                         continue
-
-                    embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
-                    await event_repo.set_embedding(task_id=row.task_id, seq=row.seq, embedding=embedding_str)
+                    await event_repo.set_embedding(task_id=row.task_id, seq=row.seq, embedding=embedding)
 
                 await session.commit()
                 log.info("Generated embeddings for task %s (%d events)", task_id, len(rows))
@@ -468,7 +382,6 @@ async def generate_embeddings_async(pool: asyncpg.Pool, task_id: str) -> None:
         if not rows:
             return
 
-        # Also get the user query text for a combined embedding
         task_row = await pool.fetchrow(
             "SELECT task_text FROM task_runs WHERE task_id = $1", task_id
         )
@@ -478,16 +391,12 @@ async def generate_embeddings_async(pool: asyncpg.Pool, task_id: str) -> None:
             content = row["content"] or ""
             if not content.strip():
                 continue
-
-            # For result events, embed the Q+A together for better retrieval
             text_to_embed = content
             if row["event_type"] == "result" and user_query:
                 text_to_embed = f"问题: {user_query[:200]}\n回答: {content[:600]}"
-
             embedding = await _embed_text(text_to_embed[:2000])
             if embedding is None:
                 continue
-
             embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
             await pool.execute(
                 """
@@ -503,3 +412,21 @@ async def generate_embeddings_async(pool: asyncpg.Pool, task_id: str) -> None:
         log.info("Generated embeddings for task %s (%d events)", task_id, len(rows))
     except Exception as exc:
         log.warning("Embedding generation failed for task %s: %s", task_id, exc)
+
+
+__all__ = [
+    "CONTENT_TRUNCATE_CHARS",
+    "MAX_CONTEXT_TOKENS",
+    "RECENT_ROUNDS",
+    "RETRIEVAL_TOP_K",
+    "SUMMARY_MAX_CHARS",
+    "ConversationContext",
+    "ConversationContextBuilder",
+    "_Round",
+    "_estimate_tokens",
+    "_format_rounds_raw",
+    "_generate_summary",
+    "_needs_retrieval",
+    "_truncate",
+    "generate_embeddings_async",
+]

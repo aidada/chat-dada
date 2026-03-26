@@ -75,7 +75,7 @@ async def _search_semantic_scholar(query: str, limit: int = 5) -> str:
 async def _search_arxiv(query: str, limit: int = 5) -> str:
     """Search arXiv API (free, no key needed)."""
     encoded = urllib.parse.quote(query)
-    url = f"http://export.arxiv.org/api/query?search_query=all:{encoded}&max_results={limit}&sortBy=relevance"
+    url = f"https://export.arxiv.org/api/query?search_query=all:{encoded}&max_results={limit}&sortBy=relevance"
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(url)

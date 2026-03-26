@@ -20,6 +20,7 @@ from core.models import get_llm
 from domain_agents.research.config import ResearchConfig
 from domain_agents.research.prompts import build_module_worker_messages
 from domain_agents.research.schemas import ResearchModuleDraft, WorkerResult
+from tools.research_notes import set_research_context
 from domain_agents.research.utils import (
     build_citation_bank,
     build_evidence_records,
@@ -74,11 +75,13 @@ async def worker_planner(state: WorkerState, tools: list[Any]) -> dict[str, Any]
 
 def worker_should_continue(state: WorkerState) -> Literal["tools", "finish"]:
     """如果模型还在请求工具，就继续；否则收敛到 finish。"""
-    if int(state.get("step_count", 0)) >= int(state.get("max_steps", 1)):
-        return "finish"
     last = state.get("messages", [])[-1] if state.get("messages") else None
     if isinstance(last, AIMessage) and last.tool_calls:
-        return "tools"
+        # 允许最后一轮 planner 先把工具调用发出去，再给模型一次收束成正文的机会，
+        # 否则会出现“最后一轮只拿到 tool_calls 就被直接 finish”的空草案。
+        if int(state.get("step_count", 0)) <= int(state.get("max_steps", 1)):
+            return "tools"
+        return "finish"
     return "finish"
 
 
@@ -159,6 +162,7 @@ async def run_worker(
     }
 
     try:
+        set_research_context(memory, step_index)
         result = await graph.ainvoke(state)
         findings = normalize_markdown_report(str(result.get("findings", "") or ""))
         evidence = build_evidence_records(module_id, title, findings)
@@ -274,7 +278,13 @@ async def coordinate_modules(
         for module_id, result in results:
             worker_results.append(result)
             evidence_bank = merge_evidence(evidence_bank, list(result.get("evidence", [])))
-            if result.get("status") == "error":
+            result_status = str(result.get("status", "") or "")
+            findings = normalize_markdown_report(str(result.get("findings", "") or ""))
+            if result_status == "error":
+                status[module_id] = "needs_revision"
+                continue
+            if not findings:
+                # 空草案不能算完成；保留已有版本，等待后续重试或人工纠偏。
                 status[module_id] = "needs_revision"
                 continue
 
@@ -286,7 +296,7 @@ async def coordinate_modules(
                 module_id=module_id,
                 version=version,
                 status="completed",
-                content=str(result.get("findings", "") or ""),
+                content=findings,
                 evidence_ids=[item.get("evidence_id", "") for item in result.get("evidence", []) if item.get("evidence_id")],
                 citation_ids=[str(idx) for idx, _ in enumerate(result.get("evidence", []), start=1)],
                 open_gaps=[],

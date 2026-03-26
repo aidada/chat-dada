@@ -93,8 +93,13 @@ async def index_response() -> HTMLResponse:
     return HTMLResponse(html)
 
 
-async def event_stream_response(request: Request, task_id: str, after_seq: int) -> StreamingResponse:
-    snapshot = await task_service.get_task(task_id)
+async def event_stream_response(
+    request: Request,
+    task_id: str,
+    after_seq: int,
+    snapshot: dict[str, Any] | None = None,
+) -> StreamingResponse:
+    snapshot = snapshot or await task_service.get_task(task_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="任务不存在")
 
