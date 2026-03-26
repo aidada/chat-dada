@@ -7,7 +7,12 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from apps.web.deps import get_auth_service, get_current_user, resolve_current_user_once
+from apps.web.deps import (
+    get_auth_service,
+    get_current_user,
+    resolve_current_user_once,
+    resolve_current_user_once_with_metadata,
+)
 from apps.web.routers.auth import router as auth_router
 
 
@@ -111,6 +116,21 @@ class AuthRouteTests(unittest.TestCase):
 
         user = asyncio.run(_run())
         self.assertEqual(user.id, "user_1")
+
+    def test_resolve_current_user_once_with_metadata_returns_auth_timing(self) -> None:
+        class _Request:
+            cookies = {"chat_dada_session": "session-token"}
+
+        async def _run():
+            with patch("apps.web.deps.auth.SessionFactory", return_value=_FakeSessionContext()):
+                with patch("apps.web.deps.auth.AuthService", _FakeAuthService):
+                    return await resolve_current_user_once_with_metadata(_Request())
+
+        import asyncio
+
+        user, metadata = asyncio.run(_run())
+        self.assertEqual(user.id, "user_1")
+        self.assertIn("auth_lookup_ms", metadata)
 
 
 if __name__ == "__main__":

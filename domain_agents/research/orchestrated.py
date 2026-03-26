@@ -10,6 +10,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from capabilities.memory import ResearchMemory
 from domain_agents.research.schemas import ResearchDomainResult
@@ -24,6 +25,27 @@ from task_platform.streaming import stream_nested_graph
 
 _log = logging.getLogger("chatdada.research.orchestrated")
 _graph = build_research_workflow_graph()
+
+
+def _normalize_artifact_refs(task_id: str, task_dir: Path, refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for ref in refs:
+        raw_path = str(ref.get("path", "") or "").strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        try:
+            relative_path = str(path.relative_to(task_dir))
+        except ValueError:
+            relative_path = path.name
+        normalized.append(
+            {
+                **ref,
+                "path": relative_path,
+                "url": f"/tasks/{task_id}/artifact-file?path={quote(relative_path, safe='')}",
+            }
+        )
+    return normalized
 
 
 def _persist_workflow_artifacts(task_id: str, result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -63,6 +85,24 @@ def _persist_workflow_artifacts(task_id: str, result: dict[str, Any]) -> list[di
             json.dumps(evaluations[-1], ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        (task_dir / "evaluations.json").write_text(
+            json.dumps(evaluations, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    draft_history = result.get("draft_history") or []
+    if draft_history:
+        (task_dir / "draft_history.json").write_text(
+            json.dumps(draft_history, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    last_evaluation_diff = result.get("last_evaluation_diff") or {}
+    if last_evaluation_diff:
+        (task_dir / "last_evaluation_diff.json").write_text(
+            json.dumps(last_evaluation_diff, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     evidence, citations = build_evidence_and_citations(
         task_id,
@@ -71,7 +111,7 @@ def _persist_workflow_artifacts(task_id: str, result: dict[str, Any]) -> list[di
     )
     refs = collect_artifact_refs(task_dir)
     refs.extend(persist_evidence_and_citations(task_dir, evidence, citations))
-    return refs
+    return _normalize_artifact_refs(task_id, task_dir, refs)
 
 
 async def run_research_domain_orchestrated(input_data: dict[str, Any]) -> ResearchDomainResult:
@@ -97,6 +137,9 @@ async def run_research_domain_orchestrated(input_data: dict[str, Any]) -> Resear
             "evaluations": [],
             "revision_targets": [],
             "locked_modules": {},
+            "blocked_modules": [],
+            "active_modules": [],
+            "last_evaluation_diff": {},
             "draft_history": [],
             "feedback_history": [],
             "workflow_trace": [],
@@ -113,7 +156,15 @@ async def run_research_domain_orchestrated(input_data: dict[str, Any]) -> Resear
     )
 
     final_text = str(result.get("final_result", "") or result.get("aggregated_draft", "") or "")
-    latest_review = (result.get("evaluations") or [{}])[-1]
+    latest_review = dict((result.get("evaluations") or [{}])[-1] or {})
+    latest_review.update(
+        {
+            "revision_round": int(result.get("revision_round", 0) or 0),
+            "active_modules": list(result.get("active_modules", []) or []),
+            "blocked_modules": list(result.get("blocked_modules", []) or []),
+            "last_evaluation_diff": dict(result.get("last_evaluation_diff", {}) or {}),
+        }
+    )
     artifact_refs = _persist_workflow_artifacts(task_id, {**result, "query": query, "report_profile": report_profile})
     workflow_trace = [str(item) for item in result.get("workflow_trace", []) if str(item).strip()]
     # 极少数旧测试仍会 mock `step_history`，这里做一次兜底兼容，

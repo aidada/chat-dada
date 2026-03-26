@@ -7,6 +7,7 @@ from apps.web.deps.auth import (
     get_current_user,
     get_optional_current_user,
     resolve_current_user_once,
+    resolve_current_user_once_with_metadata,
     resolve_request_user_id,
 )
 from apps.web.deps.billing import get_quota_service
@@ -21,6 +22,7 @@ __all__ = [
     "get_conversation_service",
     "get_quota_service",
     "resolve_current_user_once",
+    "resolve_current_user_once_with_metadata",
     "resolve_request_user_id",
     "get_task_execution_service",
 ]

@@ -17,6 +17,7 @@ from agent_runtime.task_execution import (
     task_is_terminal,
 )
 from apps.web.config import settings
+from infra.db.session import engine as app_db_engine
 
 log = logging.getLogger("chatdada.web")
 
@@ -33,6 +34,8 @@ FRONTEND_DIST_DIR = Path(
 FRONTEND_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
 
 task_service = TaskService(settings.database_url, settings.redis_url)
+_active_sse_connections = 0
+_task_sse_connections: dict[str, int] = {}
 
 
 def normalize_task_request(
@@ -98,12 +101,52 @@ async def event_stream_response(
     task_id: str,
     after_seq: int,
     snapshot: dict[str, Any] | None = None,
+    stream_metadata: dict[str, Any] | None = None,
 ) -> StreamingResponse:
     snapshot = snapshot or await task_service.get_task(task_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="任务不存在")
 
+    def _db_pool_in_use() -> int | None:
+        pool = getattr(app_db_engine.sync_engine, "pool", None)
+        if pool is None:
+            return None
+        checked_out = getattr(pool, "checkedout", None)
+        if callable(checked_out):
+            try:
+                return int(checked_out())
+            except Exception:
+                return None
+        return None
+
+    def _stream_meta() -> dict[str, Any]:
+        redis_pool = getattr(task_service.store, "pool", None)
+        redis_in_use = None
+        if redis_pool is not None:
+            get_size = getattr(redis_pool, "get_size", None)
+            get_idle_size = getattr(redis_pool, "get_idle_size", None)
+            if callable(get_size) and callable(get_idle_size):
+                try:
+                    redis_in_use = int(get_size() - get_idle_size())
+                except Exception:
+                    redis_in_use = None
+        return {
+            "active_sse_connections": _active_sse_connections,
+            "task_sse_connections": int(_task_sse_connections.get(task_id, 0)),
+            "db_pool_in_use": _db_pool_in_use(),
+            "task_store_pool_in_use": redis_in_use,
+            **dict(stream_metadata or {}),
+        }
+
+    def _event_with_meta(event: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(event)
+        enriched["stream_meta"] = _stream_meta()
+        return enriched
+
     async def event_generator():
+        global _active_sse_connections
+        _active_sse_connections += 1
+        _task_sse_connections[task_id] = int(_task_sse_connections.get(task_id, 0)) + 1
         pubsub = await task_service.subscribe(task_id)
         last_sent = after_seq
         try:
@@ -111,7 +154,7 @@ async def event_stream_response(
             for event in replay_events:
                 if int(event["seq"]) > last_sent:
                     last_sent = int(event["seq"])
-                    yield format_sse(event)
+                    yield format_sse(_event_with_meta(event))
 
             while True:
                 if await request.is_disconnected():
@@ -124,7 +167,7 @@ async def event_stream_response(
                     current = await task_service.get_task(task_id)
                     if current is None or task_is_terminal(current["status"]):
                         break
-                    yield ": keep-alive\n\n"
+                    yield f": keep-alive {json.dumps(_stream_meta(), ensure_ascii=False)}\n\n"
                     continue
                 if message["type"] != "message":
                     continue
@@ -136,11 +179,15 @@ async def event_stream_response(
                 if seq <= last_sent:
                     continue
                 last_sent = seq
-                yield format_sse(event)
+                yield format_sse(_event_with_meta(event))
                 current = await task_service.get_task(task_id)
                 if current and task_is_terminal(current["status"]):
                     break
         finally:
+            _active_sse_connections = max(_active_sse_connections - 1, 0)
+            _task_sse_connections[task_id] = max(int(_task_sse_connections.get(task_id, 1)) - 1, 0)
+            if _task_sse_connections[task_id] == 0:
+                _task_sse_connections.pop(task_id, None)
             await task_service.unsubscribe(task_id, pubsub)
 
     return StreamingResponse(

@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import quote
 
+import httpx
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
+from langgraph.types import RetryPolicy
 
 from capabilities.memory import ResearchMemory
 from core.content_utils import normalize_markdown_report
@@ -39,6 +42,8 @@ from domain_agents.research.worker import coordinate_modules
 
 log = logging.getLogger("chatdada.research.workflow")
 
+WORKFLOW_LLM_NODE_MAX_ATTEMPTS = 3
+
 
 def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
     """向流式前端发事件；脱离图运行时静默失败。"""
@@ -50,6 +55,42 @@ def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
         get_stream_writer()(payload)
     except Exception:
         pass
+
+
+def _task_download_url(task_id: str, relative_path: str) -> str:
+    encoded = quote(relative_path, safe="")
+    return f"/tasks/{task_id}/artifact-file?path={encoded}"
+
+
+def _stage_file_ref(task_id: str, relative_path: str, *, name: str, file_type: str = "file") -> dict[str, Any]:
+    return {
+        "type": file_type,
+        "name": name,
+        "path": relative_path,
+        "url": _task_download_url(task_id, relative_path),
+    }
+
+
+def _emit_stage_artifacts(
+    task_id: str,
+    *,
+    stage_id: str,
+    stage_title: str,
+    files: list[dict[str, Any]],
+    status: str = "ready",
+) -> None:
+    if not task_id:
+        return
+    _safe_emit(
+        "stage_artifacts",
+        {
+            "content": stage_title,
+            "stage_id": stage_id,
+            "stage_title": stage_title,
+            "files": files,
+            "status": status,
+        },
+    )
 
 
 def _append_trace(state: ResearchWorkflowState, step: str) -> list[str]:
@@ -64,6 +105,44 @@ async def _invoke_llm_text(role: str, messages: list[Any]) -> str:
     llm = get_llm(role)
     response = await llm.ainvoke(messages)
     return best_text(response)
+
+
+def _should_retry_workflow_llm_node(exc: Exception) -> bool:
+    transient_httpx_errors = (
+        httpx.TimeoutException,
+        httpx.NetworkError,
+        httpx.ProtocolError,
+    )
+    if isinstance(exc, transient_httpx_errors):
+        return True
+
+    name = exc.__class__.__name__
+    module = exc.__class__.__module__
+    if name in {"APIConnectionError", "APITimeoutError", "InternalServerError"}:
+        return module.startswith("openai")
+    if name == "ServerError" and module.startswith("google.genai"):
+        return True
+
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "502 bad gateway",
+            "503 service unavailable",
+            "504 gateway timeout",
+            "remoteprotocolerror",
+            "incomplete chunked read",
+            "peer closed connection",
+            "host error",
+        )
+    )
+
+
+def _workflow_llm_retry_policy() -> RetryPolicy:
+    return RetryPolicy(
+        max_attempts=WORKFLOW_LLM_NODE_MAX_ATTEMPTS,
+        retry_on=_should_retry_workflow_llm_node,
+    )
 
 
 def _brief_summary(brief: dict[str, Any]) -> str:
@@ -85,6 +164,30 @@ def _plan_summary(plan: dict[str, Any]) -> str:
     )
 
 
+def _plan_markdown(plan: dict[str, Any]) -> str:
+    modules = list(plan.get("modules", []) or [])
+    if not modules:
+        return "# 研究计划\n\n当前未生成可展示的研究计划。"
+
+    lines = ["# 研究计划", ""]
+    for index, module in enumerate(modules, start=1):
+        module_id = str(module.get("module_id", "") or f"module_{index}")
+        title = str(module.get("title", "") or module_id)
+        objective = str(module.get("objective", "") or "待补充模块目标")
+        depends_on = [str(item) for item in module.get("depends_on", []) or [] if str(item).strip()]
+        lines.append(f"## {index}. {title}")
+        lines.append("")
+        lines.append(f"- 模块 ID：`{module_id}`")
+        lines.append(f"- 目标：{objective}")
+        if depends_on:
+            lines.append(f"- 依赖：{', '.join(depends_on)}")
+        owner_role = str(module.get("owner_role", "") or "").strip()
+        if owner_role:
+            lines.append(f"- 执行角色：{owner_role}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def _revision_targets_summary(targets: list[dict[str, Any]]) -> str:
     if not targets:
         return "- （当前未生成具体修订项）"
@@ -97,6 +200,74 @@ def _revision_targets_summary(targets: list[dict[str, Any]]) -> str:
         action_text = "；".join(actions[:2]) if actions else "按评审意见补强"
         lines.append(f"- {module_id} [{priority}]: {reason}；建议：{action_text}")
     return "\n".join(lines)
+
+
+def _blocked_modules_summary(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "- （当前无阻塞模块）"
+    return "\n".join(
+        f"- {item.get('module_id', 'unknown')}: {item.get('reason', '未提供 blocker')}"
+        for item in items
+    )
+
+
+def _active_modules(module_status: dict[str, str]) -> list[str]:
+    return [
+        module_id
+        for module_id, status in module_status.items()
+        if status in {"pending", "running", "needs_revision"}
+    ]
+
+
+def _actionable_revision_targets(
+    revision_targets: list[dict[str, Any]],
+    module_status: dict[str, str],
+) -> list[dict[str, Any]]:
+    actionable: list[dict[str, Any]] = []
+    for target in revision_targets:
+        module_id = str(target.get("module_id", "") or "").strip()
+        if not module_id:
+            continue
+        status = str(module_status.get(module_id, "") or "").strip()
+        if status in {"completed", "locked"}:
+            continue
+        actionable.append(target)
+    return actionable
+
+
+def _build_evaluation_diff(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
+    previous = previous or {}
+    previous_dims = {
+        str(item.get("name", "") or ""): float(item.get("score", 0.0) or 0.0)
+        for item in previous.get("dimensions", []) or []
+        if str(item.get("name", "") or "").strip()
+    }
+    current_dims = {
+        str(item.get("name", "") or ""): float(item.get("score", 0.0) or 0.0)
+        for item in current.get("dimensions", []) or []
+        if str(item.get("name", "") or "").strip()
+    }
+    dimension_changes = []
+    for name in sorted(set(previous_dims) | set(current_dims)):
+        before = previous_dims.get(name, 0.0)
+        after = current_dims.get(name, 0.0)
+        dimension_changes.append(
+            {
+                "name": name,
+                "previous_score": before,
+                "current_score": after,
+                "delta": round(after - before, 3),
+            }
+        )
+
+    previous_modules = {str(item.get("module_id", "") or "") for item in previous.get("revision_targets", []) or []}
+    current_modules = {str(item.get("module_id", "") or "") for item in current.get("revision_targets", []) or []}
+    return {
+        "dimension_changes": dimension_changes,
+        "changed_modules": sorted(module_id for module_id in current_modules - previous_modules if module_id),
+        "unchanged_modules": sorted(module_id for module_id in current_modules & previous_modules if module_id),
+        "resolved_modules": sorted(module_id for module_id in previous_modules - current_modules if module_id),
+    }
 
 
 def _draft_preview(text: str, limit: int = 1200) -> str:
@@ -180,6 +351,9 @@ async def planner_node(state: ResearchWorkflowState) -> dict[str, Any]:
         "evaluations": [],
         "revision_targets": [],
         "locked_modules": {},
+        "blocked_modules": [],
+        "active_modules": list(module_status),
+        "last_evaluation_diff": {},
         "needs_replan": False,
         "revision_round": 0,
         "workflow_trace": _append_trace(state, "planner"),
@@ -192,6 +366,28 @@ async def checkpoint_a_node(state: ResearchWorkflowState) -> dict[str, Any]:
     用户如果在这里改方向，直接回规划阶段重规划。
     """
     plan = state.get("plan", {})
+    task_id = str(state.get("task_id", "") or "")
+    plan_files: list[dict[str, Any]] = []
+    if task_id and plan:
+        memory = ResearchMemory(task_id)
+        if memory.load_meta() is None:
+            memory.init(str(state.get("query", "") or ""), str(state.get("report_profile", "") or ""))
+        plan_path = memory.task_dir / "research_plan.md"
+        plan_path.write_text(_plan_markdown(plan), encoding="utf-8")
+        plan_files.append(
+            _stage_file_ref(
+                task_id,
+                "research_plan.md",
+                name="研究计划.md",
+                file_type="markdown",
+            )
+        )
+    _emit_stage_artifacts(
+        task_id,
+        stage_id="checkpoint_a",
+        stage_title="研究计划确认",
+        files=plan_files,
+    )
     answer = await ask_user(
         "研究计划已生成。如果范围、产物类型或重点需要调整，请一句话说明；如无修改可忽略。",
         context=_plan_summary(plan),
@@ -207,6 +403,13 @@ async def checkpoint_a_node(state: ResearchWorkflowState) -> dict[str, Any]:
     if action == "replan" or action == "revise":
         brief["user_constraints"] = [*brief.get("user_constraints", []), str(answer).strip()]
 
+    _emit_stage_artifacts(
+        task_id,
+        stage_id="checkpoint_a",
+        stage_title="研究计划确认",
+        files=[],
+        status="cleared",
+    )
     _safe_emit("checkpoint", {"status": "visited", "checkpoint": "checkpoint_a"})
     return {
         "brief": brief,
@@ -242,12 +445,24 @@ async def dispatch_modules_node(state: ResearchWorkflowState) -> dict[str, Any]:
         if value in {"completed", "locked"}
     )
     progress = finished / total
-    _safe_emit("step", f"Executed research modules ({finished}/{total})")
+    blocked_modules = list(result.get("blocked_modules", []) or [])
+    active_modules = _active_modules(dict(result.get("module_status", {}) or {}))
+    _safe_emit(
+        "step",
+        {
+            "status": "modules_executed",
+            "content": f"Executed research modules ({finished}/{total})",
+            "blocked_modules": blocked_modules,
+            "active_modules": active_modules,
+        },
+    )
     return {
         "module_outputs": result["module_outputs"],
         "module_status": result["module_status"],
         "evidence_bank": result["evidence_bank"],
         "citation_bank": result["citation_bank"],
+        "blocked_modules": blocked_modules,
+        "active_modules": active_modules,
         "progress": progress,
         "workflow_trace": _append_trace(state, "dispatch_modules"),
     }
@@ -275,6 +490,17 @@ async def aggregate_draft_node(state: ResearchWorkflowState) -> dict[str, Any]:
         if memory.load_meta() is None:
             memory.init(str(state.get("query", "") or ""), str(state.get("report_profile", "") or ""))
         memory.save_summary(len(state.get("draft_history", [])) + 1, draft)
+        (memory.task_dir / "aggregated_draft.md").write_text(draft, encoding="utf-8")
+        memory.save_checkpoint(
+            len(state.get("draft_history", [])) * 2 + 1,
+            {
+                "aggregated_draft": draft,
+                "module_outputs": module_outputs,
+                "module_status": dict(state.get("module_status", {}) or {}),
+                "blocked_modules": list(state.get("blocked_modules", []) or []),
+                "revision_round": int(state.get("revision_round", 0) or 0),
+            },
+        )
 
     draft_history = list(state.get("draft_history", []))
     # draft_history 保留每一版中间稿，便于定位“哪一轮修订把内容写坏了”。
@@ -340,7 +566,9 @@ async def evaluate_draft_node(state: ResearchWorkflowState) -> dict[str, Any]:
     }
 
     evaluations = list(state.get("evaluations", []))
+    previous_evaluation = evaluations[-1] if evaluations else None
     evaluations.append(evaluation)
+    last_evaluation_diff = _build_evaluation_diff(previous_evaluation, evaluation)
 
     module_status = dict(state.get("module_status", {}) or {})
     module_outputs = dict(state.get("module_outputs", {}) or {})
@@ -352,17 +580,41 @@ async def evaluate_draft_node(state: ResearchWorkflowState) -> dict[str, Any]:
             module_outputs[module_id]["locked"] = True
             module_status[module_id] = "locked"
     for module_id in targeted_ids:
+        if str(module_status.get(module_id, "") or "") in {"blocked", "skipped"}:
+            continue
         if module_id in module_outputs:
             module_outputs[module_id]["locked"] = False
         module_status[module_id] = "needs_revision"
 
     progress = sum(1 for value in module_status.values() if value in {"completed", "locked"}) / max(len(module_status), 1)
+    blocked_modules = list(state.get("blocked_modules", []) or [])
+    active_modules = _active_modules(module_status)
+
+    task_id = str(state.get("task_id", "") or "")
+    if task_id:
+        memory = ResearchMemory(task_id)
+        if memory.load_meta() is None:
+            memory.init(str(state.get("query", "") or ""), str(state.get("report_profile", "") or ""))
+        memory.save_checkpoint(
+            len(evaluations) * 2,
+            {
+                "evaluation": evaluation,
+                "last_evaluation_diff": last_evaluation_diff,
+                "module_outputs": module_outputs,
+                "module_status": module_status,
+                "blocked_modules": blocked_modules,
+                "revision_round": int(state.get("revision_round", 0) or 0),
+            },
+        )
+
     _safe_emit(
         "review",
         {
             "status": "passed" if review.passed else "failed",
             "summary": review.summary,
             "issues": evaluation["issues"],
+            "blocked_modules": blocked_modules,
+            "last_evaluation_diff": last_evaluation_diff,
         },
     )
     return {
@@ -374,6 +626,9 @@ async def evaluate_draft_node(state: ResearchWorkflowState) -> dict[str, Any]:
         },
         "module_outputs": module_outputs,
         "module_status": module_status,
+        "blocked_modules": blocked_modules,
+        "active_modules": active_modules,
+        "last_evaluation_diff": last_evaluation_diff,
         "needs_replan": review.needs_replan,
         "progress": progress,
         "workflow_trace": _append_trace(state, "evaluate_draft"),
@@ -384,11 +639,30 @@ async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
     """检查点 B：中间稿评审后的人工纠偏点。"""
     latest = (state.get("evaluations") or [{}])[-1]
     revision_targets = list(state.get("revision_targets", []) or [])
+    task_id = str(state.get("task_id", "") or "")
+    draft_files: list[dict[str, Any]] = []
+    if task_id and str(state.get("aggregated_draft", "") or "").strip():
+        draft_files.append(
+            _stage_file_ref(
+                task_id,
+                "aggregated_draft.md",
+                name="当前研究草稿.md",
+                file_type="markdown",
+            )
+        )
+    _emit_stage_artifacts(
+        task_id,
+        stage_id="checkpoint_b",
+        stage_title="草稿评审待修订",
+        files=draft_files,
+    )
     question = (
         "当前草案评审未通过。\n\n"
         f"评审摘要：{latest.get('summary', '未提供')}\n\n"
         "待修订模块：\n"
         f"{_revision_targets_summary(revision_targets)}\n\n"
+        "当前 blocker：\n"
+        f"{_blocked_modules_summary(list(state.get('blocked_modules', []) or []))}\n\n"
         "当前草稿摘录：\n"
         f"{_draft_preview(str(state.get('aggregated_draft', '') or ''))}\n\n"
         "如果需要改方向请直接说明；否则回复“继续修订”或“继续”。"
@@ -399,6 +673,7 @@ async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
             {
                 "summary": latest.get("summary", ""),
                 "revision_targets": latest.get("revision_targets", []),
+                "blocked_modules": list(state.get("blocked_modules", []) or []),
                 "aggregated_draft": str(state.get("aggregated_draft", "") or ""),
             },
             ensure_ascii=False,
@@ -415,6 +690,13 @@ async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
     if action == "revise":
         revision_targets.extend(feedback_to_revision_targets(str(answer), dict(state.get("plan", {}) or {})))
 
+    _emit_stage_artifacts(
+        task_id,
+        stage_id="checkpoint_b",
+        stage_title="草稿评审待修订",
+        files=[],
+        status="cleared",
+    )
     _safe_emit("checkpoint", {"status": "visited", "checkpoint": "checkpoint_b"})
     return {
         "feedback_history": feedback_history,
@@ -473,6 +755,8 @@ async def optimize_modules_node(state: ResearchWorkflowState) -> dict[str, Any]:
         "module_status": result["module_status"],
         "evidence_bank": result["evidence_bank"],
         "citation_bank": result["citation_bank"],
+        "blocked_modules": list(result.get("blocked_modules", []) or []),
+        "active_modules": _active_modules(dict(result.get("module_status", {}) or {})),
         "revision_round": int(state.get("revision_round", 0)) + 1,
         "workflow_trace": _append_trace(state, "optimize_modules"),
     }
@@ -482,6 +766,23 @@ async def checkpoint_c_node(state: ResearchWorkflowState) -> dict[str, Any]:
     """检查点 C：最终整合前的最后一次人工确认。"""
     brief = dict(state.get("brief", {}) or {})
     profile = get_deliverable_profile(brief.get("deliverable_type"))
+    task_id = str(state.get("task_id", "") or "")
+    final_stage_files: list[dict[str, Any]] = []
+    if task_id and str(state.get("aggregated_draft", "") or "").strip():
+        final_stage_files.append(
+            _stage_file_ref(
+                task_id,
+                "aggregated_draft.md",
+                name="成稿前确认稿.md",
+                file_type="markdown",
+            )
+        )
+    _emit_stage_artifacts(
+        task_id,
+        stage_id="checkpoint_c",
+        stage_title="最终成稿前确认",
+        files=final_stage_files,
+    )
     answer = await ask_user(
         "模块评审已通过。若还要继续微调，请说明；如无修改可忽略，系统将输出最终稿。",
         context=(
@@ -502,6 +803,13 @@ async def checkpoint_c_node(state: ResearchWorkflowState) -> dict[str, Any]:
     else:
         revision_targets = []
 
+    _emit_stage_artifacts(
+        task_id,
+        stage_id="checkpoint_c",
+        stage_title="最终成稿前确认",
+        files=[],
+        status="cleared",
+    )
     _safe_emit("checkpoint", {"status": "visited", "checkpoint": "checkpoint_c"})
     return {
         "feedback_history": feedback_history,
@@ -528,6 +836,37 @@ async def synthesize_final_node(state: ResearchWorkflowState) -> dict[str, Any]:
     except Exception:
         log.warning("Synthesizer LLM failed; using aggregated draft", exc_info=True)
 
+    blocked_modules = list(state.get("blocked_modules", []) or [])
+    if blocked_modules:
+        final_text = normalize_markdown_report(
+            "\n\n".join(
+                part for part in (
+                    final_text,
+                    "## 当前阻塞项\n\n" + _blocked_modules_summary(blocked_modules),
+                ) if part
+            )
+        )
+
+    task_id = str(state.get("task_id", "") or "")
+    if task_id:
+        memory = ResearchMemory(task_id)
+        if memory.load_meta() is None:
+            memory.init(str(state.get("query", "") or ""), str(state.get("report_profile", "") or ""))
+        memory.save_final_report(final_text)
+        _emit_stage_artifacts(
+            task_id,
+            stage_id="final_report",
+            stage_title="最终研究输出",
+            files=[
+                _stage_file_ref(
+                    task_id,
+                    "final_report.md",
+                    name="最终研究输出.md",
+                    file_type="markdown",
+                )
+            ],
+        )
+
     _safe_emit("step", "Synthesized final research output")
     return {
         "final_result": final_text,
@@ -541,16 +880,16 @@ def build_research_workflow_graph(config: ResearchConfig | None = None) -> Any:
     graph = StateGraph(ResearchWorkflowState)
 
     # 节点职责保持单一：接收/规划/执行/聚合/评估/修订/终稿。
-    graph.add_node("intake", intake_node)
-    graph.add_node("planner", planner_node)
+    graph.add_node("intake", intake_node, retry_policy=_workflow_llm_retry_policy())
+    graph.add_node("planner", planner_node, retry_policy=_workflow_llm_retry_policy())
     graph.add_node("checkpoint_a", checkpoint_a_node)
     graph.add_node("dispatch_modules", dispatch_modules_node)
-    graph.add_node("aggregate_draft", aggregate_draft_node)
+    graph.add_node("aggregate_draft", aggregate_draft_node, retry_policy=_workflow_llm_retry_policy())
     graph.add_node("evaluate_draft", evaluate_draft_node)
     graph.add_node("checkpoint_b", checkpoint_b_node)
-    graph.add_node("optimize_modules", optimize_modules_node)
+    graph.add_node("optimize_modules", optimize_modules_node, retry_policy=_workflow_llm_retry_policy())
     graph.add_node("checkpoint_c", checkpoint_c_node)
-    graph.add_node("synthesize_final", synthesize_final_node)
+    graph.add_node("synthesize_final", synthesize_final_node, retry_policy=_workflow_llm_retry_policy())
 
     def _route_after_checkpoint_a(state: ResearchWorkflowState) -> str:
         return "planner" if state.get("needs_replan") else "dispatch_modules"
@@ -564,6 +903,12 @@ def build_research_workflow_graph(config: ResearchConfig | None = None) -> Any:
     def _route_after_checkpoint_b(state: ResearchWorkflowState) -> str:
         if state.get("needs_replan"):
             return "planner"
+        actionable_targets = _actionable_revision_targets(
+            list(state.get("revision_targets", []) or []),
+            dict(state.get("module_status", {}) or {}),
+        )
+        if not actionable_targets and state.get("blocked_modules"):
+            return "synthesize_final"
         # 到达最大修订轮数后不再无限循环，直接尝试收束到最终稿。
         if int(state.get("revision_round", 0) or 0) >= cfg.max_revision_cycles:
             return "synthesize_final"

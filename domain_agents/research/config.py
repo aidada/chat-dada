@@ -1,7 +1,7 @@
 """科研工作流配置与产物模板定义。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 DEFAULT_REPORT_PROFILE = "default"
@@ -71,15 +71,40 @@ class DeliverableProfile:
 class ResearchConfig:
     """科研工作流的运行时参数。"""
 
-    max_worker_rounds: int = 3
+    max_worker_rounds: int = 4
     max_parallel_workers: int = 3
     max_revision_cycles: int = 2
     clarification_attempts: int = 1
+    worker_search_budget_by_role: dict[str, int] = field(
+        default_factory=lambda: {
+            "citation_worker": 3,
+            "argument_worker": 2,
+            "method_worker": 2,
+        }
+    )
+    worker_search_budget_by_module: dict[str, int] = field(
+        default_factory=lambda: {
+            "problem_definition": 2,
+            "related_work": 6,
+            "argument_map": 2,
+            "contributions": 1,
+            "limitations": 2,
+            "method_candidates": 3,
+            "experiment_design": 2,
+        }
+    )
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "ResearchConfig":
         payload = data or {}
         return cls(**{k: payload[k] for k in payload if k in cls.__dataclass_fields__})
+
+    def search_budget_for(self, module_id: str, owner_role: str) -> int:
+        module_key = str(module_id or "").strip()
+        role_key = str(owner_role or "").strip()
+        if module_key in self.worker_search_budget_by_module:
+            return max(int(self.worker_search_budget_by_module[module_key]), 0)
+        return max(int(self.worker_search_budget_by_role.get(role_key, self.max_worker_rounds)), 0)
 
 
 DELIVERABLE_PROFILES: dict[str, DeliverableProfile] = {

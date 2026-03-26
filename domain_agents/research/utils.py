@@ -257,7 +257,7 @@ def fallback_plan(brief: dict[str, Any]) -> dict[str, Any]:
     blueprint = {
         "problem_definition": {
             "title": "研究问题定义",
-            "owner_role": "citation_worker",
+            "owner_role": "argument_worker",
             "objective": "界定研究问题、应用场景、关键术语和评价目标。",
             "depends_on": [],
             "required_evidence": ["problem framing", "scenario background"],

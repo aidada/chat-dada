@@ -217,6 +217,29 @@ class MonitoringCollector:
 monitor = MonitoringCollector()
 
 
+def record_monitor_event(
+    *,
+    layer: str,
+    name: str,
+    event: str,
+    duration_ms: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Append an ad-hoc monitoring event to the current trace."""
+
+    monitor.record(
+        MonitoringEvent(
+            timestamp=time.time(),
+            trace_id=get_trace_id(),
+            layer=layer,
+            name=name,
+            event=event,
+            duration_ms=duration_ms,
+            metadata=dict(metadata or {}),
+        )
+    )
+
+
 # ── 5. @log_async decorator ─────────────────────────────────────────────────
 
 def _preview(obj: Any, limit: int = 200) -> str:

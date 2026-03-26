@@ -114,6 +114,42 @@ ARGUMENT_WORKER_SYSTEM_PROMPT = """你是 Argument Worker。
 3. 不要写其他模块内容。"""
 
 
+SEARCH_PLANNER_SYSTEM_PROMPT = """你正在执行科研模块的检索规划阶段。
+
+任务：
+1. 只决定还需要补什么证据，不直接写模块正文。
+2. 如已有 evidence_pack 足以起草，请直接明确表示“可进入起草”，不要继续调用工具。
+3. 若要调用工具，必须避免与 search_history 中已有 query 近义重复。
+4. 优先最少轮次收敛，不要为了“更全”而无限扩搜。"""
+
+
+DRAFT_MODULE_SYSTEM_PROMPT = """你正在执行科研模块的起草阶段。
+
+任务：
+1. 只基于 brief、依赖上下文、revision 指令和 evidence_pack 输出当前模块正文。
+2. 明确区分“已被证据支持的判断”和“仍存在证据缺口的判断”。
+3. 如果证据不足，也要输出结构化草稿和缺口，而不是留空。
+4. 不得输出 JSON，不得输出思考过程，只输出 Markdown 模块正文。"""
+
+
+VALIDATE_MODULE_SYSTEM_PROMPT = """你正在执行科研模块的收束校验阶段。
+
+任务：判断当前模块应为 `completed`、`needs_more_evidence` 或 `blocked`。
+
+输出 JSON：
+{
+  "status": "completed|needs_more_evidence|blocked",
+  "reason": "...",
+  "missing_requirements": [],
+  "blocker_reason": ""
+}
+
+判定原则：
+1. 草稿非空且能覆盖模块目标时才可 `completed`
+2. 还有明确补证路径时返回 `needs_more_evidence`
+3. 已达到预算、重复检索或仍无法产出正文时返回 `blocked`"""
+
+
 AGGREGATOR_SYSTEM_PROMPT = """你是 Draft Aggregator。
 
 任务：把各模块草案聚合成一份“可评估的中间稿”。
@@ -199,6 +235,35 @@ def get_worker_system_prompt(owner_role: str) -> str:
     return mapping.get(owner_role, ARGUMENT_WORKER_SYSTEM_PROMPT)
 
 
+def _evidence_pack_block(evidence_pack: list[dict]) -> str:
+    if not evidence_pack:
+        return "(暂无结构化证据)"
+    lines: list[str] = []
+    for index, item in enumerate(evidence_pack[:8], start=1):
+        lines.append(
+            f"{index}. [{item.get('source_type', 'web')}] {item.get('title', '')} | "
+            f"url={item.get('url', '') or 'n/a'} | "
+            f"summary={str(item.get('snippet', '') or '')[:220]}"
+        )
+    return "\n".join(lines)
+
+
+def _search_history_block(search_history: list[dict]) -> str:
+    if not search_history:
+        return "(暂无检索历史)"
+    lines: list[str] = []
+    for item in search_history[-6:]:
+        lines.append(
+            "- "
+            f"{item.get('tool_name', 'tool')} | "
+            f"query={item.get('query', '')} | "
+            f"cache_hit={bool(item.get('cache_hit'))} | "
+            f"new_evidence={int(item.get('new_evidence_count', 0) or 0)} | "
+            f"fallback={','.join(item.get('fallback_tools', []) or []) or 'none'}"
+        )
+    return "\n".join(lines)
+
+
 def _brief_context_block(input_data: dict) -> str:
     lines: list[str] = []
     for key in (
@@ -261,10 +326,41 @@ def build_planner_messages(brief: dict) -> list:
     ]
 
 
-def build_module_worker_messages(
+def build_search_worker_messages(
     module_plan: dict,
     brief: dict,
     dependency_context: str,
+    evidence_pack: list[dict],
+    search_history: list[dict],
+    existing_draft: str = "",
+    revision_instructions: str = "",
+    remaining_search_rounds: int = 0,
+) -> list:
+    prompt = (
+        f"research brief: {brief}\n\n"
+        f"当前模块：{module_plan}\n\n"
+        f"依赖模块摘要：\n{dependency_context or '(无)'}\n\n"
+        f"已有 evidence_pack:\n{_evidence_pack_block(evidence_pack)}\n\n"
+        f"search_history:\n{_search_history_block(search_history)}\n\n"
+        f"remaining_search_rounds: {remaining_search_rounds}\n\n"
+    )
+    if existing_draft:
+        prompt += f"当前旧草案：\n{existing_draft}\n\n"
+    if revision_instructions:
+        prompt += f"修订要求：\n{revision_instructions}\n\n"
+    prompt += "如果仍需补证据，请调用最少必要的工具；否则明确说明可进入起草。"
+    return [
+        SystemMessage(content=SEARCH_PLANNER_SYSTEM_PROMPT),
+        SystemMessage(content=get_worker_system_prompt(module_plan.get("owner_role", ""))),
+        HumanMessage(content=prompt),
+    ]
+
+
+def build_draft_worker_messages(
+    module_plan: dict,
+    brief: dict,
+    dependency_context: str,
+    evidence_pack: list[dict],
     existing_draft: str = "",
     revision_instructions: str = "",
 ) -> list:
@@ -272,15 +368,40 @@ def build_module_worker_messages(
         f"research brief: {brief}\n\n"
         f"当前模块：{module_plan}\n\n"
         f"依赖模块摘要：\n{dependency_context or '(无)'}\n\n"
+        f"evidence_pack:\n{_evidence_pack_block(evidence_pack)}\n\n"
     )
     if existing_draft:
         prompt += f"当前旧草案：\n{existing_draft}\n\n"
     if revision_instructions:
         prompt += f"修订要求：\n{revision_instructions}\n\n"
-    prompt += "请完成当前模块。"
+    prompt += "请输出当前模块的 Markdown 正文，优先完成可写部分，并明确保留证据缺口。"
     return [
+        SystemMessage(content=DRAFT_MODULE_SYSTEM_PROMPT),
         SystemMessage(content=get_worker_system_prompt(module_plan.get("owner_role", ""))),
         HumanMessage(content=prompt),
+    ]
+
+
+def build_validate_worker_messages(
+    module_plan: dict,
+    brief: dict,
+    findings: str,
+    evidence_pack: list[dict],
+    search_history: list[dict],
+    remaining_search_rounds: int = 0,
+) -> list:
+    return [
+        SystemMessage(content=VALIDATE_MODULE_SYSTEM_PROMPT),
+        HumanMessage(
+            content=(
+                f"research brief: {brief}\n\n"
+                f"当前模块：{module_plan}\n\n"
+                f"findings:\n{findings or '(empty)'}\n\n"
+                f"evidence_pack:\n{_evidence_pack_block(evidence_pack)}\n\n"
+                f"search_history:\n{_search_history_block(search_history)}\n\n"
+                f"remaining_search_rounds: {remaining_search_rounds}"
+            )
+        ),
     ]
 
 
@@ -361,12 +482,14 @@ __all__ = [
     "ACADEMIC_PAPER_GUIDANCE_PROFILE",
     "DEFAULT_REPORT_PROFILE",
     "build_aggregator_messages",
+    "build_draft_worker_messages",
     "build_evaluator_messages",
     "build_intake_messages",
-    "build_module_worker_messages",
     "build_optimizer_messages",
     "build_planner_messages",
+    "build_search_worker_messages",
     "build_synthesizer_messages",
+    "build_validate_worker_messages",
     "get_worker_system_prompt",
     "looks_like_academic_paper_task",
     "normalize_report_profile",

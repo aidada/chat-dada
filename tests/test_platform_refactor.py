@@ -390,6 +390,14 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.review["passed"])
         self.assertTrue(any(ref["name"] == "final_report.md" for ref in result.artifact_refs))
         self.assertTrue(any(ref["name"] == "evidence.json" for ref in result.artifact_refs))
+        self.assertTrue(any(ref["name"] == "final_report.md" and ref["path"] == "final_report.md" for ref in result.artifact_refs))
+        self.assertTrue(
+            any(
+                ref["name"] == "final_report.md"
+                and ref["url"] == "/tasks/research_test/artifact-file?path=final_report.md"
+                for ref in result.artifact_refs
+            )
+        )
         self.assertTrue(report_exists)
 
     async def test_deepagents_builder_uses_subagents(self) -> None:
@@ -430,6 +438,14 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.strategy, "research_workflow(planning → sequential)")
         self.assertTrue(any(ref["name"] == "final_report.md" for ref in result.artifact_refs))
         self.assertTrue(any(ref["name"] == "evidence.json" for ref in result.artifact_refs))
+        self.assertTrue(any(ref["name"] == "final_report.md" and ref["path"] == "final_report.md" for ref in result.artifact_refs))
+        self.assertTrue(
+            any(
+                ref["name"] == "final_report.md"
+                and ref["url"] == "/tasks/task_r/artifact-file?path=final_report.md"
+                for ref in result.artifact_refs
+            )
+        )
         self.assertTrue(report_exists)
 
     async def test_research_orchestrated_wrapper_falls_back_to_aggregated_draft(self) -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from apps.web import runtime as web_runtime
@@ -9,8 +11,9 @@ from apps.web.deps import (
     ensure_owner_or_404,
     get_current_user,
     get_task_execution_service,
-    resolve_current_user_once,
+    resolve_current_user_once_with_metadata,
 )
+from capabilities.memory import ResearchMemory
 from domain.tasks.services import TaskExecutionService
 
 router = APIRouter(tags=["tasks"])
@@ -85,6 +88,32 @@ async def get_task_artifacts(
     return {"task_id": task_id, "artifact_refs": snapshot.get("artifact_refs", [])}
 
 
+@router.get("/tasks/{task_id}/artifact-file")
+async def download_task_artifact(
+    task_id: str,
+    path: str = Query(..., min_length=1),
+    current_user=Depends(get_current_user),
+    task_service: TaskExecutionService = Depends(get_task_execution_service),
+):
+    snapshot = await task_service.get(task_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    ensure_owner_or_404(resource_user_id=str(snapshot.get("user_id", "")), current_user=current_user)
+
+    relative_path = Path(str(path or "").strip())
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise HTTPException(status_code=400, detail="非法文件路径")
+
+    task_root = ResearchMemory(task_id).task_dir.resolve()
+    target = (task_root / relative_path).resolve()
+    if task_root != target and task_root not in target.parents:
+        raise HTTPException(status_code=400, detail="文件超出任务目录")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    return FileResponse(target, filename=target.name)
+
+
 @router.get("/tasks/{task_id}/review")
 async def get_task_review(
     task_id: str,
@@ -135,8 +164,24 @@ async def get_task_trace(
     events = await task_service.get_events_after(task_id, 0)
     monitoring = [event for event in events if event["type"] == "monitoring"]
     if not monitoring:
-        return {"task_id": task_id, "trace": None}
-    return {"task_id": task_id, "trace": monitoring[-1]["content"]}
+        return {
+            "task_id": task_id,
+            "trace": None,
+            "revision_round": int((snapshot.get("review") or {}).get("revision_round", 0) or 0),
+            "active_modules": list((snapshot.get("review") or {}).get("active_modules", []) or []),
+            "blocked_modules": list((snapshot.get("review") or {}).get("blocked_modules", []) or []),
+            "last_evaluation_diff": dict((snapshot.get("review") or {}).get("last_evaluation_diff", {}) or {}),
+        }
+    trace = dict(monitoring[-1]["content"] or {})
+    trace.update(
+        {
+            "revision_round": int((snapshot.get("review") or {}).get("revision_round", 0) or 0),
+            "active_modules": list((snapshot.get("review") or {}).get("active_modules", []) or []),
+            "blocked_modules": list((snapshot.get("review") or {}).get("blocked_modules", []) or []),
+            "last_evaluation_diff": dict((snapshot.get("review") or {}).get("last_evaluation_diff", {}) or {}),
+        }
+    )
+    return {"task_id": task_id, "trace": trace}
 
 
 @router.get("/tasks/{task_id}/replay")
@@ -204,7 +249,7 @@ async def stream_task_events(
     after_seq: int | None = Query(default=None, ge=0),
     task_service: TaskExecutionService = Depends(get_task_execution_service),
 ):
-    current_user = await resolve_current_user_once(request)
+    current_user, auth_metadata = await resolve_current_user_once_with_metadata(request)
     snapshot = await task_service.get(task_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -214,4 +259,5 @@ async def stream_task_events(
         task_id,
         web_runtime.parse_after_seq(request, after_seq),
         snapshot=snapshot,
+        stream_metadata=auth_metadata,
     )

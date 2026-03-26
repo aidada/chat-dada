@@ -244,7 +244,9 @@ class GeminiOpenAIAdapter:
         return getattr(getattr(getattr(self._llm, "client", None), "models", None), "_api_client", None)
 
     def _get_async_api_client(self) -> Any | None:
-        return getattr(getattr(getattr(getattr(self._llm, "client", None), "aio", None), "models", None), "_api_client", None)
+        return getattr(
+            getattr(getattr(getattr(self._llm, "client", None), "aio", None), "models", None), "_api_client", None
+        )
 
     @staticmethod
     def _capture_response(capture: dict[str, Any], path: Any, response: Any) -> None:

@@ -9,6 +9,7 @@ ModuleStatus = Literal[
     "pending",
     "running",
     "completed",
+    "blocked",
     "locked",
     "needs_revision",
     "skipped",
@@ -33,6 +34,9 @@ class ResearchWorkflowState(TypedDict, total=False):
     evaluations: list[dict[str, Any]]
     revision_targets: list[dict[str, Any]]
     locked_modules: dict[str, str]
+    blocked_modules: list[dict[str, Any]]
+    active_modules: list[str]
+    last_evaluation_diff: dict[str, Any]
 
     feedback_history: list[dict[str, Any]]
     active_checkpoint: str

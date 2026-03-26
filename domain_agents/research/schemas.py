@@ -106,4 +106,6 @@ class WorkerResult(BaseModel):
     status: str
     findings: str = ""
     evidence: list[dict] = Field(default_factory=list)
+    blocker_reason: str = ""
+    search_stats: dict = Field(default_factory=dict)
     error: str = ""

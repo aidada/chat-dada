@@ -2,6 +2,8 @@
 Academic Search Tool — searches Semantic Scholar and arXiv for papers.
 Uses free public APIs, no API key required.
 """
+from __future__ import annotations
+
 import asyncio
 import urllib.parse
 
@@ -32,16 +34,45 @@ async def run(input_data) -> dict:
     )
 
     parts = []
+    providers: list[dict[str, object]] = []
+    total_results = 0
+    error_count = 0
     for r in results:
         if isinstance(r, Exception):
             parts.append(f"(Search error: {r})")
+            providers.append({"provider": "unknown", "status": "error", "result_count": 0, "message": str(r)})
+            error_count += 1
         else:
-            parts.append(r)
+            parts.append(r["text"])
+            providers.append(
+                {
+                    "provider": r["provider"],
+                    "status": r["status"],
+                    "result_count": r["result_count"],
+                    "message": r["message"],
+                }
+            )
+            total_results += int(r["result_count"])
+            if r["status"] == "error":
+                error_count += 1
 
-    return {"status": "ok", "result": "\n\n".join(parts)}
+    status = "ok"
+    if total_results <= 0:
+        status = "no_results" if error_count == 0 else "degraded"
+    elif error_count:
+        status = "degraded"
+
+    return {
+        "status": status,
+        "query": query,
+        "result": "\n\n".join(part for part in parts if str(part).strip()),
+        "providers": providers,
+        "total_results": total_results,
+        "fallback_hint": "exa_deep_search" if total_results <= 0 or error_count else "",
+    }
 
 
-async def _search_semantic_scholar(query: str, limit: int = 5) -> str:
+async def _search_semantic_scholar(query: str, limit: int = 5) -> dict[str, object]:
     """Search Semantic Scholar API (free, no key needed)."""
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
@@ -52,12 +83,24 @@ async def _search_semantic_scholar(query: str, limit: int = 5) -> str:
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(url, params=params)
         if resp.status_code != 200:
-            return f"(Semantic Scholar: HTTP {resp.status_code})"
+            return {
+                "provider": "semantic_scholar",
+                "status": "error",
+                "result_count": 0,
+                "message": f"HTTP {resp.status_code}",
+                "text": f"(Semantic Scholar: HTTP {resp.status_code})",
+            }
         data = resp.json()
 
     papers = data.get("data", [])
     if not papers:
-        return "(Semantic Scholar: no results)"
+        return {
+            "provider": "semantic_scholar",
+            "status": "empty",
+            "result_count": 0,
+            "message": "no results",
+            "text": "(Semantic Scholar: no results)",
+        }
 
     lines = ["## Semantic Scholar Results"]
     for p in papers:
@@ -69,10 +112,16 @@ async def _search_semantic_scholar(query: str, limit: int = 5) -> str:
             lines.append(f"  Abstract: {p['abstract'][:200]}...")
         if p.get("url"):
             lines.append(f"  URL: {p['url']}")
-    return "\n".join(lines)
+    return {
+        "provider": "semantic_scholar",
+        "status": "ok",
+        "result_count": len(papers),
+        "message": "",
+        "text": "\n".join(lines),
+    }
 
 
-async def _search_arxiv(query: str, limit: int = 5) -> str:
+async def _search_arxiv(query: str, limit: int = 5) -> dict[str, object]:
     """Search arXiv API (free, no key needed)."""
     encoded = urllib.parse.quote(query)
     url = f"https://export.arxiv.org/api/query?search_query=all:{encoded}&max_results={limit}&sortBy=relevance"
@@ -80,13 +129,25 @@ async def _search_arxiv(query: str, limit: int = 5) -> str:
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(url)
         if resp.status_code != 200:
-            return f"(arXiv: HTTP {resp.status_code})"
+            return {
+                "provider": "arxiv",
+                "status": "error",
+                "result_count": 0,
+                "message": f"HTTP {resp.status_code}",
+                "text": f"(arXiv: HTTP {resp.status_code})",
+            }
 
     # Simple XML parsing (avoid heavy dependency)
     text = resp.text
     entries = text.split("<entry>")[1:]  # Skip header
     if not entries:
-        return "(arXiv: no results)"
+        return {
+            "provider": "arxiv",
+            "status": "empty",
+            "result_count": 0,
+            "message": "no results",
+            "text": "(arXiv: no results)",
+        }
 
     lines = ["## arXiv Results"]
     for entry in entries[:limit]:
@@ -96,7 +157,13 @@ async def _search_arxiv(query: str, limit: int = 5) -> str:
         lines.append(f"- **{title}**")
         lines.append(f"  {summary}...")
         lines.append(f"  URL: {arxiv_id}")
-    return "\n".join(lines)
+    return {
+        "provider": "arxiv",
+        "status": "ok",
+        "result_count": min(len(entries), limit),
+        "message": "",
+        "text": "\n".join(lines),
+    }
 
 
 def _extract_tag(xml: str, tag: str) -> str:
