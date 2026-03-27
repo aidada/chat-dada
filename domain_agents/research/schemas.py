@@ -8,6 +8,7 @@ class ResearchDomainResult(BaseModel):
     result: str
     artifact_refs: list[dict[str, str | int | float | bool]] = Field(default_factory=list)
     review: dict = Field(default_factory=dict)
+    budget: dict = Field(default_factory=dict)
     strategy: str = ""
 
 

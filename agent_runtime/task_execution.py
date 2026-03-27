@@ -897,6 +897,10 @@ class TaskService:
                     await self.record_event(task_id, event_type, payload)
 
             if interrupted:
+                summary = monitor.get_summary(trace_id)
+                summary.update({"interrupted": True, "waiting_for_user": True})
+                await self.record_event(task_id, "monitoring", {"content": summary})
+                monitor.finalize(trace_id)
                 return
 
             state_snapshot = await self._root_graph.aget_state(config)

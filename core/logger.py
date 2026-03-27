@@ -56,11 +56,11 @@ def is_verbose() -> bool:
 # ── 3. Logging setup ────────────────────────────────────────────────────────
 
 _LEVEL_COLORS = {
-    "DEBUG":    "\033[36m",   # cyan
-    "INFO":     "\033[32m",   # green
-    "WARNING":  "\033[33m",   # yellow
-    "ERROR":    "\033[31m",   # red
-    "CRITICAL": "\033[1;31m", # bold red
+    "DEBUG": "\033[36m",  # cyan
+    "INFO": "\033[32m",  # green
+    "WARNING": "\033[33m",  # yellow
+    "ERROR": "\033[31m",  # red
+    "CRITICAL": "\033[1;31m",  # bold red
 }
 _RESET = "\033[0m"
 
@@ -107,7 +107,10 @@ def setup_logging(level: int = logging.INFO) -> None:
 
     # File
     fh = TimedRotatingFileHandler(
-        str(log_dir / "app.log"), when="midnight", backupCount=7, encoding="utf-8",
+        str(log_dir / "app.log"),
+        when="midnight",
+        backupCount=7,
+        encoding="utf-8",
     )
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(PlainFormatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
@@ -125,13 +128,14 @@ def set_log_level(level: str) -> None:
 
 # ── 4. MonitoringCollector ───────────────────────────────────────────────────
 
+
 @dataclass
 class MonitoringEvent:
     timestamp: float
     trace_id: str
-    layer: str       # "orchestrator" | "agent" | "tool" | "llm"
+    layer: str  # "orchestrator" | "agent" | "tool" | "llm"
     name: str
-    event: str       # "start" | "end" | "error"
+    event: str  # "start" | "end" | "error"
     duration_ms: float | None = None
     metadata: dict = field(default_factory=dict)
 
@@ -242,6 +246,7 @@ def record_monitor_event(
 
 # ── 5. @log_async decorator ─────────────────────────────────────────────────
 
+
 def _preview(obj: Any, limit: int = 200) -> str:
     """Truncated string preview of any object."""
     s = str(obj)
@@ -317,6 +322,19 @@ def _find_usage_payload(result: Any) -> Any:
             payload = response_metadata.get(key)
             if payload:
                 return payload
+        raw_payload = response_metadata.get("_minimax_parsed_payload")
+        if isinstance(raw_payload, dict):
+            payload = raw_payload.get("usage")
+            if payload:
+                return payload
+
+    additional_kwargs = getattr(result, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        raw_payload = additional_kwargs.get("_minimax_parsed_payload")
+        if isinstance(raw_payload, dict):
+            payload = raw_payload.get("usage")
+            if payload:
+                return payload
 
     generations = getattr(result, "generations", None)
     if isinstance(generations, list):
@@ -338,6 +356,18 @@ def _find_usage_payload(result: Any) -> Any:
                         payload = message_response_metadata.get(key)
                         if payload:
                             return payload
+                    raw_payload = message_response_metadata.get("_minimax_parsed_payload")
+                    if isinstance(raw_payload, dict):
+                        payload = raw_payload.get("usage")
+                        if payload:
+                            return payload
+                message_additional_kwargs = getattr(message, "additional_kwargs", None)
+                if isinstance(message_additional_kwargs, dict):
+                    raw_payload = message_additional_kwargs.get("_minimax_parsed_payload")
+                    if isinstance(raw_payload, dict):
+                        payload = raw_payload.get("usage")
+                        if payload:
+                            return payload
                 if isinstance(message, dict):
                     kwargs = message.get("kwargs")
                     if isinstance(kwargs, dict):
@@ -348,6 +378,18 @@ def _find_usage_payload(result: Any) -> Any:
                         if isinstance(message_response_metadata, dict):
                             for key in ("usage_metadata", "usage", "token_usage"):
                                 payload = message_response_metadata.get(key)
+                                if payload:
+                                    return payload
+                            raw_payload = message_response_metadata.get("_minimax_parsed_payload")
+                            if isinstance(raw_payload, dict):
+                                payload = raw_payload.get("usage")
+                                if payload:
+                                    return payload
+                        message_additional_kwargs = kwargs.get("additional_kwargs")
+                        if isinstance(message_additional_kwargs, dict):
+                            raw_payload = message_additional_kwargs.get("_minimax_parsed_payload")
+                            if isinstance(raw_payload, dict):
+                                payload = raw_payload.get("usage")
                                 if payload:
                                     return payload
     return None
@@ -401,10 +443,15 @@ def log_async(layer: str, name: str):
             if is_verbose():
                 log.debug(f"{name} args={_preview(args)} kwargs={_preview(kwargs)}")
 
-            monitor.record(MonitoringEvent(
-                timestamp=time.time(), trace_id=tid, layer=layer,
-                name=name, event="start",
-            ))
+            monitor.record(
+                MonitoringEvent(
+                    timestamp=time.time(),
+                    trace_id=tid,
+                    layer=layer,
+                    name=name,
+                    event="start",
+                )
+            )
 
             t0 = time.time()
             try:
@@ -416,28 +463,43 @@ def log_async(layer: str, name: str):
                     meta["output_preview"] = _preview(result)
                     log.debug(f"{name} output={_preview(result)}")
 
-                monitor.record(MonitoringEvent(
-                    timestamp=time.time(), trace_id=tid, layer=layer,
-                    name=name, event="end", duration_ms=dur, metadata=meta,
-                ))
+                monitor.record(
+                    MonitoringEvent(
+                        timestamp=time.time(),
+                        trace_id=tid,
+                        layer=layer,
+                        name=name,
+                        event="end",
+                        duration_ms=dur,
+                        metadata=meta,
+                    )
+                )
                 log.info(f"{name} done ({dur:.0f}ms)")
                 return result
 
             except Exception as exc:
                 dur = (time.time() - t0) * 1000
                 log.error(f"{name} error ({dur:.0f}ms): {exc}")
-                monitor.record(MonitoringEvent(
-                    timestamp=time.time(), trace_id=tid, layer=layer,
-                    name=name, event="error", duration_ms=dur,
-                    metadata={"error": str(exc)},
-                ))
+                monitor.record(
+                    MonitoringEvent(
+                        timestamp=time.time(),
+                        trace_id=tid,
+                        layer=layer,
+                        name=name,
+                        event="error",
+                        duration_ms=dur,
+                        metadata={"error": str(exc)},
+                    )
+                )
                 raise
 
         return wrapper
+
     return decorator
 
 
 # ── 6. _LoggingLLM proxy ────────────────────────────────────────────────────
+
 
 class _LoggingLLM:
     """Transparent proxy that logs ainvoke() calls (tokens, latency, model)."""
@@ -456,10 +518,15 @@ class _LoggingLLM:
             args, kwargs = _prepare_responses_kwargs(args, kwargs)
 
         log.info(f"{label} call started")
-        monitor.record(MonitoringEvent(
-            timestamp=time.time(), trace_id=tid, layer="llm",
-            name=label, event="start",
-        ))
+        monitor.record(
+            MonitoringEvent(
+                timestamp=time.time(),
+                trace_id=tid,
+                layer="llm",
+                name=label,
+                event="start",
+            )
+        )
 
         t0 = time.time()
         try:
@@ -467,6 +534,7 @@ class _LoggingLLM:
             dur = (time.time() - t0) * 1000
 
             usage_payload = _find_usage_payload(result)
+            # log.info(f"{label} usage_payload {usage_payload} -- {result}")
             input_tokens, output_tokens, tokens = _extract_token_breakdown(usage_payload)
             usage_available = usage_payload is not None
 
@@ -482,10 +550,17 @@ class _LoggingLLM:
             if is_verbose() and hasattr(result, "content"):
                 meta["output_preview"] = _preview(result.content)
 
-            monitor.record(MonitoringEvent(
-                timestamp=time.time(), trace_id=tid, layer="llm",
-                name=label, event="end", duration_ms=dur, metadata=meta,
-            ))
+            monitor.record(
+                MonitoringEvent(
+                    timestamp=time.time(),
+                    trace_id=tid,
+                    layer="llm",
+                    name=label,
+                    event="end",
+                    duration_ms=dur,
+                    metadata=meta,
+                )
+            )
             usage_text = f"{tokens} tokens" if usage_available else "usage unavailable"
             log.info(f"{label} done ({dur:.0f}ms, {usage_text})")
             return result
@@ -493,11 +568,17 @@ class _LoggingLLM:
         except Exception as exc:
             dur = (time.time() - t0) * 1000
             log.error(f"{label} error ({dur:.0f}ms): {exc}")
-            monitor.record(MonitoringEvent(
-                timestamp=time.time(), trace_id=tid, layer="llm",
-                name=label, event="error", duration_ms=dur,
-                metadata={"error": str(exc), "model": self._model},
-            ))
+            monitor.record(
+                MonitoringEvent(
+                    timestamp=time.time(),
+                    trace_id=tid,
+                    layer="llm",
+                    name=label,
+                    event="error",
+                    duration_ms=dur,
+                    metadata={"error": str(exc), "model": self._model},
+                )
+            )
             raise
 
     async def astream(self, *args, **kwargs):
@@ -509,10 +590,15 @@ class _LoggingLLM:
             args, kwargs = _prepare_responses_kwargs(args, kwargs)
 
         log.info(f"{label} stream started")
-        monitor.record(MonitoringEvent(
-            timestamp=time.time(), trace_id=tid, layer="llm",
-            name=label, event="start",
-        ))
+        monitor.record(
+            MonitoringEvent(
+                timestamp=time.time(),
+                trace_id=tid,
+                layer="llm",
+                name=label,
+                event="start",
+            )
+        )
 
         t0 = time.time()
         tokens = 0
@@ -524,6 +610,7 @@ class _LoggingLLM:
         try:
             async for chunk in self._llm.astream(*args, **kwargs):
                 usage = _find_usage_payload(chunk)
+                log.info(f"{label} usage_payload {usage} -- {chunk}")
                 if usage:
                     usage_available = True
                     chunk_input_tokens, chunk_output_tokens, chunk_tokens = _extract_token_breakdown(usage)
@@ -554,21 +641,34 @@ class _LoggingLLM:
             if is_verbose() and preview_parts:
                 meta["output_preview"] = _preview("".join(preview_parts))
 
-            monitor.record(MonitoringEvent(
-                timestamp=time.time(), trace_id=tid, layer="llm",
-                name=label, event="end", duration_ms=dur, metadata=meta,
-            ))
+            monitor.record(
+                MonitoringEvent(
+                    timestamp=time.time(),
+                    trace_id=tid,
+                    layer="llm",
+                    name=label,
+                    event="end",
+                    duration_ms=dur,
+                    metadata=meta,
+                )
+            )
             usage_text = f"{tokens} tokens" if usage_available else "usage unavailable"
             log.info(f"{label} stream done ({dur:.0f}ms, {usage_text})")
 
         except Exception as exc:
             dur = (time.time() - t0) * 1000
             log.error(f"{label} stream error ({dur:.0f}ms): {exc}")
-            monitor.record(MonitoringEvent(
-                timestamp=time.time(), trace_id=tid, layer="llm",
-                name=label, event="error", duration_ms=dur,
-                metadata={"error": str(exc), "model": self._model},
-            ))
+            monitor.record(
+                MonitoringEvent(
+                    timestamp=time.time(),
+                    trace_id=tid,
+                    layer="llm",
+                    name=label,
+                    event="error",
+                    duration_ms=dur,
+                    metadata={"error": str(exc), "model": self._model},
+                )
+            )
             raise
 
     def bind_tools(self, *args, **kwargs):

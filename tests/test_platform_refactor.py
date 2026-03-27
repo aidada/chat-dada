@@ -376,6 +376,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
                             "plan": {"modules": [{"module_id": "related_work", "title": "相关工作"}]},
                             "module_outputs": {"related_work": {"content": "文献条目 https://example.com/paper"}},
                             "evaluations": [{"passed": True, "issues": []}],
+                            "budget": {"status": "active", "soft_budget_total": 3, "hard_budget_total": 5},
                         }
                     ),
                 ) as mocked,
@@ -390,6 +391,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.review["passed"])
         self.assertTrue(any(ref["name"] == "final_report.md" for ref in result.artifact_refs))
         self.assertTrue(any(ref["name"] == "evidence.json" for ref in result.artifact_refs))
+        self.assertTrue(any(ref["name"] == "budget.json" for ref in result.artifact_refs))
         self.assertTrue(any(ref["name"] == "final_report.md" and ref["path"] == "final_report.md" for ref in result.artifact_refs))
         self.assertTrue(
             any(
@@ -422,6 +424,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
                             "final_result": "research final https://example.com",
                             "step_history": [{"strategy": "planning"}, {"strategy": "sequential"}],
                             "evaluations": [{"passed": True, "issues": []}],
+                            "budget": {"status": "active", "soft_budget_total": 2, "hard_budget_total": 4},
                         }
                     ),
                 ) as mocked,
@@ -438,6 +441,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.strategy, "research_workflow(planning → sequential)")
         self.assertTrue(any(ref["name"] == "final_report.md" for ref in result.artifact_refs))
         self.assertTrue(any(ref["name"] == "evidence.json" for ref in result.artifact_refs))
+        self.assertTrue(any(ref["name"] == "budget.json" for ref in result.artifact_refs))
         self.assertTrue(any(ref["name"] == "final_report.md" and ref["path"] == "final_report.md" for ref in result.artifact_refs))
         self.assertTrue(
             any(

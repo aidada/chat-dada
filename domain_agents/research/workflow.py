@@ -235,6 +235,89 @@ def _actionable_revision_targets(
     return actionable
 
 
+def _budget_feedback_action(answer: str | None) -> str:
+    lowered = str(answer or "").strip().lower()
+    if not lowered:
+        return ""
+    if any(token in lowered for token in ("停止", "先这样", "按当前", "交付", "accept", "current result", "不用继续")):
+        return "accept"
+    if any(token in lowered for token in ("继续", "扩", "加预算", "补检索", "继续搜索", "继续修订", "retry", "more evidence")):
+        return "extend"
+    return ""
+
+
+def _apply_evaluation_budget_bonus(
+    budget: dict[str, Any],
+    last_evaluation_diff: dict[str, Any],
+    cfg: ResearchConfig,
+) -> dict[str, Any]:
+    if not budget or not last_evaluation_diff:
+        return budget
+    module_budgets = dict(budget.get("module_budgets", {}) or {})
+    changes = {
+        str(item.get("name", "") or ""): float(item.get("delta", 0.0) or 0.0)
+        for item in last_evaluation_diff.get("dimension_changes", []) or []
+    }
+
+    def _bump(module_id: str) -> None:
+        entry = dict(module_budgets.get(module_id, {}) or {})
+        if not entry:
+            return
+        soft_budget = int(entry.get("soft_budget", 0) or 0)
+        hard_budget = int(entry.get("hard_budget", 0) or 0)
+        if soft_budget >= hard_budget:
+            return
+        entry["soft_budget"] = min(hard_budget, soft_budget + cfg.dynamic_budget_score_bonus)
+        module_budgets[module_id] = entry
+
+    if changes.get("citation_relevance_coverage", 0.0) >= 0.08:
+        _bump("related_work")
+    if changes.get("argument_chain_completeness", 0.0) >= 0.08:
+        for module_id in ("argument_map", "limitations", "contributions"):
+            _bump(module_id)
+    if changes.get("experimental_feasibility", 0.0) >= 0.08:
+        _bump("experiment_design")
+    if changes.get("methodological_rigor", 0.0) >= 0.08:
+        _bump("method_candidates")
+
+    budget["module_budgets"] = module_budgets
+    return budget
+
+
+def _extend_budget_after_user_feedback(
+    budget: dict[str, Any],
+    module_status: dict[str, str],
+    cfg: ResearchConfig,
+) -> dict[str, Any]:
+    module_budgets = dict(budget.get("module_budgets", {}) or {})
+    for module_id, entry in module_budgets.items():
+        item = dict(entry or {})
+        if not bool(item.get("terminal_blocked")):
+            continue
+        item["hard_budget"] = int(item.get("hard_budget", 0) or 0) + cfg.dynamic_budget_hard_extension
+        item["soft_budget"] = max(int(item.get("soft_budget", 0) or 0), int(item.get("consumed_rounds", 0) or 0) + 1)
+        item["stall_count"] = 0
+        item["terminal_blocked"] = False
+        item["pending_instruction"] = (
+            "用户已同意继续消耗预算。下一轮必须改写检索策略，优先补齐未覆盖的关键文献方向，避免重复来源。"
+        )
+        module_budgets[module_id] = item
+    budget.update(
+        {
+            "module_budgets": module_budgets,
+            "awaiting_user_decision": False,
+            "last_user_decision": "extend",
+            "status": "active",
+            "active_modules": [
+                module_id
+                for module_id, status in module_status.items()
+                if status in {"pending", "running", "needs_revision", "blocked", "skipped"}
+            ],
+        }
+    )
+    return budget
+
+
 def _build_evaluation_diff(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
     previous = previous or {}
     previous_dims = {
@@ -278,6 +361,14 @@ def _draft_preview(text: str, limit: int = 1200) -> str:
     if len(stripped) > limit:
         preview += "\n...\n（草稿过长，已截断）"
     return preview
+
+
+def _is_review_driven_replan(state: ResearchWorkflowState) -> bool:
+    return (
+        bool(state.get("needs_replan"))
+        and str(state.get("active_checkpoint", "") or "") == "checkpoint_b"
+        and bool(state.get("evaluations"))
+    )
 
 
 async def intake_node(state: ResearchWorkflowState) -> dict[str, Any]:
@@ -325,6 +416,7 @@ async def planner_node(state: ResearchWorkflowState) -> dict[str, Any]:
     """规划阶段：生成模块计划，而不是直接写正文。"""
     brief = dict(state.get("brief", {}) or {})
     plan = fallback_plan(brief)
+    review_driven_replan = _is_review_driven_replan(state)
     try:
         llm_text = await _invoke_llm_text(
             "research_domain",
@@ -346,16 +438,20 @@ async def planner_node(state: ResearchWorkflowState) -> dict[str, Any]:
         "module_outputs": {},
         "evidence_bank": [],
         "citation_bank": [],
-        "aggregated_draft": "",
-        "draft_history": [],
-        "evaluations": [],
+        "aggregated_draft": str(state.get("aggregated_draft", "") or "") if review_driven_replan else "",
+        "draft_history": list(state.get("draft_history", []) or []) if review_driven_replan else [],
+        "evaluations": list(state.get("evaluations", []) or []) if review_driven_replan else [],
         "revision_targets": [],
         "locked_modules": {},
         "blocked_modules": [],
         "active_modules": list(module_status),
-        "last_evaluation_diff": {},
+        "last_evaluation_diff": (
+            dict(state.get("last_evaluation_diff", {}) or {}) if review_driven_replan else {}
+        ),
+        "budget": dict(state.get("budget", {}) or {}) if review_driven_replan else {},
         "needs_replan": False,
-        "revision_round": 0,
+        "skip_checkpoint_a_once": review_driven_replan,
+        "revision_round": int(state.get("revision_round", 0) or 0) if review_driven_replan else 0,
         "workflow_trace": _append_trace(state, "planner"),
     }
 
@@ -388,6 +484,21 @@ async def checkpoint_a_node(state: ResearchWorkflowState) -> dict[str, Any]:
         stage_title="研究计划确认",
         files=plan_files,
     )
+    if state.get("skip_checkpoint_a_once"):
+        _emit_stage_artifacts(
+            task_id,
+            stage_id="checkpoint_a",
+            stage_title="研究计划确认",
+            files=[],
+            status="cleared",
+        )
+        _safe_emit("checkpoint", {"status": "visited", "checkpoint": "checkpoint_a"})
+        return {
+            "active_checkpoint": "checkpoint_a",
+            "needs_replan": False,
+            "skip_checkpoint_a_once": False,
+            "workflow_trace": _append_trace(state, "checkpoint_a"),
+        }
     answer = await ask_user(
         "研究计划已生成。如果范围、产物类型或重点需要调整，请一句话说明；如无修改可忽略。",
         context=_plan_summary(plan),
@@ -416,6 +527,7 @@ async def checkpoint_a_node(state: ResearchWorkflowState) -> dict[str, Any]:
         "feedback_history": feedback_history,
         "active_checkpoint": "checkpoint_a",
         "needs_replan": action in {"replan", "revise"},
+        "skip_checkpoint_a_once": False,
         "workflow_trace": _append_trace(state, "checkpoint_a"),
     }
 
@@ -434,6 +546,8 @@ async def dispatch_modules_node(state: ResearchWorkflowState) -> dict[str, Any]:
         module_status=dict(state.get("module_status", {}) or {}),
         revision_targets=list(state.get("revision_targets", []) or []),
         tools=get_research_tools(),
+        budget=dict(state.get("budget", {}) or {}),
+        existing_evidence_bank=list(state.get("evidence_bank", []) or []),
         memory=memory,
         config=ResearchConfig(),
     )
@@ -463,6 +577,7 @@ async def dispatch_modules_node(state: ResearchWorkflowState) -> dict[str, Any]:
         "citation_bank": result["citation_bank"],
         "blocked_modules": blocked_modules,
         "active_modules": active_modules,
+        "budget": dict(result.get("budget", {}) or {}),
         "progress": progress,
         "workflow_trace": _append_trace(state, "dispatch_modules"),
     }
@@ -569,6 +684,11 @@ async def evaluate_draft_node(state: ResearchWorkflowState) -> dict[str, Any]:
     previous_evaluation = evaluations[-1] if evaluations else None
     evaluations.append(evaluation)
     last_evaluation_diff = _build_evaluation_diff(previous_evaluation, evaluation)
+    budget = _apply_evaluation_budget_bonus(
+        dict(state.get("budget", {}) or {}),
+        last_evaluation_diff,
+        ResearchConfig(),
+    )
 
     module_status = dict(state.get("module_status", {}) or {})
     module_outputs = dict(state.get("module_outputs", {}) or {})
@@ -604,6 +724,7 @@ async def evaluate_draft_node(state: ResearchWorkflowState) -> dict[str, Any]:
                 "module_status": module_status,
                 "blocked_modules": blocked_modules,
                 "revision_round": int(state.get("revision_round", 0) or 0),
+                "budget": budget,
             },
         )
 
@@ -615,6 +736,7 @@ async def evaluate_draft_node(state: ResearchWorkflowState) -> dict[str, Any]:
             "issues": evaluation["issues"],
             "blocked_modules": blocked_modules,
             "last_evaluation_diff": last_evaluation_diff,
+            "budget": budget,
         },
     )
     return {
@@ -629,6 +751,7 @@ async def evaluate_draft_node(state: ResearchWorkflowState) -> dict[str, Any]:
         "blocked_modules": blocked_modules,
         "active_modules": active_modules,
         "last_evaluation_diff": last_evaluation_diff,
+        "budget": budget,
         "needs_replan": review.needs_replan,
         "progress": progress,
         "workflow_trace": _append_trace(state, "evaluate_draft"),
@@ -639,6 +762,14 @@ async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
     """检查点 B：中间稿评审后的人工纠偏点。"""
     latest = (state.get("evaluations") or [{}])[-1]
     revision_targets = list(state.get("revision_targets", []) or [])
+    budget = dict(state.get("budget", {}) or {})
+    budget_prompt = ""
+    if budget.get("awaiting_user_decision"):
+        budget_prompt = (
+            "当前有模块已经达到 hard budget 上限。\n"
+            "如果你希望继续完成任务，请直接回复“继续”或说明继续补检索；"
+            "如果接受当前部分结果，请回复“按当前结果交付”。\n\n"
+        )
     task_id = str(state.get("task_id", "") or "")
     draft_files: list[dict[str, Any]] = []
     if task_id and str(state.get("aggregated_draft", "") or "").strip():
@@ -659,6 +790,7 @@ async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
     question = (
         "当前草案评审未通过。\n\n"
         f"评审摘要：{latest.get('summary', '未提供')}\n\n"
+        f"{budget_prompt}"
         "待修订模块：\n"
         f"{_revision_targets_summary(revision_targets)}\n\n"
         "当前 blocker：\n"
@@ -675,6 +807,7 @@ async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
                 "revision_targets": latest.get("revision_targets", []),
                 "blocked_modules": list(state.get("blocked_modules", []) or []),
                 "aggregated_draft": str(state.get("aggregated_draft", "") or ""),
+                "budget": budget,
             },
             ensure_ascii=False,
             indent=2,
@@ -687,6 +820,15 @@ async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
         feedback_history.append({"checkpoint": "checkpoint_b", "content": answer})
 
     action = feedback_action(answer)
+    budget_feedback = _budget_feedback_action(answer)
+    if budget.get("awaiting_user_decision") and budget_feedback == "extend":
+        budget = _extend_budget_after_user_feedback(
+            budget,
+            dict(state.get("module_status", {}) or {}),
+            ResearchConfig(),
+        )
+    elif budget.get("awaiting_user_decision") and budget_feedback == "accept":
+        budget["last_user_decision"] = "accept"
     if action == "revise":
         revision_targets.extend(feedback_to_revision_targets(str(answer), dict(state.get("plan", {}) or {})))
 
@@ -704,6 +846,7 @@ async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
         # 否则系统会沿着错误计划反复做局部修补。
         "needs_replan": bool(state.get("needs_replan")) or action == "replan",
         "revision_targets": revision_targets,
+        "budget": budget,
         "active_checkpoint": "checkpoint_b",
         "workflow_trace": _append_trace(state, "checkpoint_b"),
     }
@@ -744,6 +887,8 @@ async def optimize_modules_node(state: ResearchWorkflowState) -> dict[str, Any]:
         module_status=module_status,
         revision_targets=revision_targets,
         tools=get_research_tools(),
+        budget=dict(state.get("budget", {}) or {}),
+        existing_evidence_bank=list(state.get("evidence_bank", []) or []),
         memory=memory,
         config=ResearchConfig(),
         optimizer_context=optimizer_context,
@@ -757,6 +902,7 @@ async def optimize_modules_node(state: ResearchWorkflowState) -> dict[str, Any]:
         "citation_bank": result["citation_bank"],
         "blocked_modules": list(result.get("blocked_modules", []) or []),
         "active_modules": _active_modules(dict(result.get("module_status", {}) or {})),
+        "budget": dict(result.get("budget", {}) or {}),
         "revision_round": int(state.get("revision_round", 0)) + 1,
         "workflow_trace": _append_trace(state, "optimize_modules"),
     }
@@ -903,6 +1049,9 @@ def build_research_workflow_graph(config: ResearchConfig | None = None) -> Any:
     def _route_after_checkpoint_b(state: ResearchWorkflowState) -> str:
         if state.get("needs_replan"):
             return "planner"
+        budget = dict(state.get("budget", {}) or {})
+        if budget.get("awaiting_user_decision") and str(budget.get("last_user_decision", "") or "") != "extend":
+            return "synthesize_final"
         actionable_targets = _actionable_revision_targets(
             list(state.get("revision_targets", []) or []),
             dict(state.get("module_status", {}) or {}),

@@ -20,7 +20,9 @@ from domain_agents.research.workflow import (
     _should_retry_workflow_llm_node,
     aggregate_draft_node,
     build_research_workflow_graph,
+    checkpoint_a_node,
     checkpoint_b_node,
+    planner_node,
     synthesize_final_node,
 )
 
@@ -128,6 +130,44 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["needs_replan"])
 
+    async def test_planner_preserves_budget_context_for_review_driven_replan(self) -> None:
+        state = {
+            "brief": {"clarified_goal": "重规划"},
+            "active_checkpoint": "checkpoint_b",
+            "needs_replan": True,
+            "aggregated_draft": "## draft",
+            "draft_history": [{"draft": "v1", "at": 1}],
+            "evaluations": [{"summary": "需要重规划"}],
+            "last_evaluation_diff": {"changed_modules": ["related_work"]},
+            "budget": {"awaiting_user_decision": False, "soft_budget_total": 6},
+            "revision_round": 2,
+            "workflow_trace": [],
+        }
+
+        with patch("domain_agents.research.workflow._invoke_llm_text", return_value=""):
+            result = await planner_node(state)
+
+        self.assertEqual(result["budget"]["soft_budget_total"], 6)
+        self.assertEqual(result["revision_round"], 2)
+        self.assertEqual(result["aggregated_draft"], "## draft")
+        self.assertEqual(result["draft_history"], [{"draft": "v1", "at": 1}])
+        self.assertEqual(result["evaluations"], [{"summary": "需要重规划"}])
+        self.assertTrue(result["skip_checkpoint_a_once"])
+
+    async def test_checkpoint_a_skips_user_prompt_once_after_review_replan(self) -> None:
+        state = {
+            "plan": {"modules": [{"module_id": "problem_definition", "title": "研究问题定义"}]},
+            "skip_checkpoint_a_once": True,
+            "workflow_trace": [],
+        }
+
+        with patch("domain_agents.research.workflow.ask_user") as mocked_ask:
+            result = await checkpoint_a_node(state)
+
+        mocked_ask.assert_not_called()
+        self.assertFalse(result["skip_checkpoint_a_once"])
+        self.assertFalse(result["needs_replan"])
+
     async def test_aggregate_draft_writes_full_draft_file(self) -> None:
         with TemporaryDirectory() as tmpdir:
             state = {
@@ -227,3 +267,34 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stage_events[-1]["stage_id"], "final_report")
             self.assertEqual(stage_events[-1]["files"][0]["name"], "最终研究输出.md")
             self.assertIn("/tasks/task_final_emit/artifact-file?path=final_report.md", stage_events[-1]["files"][0]["url"])
+
+    async def test_checkpoint_b_extends_budget_after_user_confirms_continue(self) -> None:
+        state = {
+            "task_id": "task_budget_extend",
+            "needs_replan": False,
+            "revision_targets": [{"module_id": "related_work", "reason": "覆盖不足", "actions": ["补文献"]}],
+            "evaluations": [{"summary": "评审未通过，需要补强 related_work。", "revision_targets": []}],
+            "aggregated_draft": "## 草稿\n\nrelated work 仍不足。",
+            "feedback_history": [],
+            "plan": {"modules": [{"module_id": "related_work"}]},
+            "module_status": {"related_work": "blocked"},
+            "budget": {
+                "awaiting_user_decision": True,
+                "module_budgets": {
+                    "related_work": {
+                        "soft_budget": 3,
+                        "hard_budget": 5,
+                        "consumed_rounds": 5,
+                        "terminal_blocked": True,
+                    }
+                },
+            },
+            "workflow_trace": [],
+        }
+
+        with patch("domain_agents.research.workflow.ask_user", return_value="继续"):
+            result = await checkpoint_b_node(state)
+
+        self.assertFalse(result["budget"]["awaiting_user_decision"])
+        self.assertEqual(result["budget"]["last_user_decision"], "extend")
+        self.assertGreaterEqual(result["budget"]["module_budgets"]["related_work"]["hard_budget"], 7)

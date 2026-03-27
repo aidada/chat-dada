@@ -287,6 +287,52 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await service.close()
 
+    async def test_waiting_task_emits_monitoring_summary_before_user_reply(self) -> None:
+        async def interactive_dispatcher(
+            task_text: str,
+            file_paths: list[str],
+            mode: str = "auto",
+            user_id: str = "anonymous",
+        ) -> RouteDecision:
+            return RouteDecision(
+                route_name="orchestrator",
+                reason="interactive research test",
+                confidence=1.0,
+            )
+
+        service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=interactive_dispatcher)
+        await service.connect()
+        try:
+            snapshot = await service.submit_task(
+                task_text="研究一个有歧义的问题",
+                user_id="user-5",
+                mode="agent",
+                thinking_level="high",
+                file_paths=[],
+            )
+
+            waiting_snapshot = await wait_for_status(
+                service, snapshot["task_id"], {"waiting_for_user"}
+            )
+            self.assertEqual(waiting_snapshot["status"], "waiting_for_user")
+
+            deadline = time.monotonic() + 2.0
+            waiting_events: list[dict] = []
+            while time.monotonic() < deadline:
+                waiting_events = await service.get_events_after(snapshot["task_id"], 0)
+                if any(event["type"] == "monitoring" for event in waiting_events):
+                    break
+                await asyncio.sleep(0.05)
+            assert_contains_event_types(waiting_events, ["question", "monitoring"])
+            waiting_monitoring = [event for event in waiting_events if event["type"] == "monitoring"]
+            self.assertTrue(waiting_monitoring)
+            self.assertTrue(waiting_monitoring[-1]["content"]["interrupted"])
+            self.assertTrue(waiting_monitoring[-1]["content"]["waiting_for_user"])
+            cancelled_snapshot = await service.cancel_running_task(snapshot["task_id"])
+            self.assertEqual(cancelled_snapshot["status"], "cancelled")
+        finally:
+            await service.close()
+
     async def test_running_task_can_be_cancelled(self) -> None:
         async def orchestrator_dispatcher(
             task_text: str,

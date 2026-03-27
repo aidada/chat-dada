@@ -37,12 +37,14 @@ class ResearchWorkflowState(TypedDict, total=False):
     blocked_modules: list[dict[str, Any]]
     active_modules: list[str]
     last_evaluation_diff: dict[str, Any]
+    budget: dict[str, Any]
 
     feedback_history: list[dict[str, Any]]
     active_checkpoint: str
     pending_feedback_action: str
     needs_clarification: bool
     needs_replan: bool
+    skip_checkpoint_a_once: bool
     revision_round: int
     workflow_trace: list[str]
 

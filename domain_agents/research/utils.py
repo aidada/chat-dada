@@ -631,6 +631,7 @@ def collect_artifact_refs(task_dir: Path) -> list[dict[str, Any]]:
         "plan.json",
         "module_outputs.json",
         "evaluation.json",
+        "budget.json",
         "aggregated_draft.md",
         "final_report.md",
     ):

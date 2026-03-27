@@ -62,6 +62,218 @@ class WorkerState(TypedDict, total=False):
     max_search_rounds: int
 
 
+def _brief_budget_text(brief: dict[str, Any]) -> str:
+    return " ".join(
+        str(part).strip()
+        for part in (
+            brief.get("raw_query", ""),
+            brief.get("clarified_goal", ""),
+            brief.get("deliverable_type", ""),
+            brief.get("research_mode", ""),
+            " ".join(str(item) for item in brief.get("user_constraints", []) or []),
+            " ".join(str(item) for item in brief.get("preferred_emphasis", []) or []),
+        )
+        if str(part).strip()
+    ).lower()
+
+
+def _module_complexity_bonus(
+    module: dict[str, Any],
+    brief: dict[str, Any],
+    total_modules: int,
+) -> int:
+    module_id = str(module.get("module_id", "") or "")
+    lowered = _brief_budget_text(brief)
+    deliverable_type = str(brief.get("deliverable_type", "") or "").strip().lower()
+    bonus = 0
+
+    if deliverable_type == "paper_guidance":
+        bonus += 1
+    if total_modules > 5:
+        bonus += 1
+    if any(token in lowered for token in ("sci", "english", "英文", "introduction", "experiment", "实验")):
+        bonus += 1
+    if module_id == "related_work" and (
+        deliverable_type == "paper_guidance"
+        or any(token in lowered for token in ("benchmark", "baseline", "survey", "recent", "近年", "reference", "文献"))
+    ):
+        bonus += 1
+
+    caps = {
+        "problem_definition": 1,
+        "related_work": 3,
+        "argument_map": 2,
+        "contributions": 1,
+        "limitations": 2,
+        "method_candidates": 3,
+        "experiment_design": 2,
+    }
+    return min(max(bonus, 0), caps.get(module_id, 2))
+
+
+def _initial_module_budget(
+    module: dict[str, Any],
+    brief: dict[str, Any],
+    total_modules: int,
+    cfg: ResearchConfig,
+) -> dict[str, Any]:
+    module_id = str(module.get("module_id", "") or "")
+    owner_role = str(module.get("owner_role", "") or "")
+    base_budget = cfg.search_budget_for(module_id, owner_role)
+    complexity_bonus = _module_complexity_bonus(module, brief, total_modules) if cfg.dynamic_budget_enabled else 0
+    soft_budget = max(base_budget + complexity_bonus, 0)
+    hard_budget = max(soft_budget + (cfg.dynamic_budget_hard_extension if cfg.dynamic_budget_enabled else 0), soft_budget)
+    return {
+        "module_id": module_id,
+        "owner_role": owner_role,
+        "base_budget": base_budget,
+        "complexity_bonus": complexity_bonus,
+        "soft_budget": soft_budget,
+        "hard_budget": hard_budget,
+        "consumed_rounds": 0,
+        "stall_count": 0,
+        "query_rewrite_attempts": 0,
+        "fallback_observed": False,
+        "last_status": "pending",
+        "last_search_stats": {},
+        "pending_instruction": "",
+        "terminal_blocked": False,
+    }
+
+
+def _default_module_runtime() -> dict[str, Any]:
+    return {
+        "evidence_pack": [],
+        "search_history": [],
+        "query_fingerprints": {},
+        "search_round": 0,
+        "last_search_metrics": {},
+    }
+
+
+def _ensure_budget_state(
+    budget: dict[str, Any] | None,
+    plan: dict[str, Any],
+    brief: dict[str, Any],
+    cfg: ResearchConfig,
+) -> dict[str, Any]:
+    modules = [dict(item) for item in plan.get("modules", [])]
+    state = dict(budget or {})
+    module_budgets = {
+        str(module_id): dict(value)
+        for module_id, value in dict(state.get("module_budgets", {}) or {}).items()
+    }
+    module_runtime = {
+        str(module_id): dict(value)
+        for module_id, value in dict(state.get("module_runtime", {}) or {}).items()
+    }
+    total_modules = len(modules)
+    for module in modules:
+        module_id = str(module.get("module_id", "") or "")
+        if module_id not in module_budgets:
+            module_budgets[module_id] = _initial_module_budget(module, brief, total_modules, cfg)
+        if module_id not in module_runtime:
+            module_runtime[module_id] = _default_module_runtime()
+
+    state.update(
+        {
+            "mode": "dynamic" if cfg.dynamic_budget_enabled else "fixed",
+            "module_budgets": module_budgets,
+            "module_runtime": module_runtime,
+            "awaiting_user_decision": bool(state.get("awaiting_user_decision")),
+            "last_user_decision": str(state.get("last_user_decision", "") or ""),
+        }
+    )
+    return state
+
+
+def _refresh_budget_summary(
+    budget: dict[str, Any],
+    module_status: dict[str, str],
+) -> dict[str, Any]:
+    module_budgets = dict(budget.get("module_budgets", {}) or {})
+    consumed_total = sum(int(item.get("consumed_rounds", 0) or 0) for item in module_budgets.values())
+    soft_total = sum(int(item.get("soft_budget", 0) or 0) for item in module_budgets.values())
+    hard_total = sum(int(item.get("hard_budget", 0) or 0) for item in module_budgets.values())
+    terminal_modules = [
+        module_id
+        for module_id, item in module_budgets.items()
+        if bool(item.get("terminal_blocked"))
+    ]
+    budget.update(
+        {
+            "consumed_rounds_total": consumed_total,
+            "soft_budget_total": soft_total,
+            "hard_budget_total": hard_total,
+            "terminal_blocked_modules": terminal_modules,
+            "status": "awaiting_user" if budget.get("awaiting_user_decision") else ("blocked" if terminal_modules else "active"),
+            "active_modules": [
+                module_id
+                for module_id, status in module_status.items()
+                if status in {"pending", "running", "needs_revision"}
+            ],
+        }
+    )
+    return budget
+
+
+def _should_request_query_rewrite(entry: dict[str, Any], stats: dict[str, Any]) -> bool:
+    if int(entry.get("query_rewrite_attempts", 0) or 0) > 0:
+        return False
+    return (
+        int(stats.get("search_round_delta", 0) or 0) > 0
+        and int(stats.get("new_evidence_total", 0) or 0) <= 0
+    )
+
+
+def _apply_budget_progress(entry: dict[str, Any], search_stats: dict[str, Any]) -> None:
+    consumed_rounds = max(
+        int(entry.get("consumed_rounds", 0) or 0),
+        int(search_stats.get("search_rounds", 0) or 0),
+    )
+    entry["consumed_rounds"] = consumed_rounds
+    entry["last_search_stats"] = dict(search_stats)
+    if int(search_stats.get("fallback_total", 0) or 0) > 0:
+        entry["fallback_observed"] = True
+    if int(search_stats.get("search_round_delta", 0) or 0) > 0:
+        if int(search_stats.get("new_evidence_total", 0) or 0) <= 0:
+            entry["stall_count"] = int(entry.get("stall_count", 0) or 0) + 1
+        else:
+            entry["stall_count"] = 0
+
+
+def _maybe_extend_budget(entry: dict[str, Any], cfg: ResearchConfig, *, force: bool = False) -> bool:
+    soft_budget = int(entry.get("soft_budget", 0) or 0)
+    hard_budget = int(entry.get("hard_budget", 0) or 0)
+    consumed_rounds = int(entry.get("consumed_rounds", 0) or 0)
+    if soft_budget >= hard_budget:
+        return False
+    if not force and consumed_rounds < soft_budget:
+        return False
+    next_budget = min(hard_budget, max(soft_budget + cfg.dynamic_budget_progress_bonus, consumed_rounds + 1))
+    if next_budget <= soft_budget:
+        return False
+    entry["soft_budget"] = next_budget
+    return True
+
+
+def _terminal_budget_blocked(entry: dict[str, Any], cfg: ResearchConfig) -> bool:
+    return (
+        int(entry.get("consumed_rounds", 0) or 0) >= int(entry.get("hard_budget", 0) or 0)
+        and int(entry.get("stall_count", 0) or 0) >= cfg.stall_rounds_before_terminal_block
+        and int(entry.get("query_rewrite_attempts", 0) or 0) >= cfg.query_rewrite_attempts_before_terminal_block
+    )
+
+
+def _budget_blocker_reason(entry: dict[str, Any]) -> str:
+    return (
+        "检索已达到 hard budget，且改写查询策略后仍连续多轮没有新增证据。"
+        f" consumed_rounds={int(entry.get('consumed_rounds', 0) or 0)}"
+        f", soft_budget={int(entry.get('soft_budget', 0) or 0)}"
+        f", hard_budget={int(entry.get('hard_budget', 0) or 0)}"
+    )
+
+
 def _tool_map(tools: list[Any]) -> dict[str, Any]:
     return {str(getattr(tool, "name", "")): tool for tool in tools if getattr(tool, "name", None)}
 
@@ -552,6 +764,7 @@ async def run_worker(
     memory: Any = None,
     step_index: int = 0,
     max_rounds: int | None = None,
+    resume_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     graph = build_worker_graph(tools or [])
     module_id = str(module_dict.get("module_id") or module_dict.get("id") or "module")
@@ -559,6 +772,9 @@ async def run_worker(
     owner_role = str(module_dict.get("owner_role") or "argument_worker")
     objective = str(module_dict.get("objective") or module_dict.get("completion_criteria") or title)
     cfg = ResearchConfig()
+    previous_state = dict(resume_state or {})
+    previous_search_round = int(previous_state.get("search_round", 0) or 0)
+    previous_history = list(previous_state.get("search_history", []) or [])
     max_search_rounds = (
         int(max_rounds)
         if max_rounds is not None
@@ -581,15 +797,15 @@ async def run_worker(
         "existing_draft": existing_draft,
         "revision_instructions": revision_instructions,
         "findings": "",
-        "evidence_pack": [],
-        "search_history": [],
-        "query_fingerprints": {},
+        "evidence_pack": list(previous_state.get("evidence_pack", []) or []),
+        "search_history": previous_history,
+        "query_fingerprints": dict(previous_state.get("query_fingerprints", {}) or {}),
         "draft_status": "pending",
         "blocker_reason": "",
         "validation_notes": [],
         "last_tool_results": [],
-        "last_search_metrics": {},
-        "search_round": 0,
+        "last_search_metrics": dict(previous_state.get("last_search_metrics", {}) or {}),
+        "search_round": previous_search_round,
         "max_search_rounds": max_search_rounds,
     }
 
@@ -605,18 +821,22 @@ async def run_worker(
         blocker_reason = str(result.get("blocker_reason", "") or "")
         draft_status = str(result.get("draft_status", "") or "blocked")
         search_history = list(result.get("search_history", []) or [])
+        delta_history = search_history[len(previous_history):]
         search_stats = {
             "search_rounds": int(result.get("search_round", 0) or 0),
-            "new_evidence_total": sum(int(item.get("new_evidence_count", 0) or 0) for item in search_history),
-            "duplicate_hit_total": sum(int(item.get("duplicate_hit_count", 0) or 0) for item in search_history),
-            "fallback_total": sum(len(item.get("fallback_tools", []) or []) for item in search_history),
+            "search_round_delta": max(int(result.get("search_round", 0) or 0) - previous_search_round, 0),
+            "new_evidence_total": sum(int(item.get("new_evidence_count", 0) or 0) for item in delta_history),
+            "duplicate_hit_total": sum(int(item.get("duplicate_hit_count", 0) or 0) for item in delta_history),
+            "fallback_total": sum(len(item.get("fallback_tools", []) or []) for item in delta_history),
+            "cumulative_new_evidence_total": sum(int(item.get("new_evidence_count", 0) or 0) for item in search_history),
+            "cumulative_duplicate_hit_total": sum(int(item.get("duplicate_hit_count", 0) or 0) for item in search_history),
         }
         if memory is not None and findings:
             try:
                 memory.save_finding(step_index, module_id, objective, findings, urls)
             except Exception:
                 log.warning("Failed to persist worker finding for %s", module_id, exc_info=True)
-        return WorkerResult(
+        payload = WorkerResult(
             module_id=module_id,
             topic=title,
             status=draft_status,
@@ -625,6 +845,14 @@ async def run_worker(
             blocker_reason=blocker_reason,
             search_stats=search_stats,
         ).model_dump()
+        payload["worker_state"] = {
+            "evidence_pack": list(result.get("evidence_pack", []) or []),
+            "search_history": search_history,
+            "query_fingerprints": dict(result.get("query_fingerprints", {}) or {}),
+            "search_round": int(result.get("search_round", 0) or 0),
+            "last_search_metrics": dict(result.get("last_search_metrics", {}) or {}),
+        }
+        return payload
     except Exception as exc:
         log.warning("Worker failed for module %s", module_id, exc_info=True)
         return WorkerResult(
@@ -645,6 +873,8 @@ async def coordinate_modules(
     module_status: dict[str, str],
     revision_targets: list[dict[str, Any]],
     tools: list[Any],
+    budget: dict[str, Any] | None = None,
+    existing_evidence_bank: list[dict[str, Any]] | None = None,
     memory: Any = None,
     config: ResearchConfig | None = None,
     optimizer_context: str = "",
@@ -655,14 +885,17 @@ async def coordinate_modules(
 
     outputs = dict(module_outputs)
     status = dict(module_status)
-    evidence_bank: list[dict[str, Any]] = []
+    evidence_bank: list[dict[str, Any]] = list(existing_evidence_bank or [])
     worker_results: list[dict[str, Any]] = []
     modules = [dict(item) for item in plan.get("modules", [])]
+    budget_state = _ensure_budget_state(budget, plan, brief, cfg)
 
     async def _run_one(module: dict[str, Any], step_index: int) -> tuple[str, dict[str, Any]]:
         async with semaphore:
             module_id = str(module["module_id"])
             dependency_text = module_dependency_context(module, outputs)
+            module_budget = dict((budget_state.get("module_budgets") or {}).get(module_id, {}) or {})
+            runtime_state = dict((budget_state.get("module_runtime") or {}).get(module_id, {}) or _default_module_runtime())
             target = revision_map.get(module_id, {})
             instructions = optimizer_context.strip()
             if target:
@@ -675,6 +908,29 @@ async def coordinate_modules(
                         f"必须保留：{'; '.join(target.get('preserve_constraints', []))}",
                     ) if part
                 )
+            pending_instruction = str(module_budget.get("pending_instruction", "") or "").strip()
+            if pending_instruction:
+                instructions = "\n".join(part for part in (instructions, pending_instruction) if part)
+                module_budget["pending_instruction"] = ""
+                budget_state.setdefault("module_budgets", {})[module_id] = module_budget
+            current_search_round = int(runtime_state.get("search_round", 0) or 0)
+            max_rounds = int(module_budget.get("soft_budget", cfg.search_budget_for(module_id, str(module.get("owner_role", "") or ""))) or 0)
+            if current_search_round >= max_rounds and _maybe_extend_budget(module_budget, cfg, force=True):
+                budget_state.setdefault("module_budgets", {})[module_id] = module_budget
+                max_rounds = int(module_budget.get("soft_budget", max_rounds) or max_rounds)
+            elif current_search_round >= max_rounds:
+                module_budget["terminal_blocked"] = True
+                budget_state["awaiting_user_decision"] = True
+                budget_state.setdefault("module_budgets", {})[module_id] = module_budget
+                return module_id, {
+                    "module_id": module_id,
+                    "status": "blocked",
+                    "findings": str((outputs.get(module_id) or {}).get("content", "") or ""),
+                    "evidence": list(runtime_state.get("evidence_pack", []) or []),
+                    "blocker_reason": _budget_blocker_reason(module_budget),
+                    "search_stats": dict(module_budget.get("last_search_stats", {}) or {}),
+                    "worker_state": runtime_state,
+                }
             result = await run_worker(
                 module,
                 brief=brief,
@@ -684,7 +940,8 @@ async def coordinate_modules(
                 revision_instructions=instructions,
                 memory=memory,
                 step_index=step_index,
-                max_rounds=cfg.search_budget_for(module_id, str(module.get("owner_role", "") or "")),
+                max_rounds=int(module_budget.get("soft_budget", max_rounds) or max_rounds),
+                resume_state=runtime_state,
             )
             return module_id, result
 
@@ -716,7 +973,24 @@ async def coordinate_modules(
             result_status = str(result.get("status", "") or "")
             findings = normalize_markdown_report(str(result.get("findings", "") or ""))
             blocker_reason = str(result.get("blocker_reason", "") or "")
+            search_stats = dict(result.get("search_stats", {}) or {})
+            worker_state = dict(result.get("worker_state", {}) or {})
             previous = outputs.get(module_id) or {}
+            module_budget = dict((budget_state.get("module_budgets") or {}).get(module_id, {}) or {})
+            runtime_state = dict((budget_state.get("module_runtime") or {}).get(module_id, {}) or _default_module_runtime())
+            runtime_state.update(worker_state)
+            budget_state.setdefault("module_runtime", {})[module_id] = runtime_state
+            _apply_budget_progress(module_budget, search_stats)
+            if _should_request_query_rewrite(module_budget, search_stats):
+                module_budget["query_rewrite_attempts"] = int(module_budget.get("query_rewrite_attempts", 0) or 0) + 1
+                module_budget["pending_instruction"] = (
+                    "上一轮检索没有新增核心证据。下一轮必须重写 query 策略："
+                    "更换关键词组合、显式区分经典工作/近年进展/benchmark 证据、避免重复来源。"
+                )
+            if int(search_stats.get("new_evidence_total", 0) or 0) >= 2:
+                _maybe_extend_budget(module_budget, cfg, force=True)
+            module_budget["last_status"] = result_status
+            budget_state.setdefault("module_budgets", {})[module_id] = module_budget
             version = int(previous.get("version", 0) or 0) + 1
             worker_role = str(
                 next((module["owner_role"] for module in modules if module["module_id"] == module_id), "argument_worker")
@@ -729,6 +1003,28 @@ async def coordinate_modules(
                 continue
 
             if result_status == "blocked":
+                if not _terminal_budget_blocked(module_budget, cfg) and int(module_budget.get("consumed_rounds", 0) or 0) < int(module_budget.get("hard_budget", 0) or 0):
+                    _maybe_extend_budget(module_budget, cfg, force=True)
+                    outputs[module_id] = ResearchModuleDraft(
+                        module_id=module_id,
+                        version=version,
+                        status="blocked",
+                        content=findings or str(previous.get("content", "") or ""),
+                        evidence_ids=evidence_ids or list(previous.get("evidence_ids", []) or []),
+                        citation_ids=citation_ids or list(previous.get("citation_ids", []) or []),
+                        open_gaps=[blocker_reason] if blocker_reason else list(previous.get("open_gaps", []) or []),
+                        assumptions=[],
+                        last_worker_role=worker_role,
+                        last_review_score=float(previous.get("last_review_score", 0.0) or 0.0),
+                        locked=False,
+                    ).model_dump()
+                    status[module_id] = "needs_revision"
+                    budget_state.setdefault("module_budgets", {})[module_id] = module_budget
+                    continue
+
+                module_budget["terminal_blocked"] = True
+                budget_state["awaiting_user_decision"] = True
+                blocker_reason = blocker_reason or _budget_blocker_reason(module_budget)
                 outputs[module_id] = ResearchModuleDraft(
                     module_id=module_id,
                     version=version,
@@ -743,6 +1039,7 @@ async def coordinate_modules(
                     locked=False,
                 ).model_dump()
                 status[module_id] = "blocked"
+                budget_state.setdefault("module_budgets", {})[module_id] = module_budget
                 continue
 
             if not findings:
@@ -763,6 +1060,8 @@ async def coordinate_modules(
                 locked=False,
             ).model_dump()
             status[module_id] = "completed"
+            module_budget["terminal_blocked"] = False
+            budget_state.setdefault("module_budgets", {})[module_id] = module_budget
 
     changed = True
     while changed:
@@ -803,6 +1102,7 @@ async def coordinate_modules(
         for module_id, module_status_value in status.items()
         if module_status_value in {"blocked", "skipped"}
     ]
+    budget_state = _refresh_budget_summary(budget_state, status)
 
     return {
         "module_outputs": outputs,
@@ -811,4 +1111,5 @@ async def coordinate_modules(
         "citation_bank": build_citation_bank(evidence_bank),
         "worker_results": worker_results,
         "blocked_modules": blocked_modules,
+        "budget": budget_state,
     }

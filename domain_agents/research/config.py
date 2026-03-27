@@ -71,25 +71,31 @@ class DeliverableProfile:
 class ResearchConfig:
     """科研工作流的运行时参数。"""
 
-    max_worker_rounds: int = 4
+    max_worker_rounds: int = 3
     max_parallel_workers: int = 3
     max_revision_cycles: int = 2
     clarification_attempts: int = 1
+    dynamic_budget_enabled: bool = True
+    dynamic_budget_hard_extension: int = 2
+    dynamic_budget_progress_bonus: int = 1
+    dynamic_budget_score_bonus: int = 1
+    stall_rounds_before_terminal_block: int = 2
+    query_rewrite_attempts_before_terminal_block: int = 1
     worker_search_budget_by_role: dict[str, int] = field(
         default_factory=lambda: {
-            "citation_worker": 3,
-            "argument_worker": 2,
+            "citation_worker": 2,
+            "argument_worker": 1,
             "method_worker": 2,
         }
     )
     worker_search_budget_by_module: dict[str, int] = field(
         default_factory=lambda: {
             "problem_definition": 2,
-            "related_work": 6,
-            "argument_map": 2,
+            "related_work": 2,
+            "argument_map": 1,
             "contributions": 1,
-            "limitations": 2,
-            "method_candidates": 3,
+            "limitations": 1,
+            "method_candidates": 2,
             "experiment_design": 2,
         }
     )

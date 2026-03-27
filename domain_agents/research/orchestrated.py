@@ -104,6 +104,13 @@ def _persist_workflow_artifacts(task_id: str, result: dict[str, Any]) -> list[di
             encoding="utf-8",
         )
 
+    budget = result.get("budget") or {}
+    if budget:
+        (task_dir / "budget.json").write_text(
+            json.dumps(budget, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     evidence, citations = build_evidence_and_citations(
         task_id,
         final_report,
@@ -140,6 +147,7 @@ async def run_research_domain_orchestrated(input_data: dict[str, Any]) -> Resear
             "blocked_modules": [],
             "active_modules": [],
             "last_evaluation_diff": {},
+            "budget": {},
             "draft_history": [],
             "feedback_history": [],
             "workflow_trace": [],
@@ -181,5 +189,6 @@ async def run_research_domain_orchestrated(input_data: dict[str, Any]) -> Resear
         result=final_text or "研究工作流未生成最终结果。",
         artifact_refs=artifact_refs,
         review=latest_review,
+        budget=dict(result.get("budget", {}) or {}),
         strategy=strategy_summary(workflow_trace),
     )
