@@ -9,8 +9,11 @@ import httpx
 from capabilities.review_gates import ReviewResult
 from capabilities.memory import ResearchMemory
 from domain_agents.research.config import (
+    ACADEMIC_DELIVERABLE_TYPE,
     ACADEMIC_PAPER_GUIDANCE_PROFILE,
     DEFAULT_DELIVERABLE_TYPE,
+    get_deliverable_profile,
+    normalize_deliverable_type,
     resolve_deliverable_type,
     resolve_report_profile,
 )
@@ -37,6 +40,13 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
     def test_resolve_deliverable_type_defaults_to_literature_review(self) -> None:
         deliverable = resolve_deliverable_type("请分析这个技术方向的发展趋势")
         self.assertEqual(deliverable, DEFAULT_DELIVERABLE_TYPE)
+
+    def test_normalize_deliverable_type_maps_free_text_sci_article_to_paper_guidance(self) -> None:
+        deliverable = normalize_deliverable_type(
+            "Full-length research article (SCI journal paper, English)"
+        )
+        self.assertEqual(deliverable, ACADEMIC_DELIVERABLE_TYPE)
+        self.assertEqual(get_deliverable_profile(deliverable).name, ACADEMIC_DELIVERABLE_TYPE)
 
     def test_build_research_workflow_graph_compiles(self) -> None:
         graph = build_research_workflow_graph()
@@ -94,6 +104,106 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(review.passed)
         self.assertTrue(review.revision_targets)
         self.assertTrue(any(target.module_id == "related_work" for target in review.revision_targets))
+
+    async def test_research_review_gate_accepts_semantic_english_sections_for_intent_alignment(self) -> None:
+        gate = ResearchReviewGate()
+        dimensions = await gate.dimension_checks(
+            {
+                "brief": {
+                    "deliverable_type": "paper_guidance",
+                    "clarified_goal": "Produce an English SCI paper roadmap",
+                },
+                "plan": {
+                    "modules": [
+                        {"module_id": "problem_definition"},
+                        {"module_id": "related_work"},
+                        {"module_id": "method_candidates"},
+                        {"module_id": "experiment_design"},
+                        {"module_id": "argument_map"},
+                        {"module_id": "contributions"},
+                        {"module_id": "limitations"},
+                    ]
+                },
+                "report": (
+                    "## Literature Review\n\n"
+                    "## Research Gap and Entry Points\n\n"
+                    "## Method and Experimental Path Suggestions\n\n"
+                    "## Suggestions for Writing the Paper\n"
+                ),
+                "module_outputs": {
+                    "related_work": {"content": "Related work with https://example.com/p1"},
+                    "method_candidates": {"content": "Method candidates and variables"},
+                    "experiment_design": {"content": "Dataset, baseline, metric, ablation"},
+                    "argument_map": {"content": "Background, gap, method, contribution, limitation"},
+                    "contributions": {"content": "Main contributions and novelty"},
+                },
+                "evidence_bank": [
+                    {"url": "https://example.com/p1", "traceable": True, "year": 2024},
+                    {"url": "https://example.com/p2", "traceable": True, "year": 2023},
+                    {"url": "https://example.com/p3", "traceable": True, "year": 2022},
+                ],
+            }
+        )
+        intent_alignment = next(item for item in dimensions if item.name == "intent_alignment")
+        self.assertTrue(intent_alignment.passed)
+
+    async def test_research_review_gate_argument_chain_supports_english_concepts(self) -> None:
+        gate = ResearchReviewGate()
+        dimensions = await gate.dimension_checks(
+            {
+                "brief": {"deliverable_type": "literature_review", "clarified_goal": "test"},
+                "plan": {
+                    "modules": [
+                        {"module_id": "problem_definition"},
+                        {"module_id": "related_work"},
+                        {"module_id": "argument_map"},
+                        {"module_id": "contributions"},
+                        {"module_id": "limitations"},
+                    ]
+                },
+                "report": "## Research Problem Definition",
+                "module_outputs": {
+                    "argument_map": {"content": "Background and research gap motivate the proposed method."},
+                    "contributions": {"content": "The main contribution and claim are clearly scoped."},
+                    "limitations": {"content": "Limitations, risks, and threats to validity are stated."},
+                },
+                "evidence_bank": [],
+            }
+        )
+        argument_dimension = next(item for item in dimensions if item.name == "argument_chain_completeness")
+        self.assertTrue(argument_dimension.passed)
+
+    async def test_research_review_gate_citation_coverage_focuses_on_citation_modules(self) -> None:
+        gate = ResearchReviewGate()
+        dimensions = await gate.dimension_checks(
+            {
+                "brief": {"deliverable_type": "paper_guidance", "clarified_goal": "test"},
+                "plan": {
+                    "modules": [
+                        {"module_id": "problem_definition"},
+                        {"module_id": "related_work"},
+                        {"module_id": "method_candidates"},
+                        {"module_id": "experiment_design"},
+                        {"module_id": "argument_map"},
+                        {"module_id": "contributions"},
+                        {"module_id": "limitations"},
+                    ]
+                },
+                "report": "## Literature Review",
+                "module_outputs": {
+                    "problem_definition": {"content": "Problem framing with https://example.com/a"},
+                    "related_work": {"content": "Key papers https://example.com/b https://example.com/c"},
+                },
+                "evidence_bank": [
+                    {"url": "https://example.com/a", "traceable": True, "year": 2024},
+                    {"url": "https://example.com/b", "traceable": True, "year": 2023},
+                    {"url": "https://example.com/c", "traceable": True, "year": 2022},
+                    {"url": "https://example.com/d", "traceable": True, "year": 2021},
+                ],
+            }
+        )
+        coverage_dimension = next(item for item in dimensions if item.name == "citation_relevance_coverage")
+        self.assertTrue(coverage_dimension.passed)
 
     async def test_checkpoint_b_preserves_evaluator_replan_signal(self) -> None:
         state = {

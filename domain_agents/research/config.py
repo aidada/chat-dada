@@ -1,4 +1,5 @@
 """科研工作流配置与产物模板定义。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -25,6 +26,34 @@ REPORT_PROFILE_ALIASES = {
 REPORT_PROFILE_TO_DELIVERABLE = {
     DEFAULT_REPORT_PROFILE: DEFAULT_DELIVERABLE_TYPE,
     ACADEMIC_PAPER_GUIDANCE_PROFILE: ACADEMIC_DELIVERABLE_TYPE,
+}
+
+DELIVERABLE_TYPE_ALIASES = {
+    DEFAULT_DELIVERABLE_TYPE: DEFAULT_DELIVERABLE_TYPE,
+    "review": DEFAULT_DELIVERABLE_TYPE,
+    "survey": DEFAULT_DELIVERABLE_TYPE,
+    "literature review": DEFAULT_DELIVERABLE_TYPE,
+    "related work": DEFAULT_DELIVERABLE_TYPE,
+    "文献综述": DEFAULT_DELIVERABLE_TYPE,
+    "综述": DEFAULT_DELIVERABLE_TYPE,
+    ACADEMIC_DELIVERABLE_TYPE: ACADEMIC_DELIVERABLE_TYPE,
+    "paper": ACADEMIC_DELIVERABLE_TYPE,
+    "paper guidance": ACADEMIC_DELIVERABLE_TYPE,
+    "journal paper": ACADEMIC_DELIVERABLE_TYPE,
+    "research article": ACADEMIC_DELIVERABLE_TYPE,
+    "full-length research article": ACADEMIC_DELIVERABLE_TYPE,
+    "full-length research article (sci journal paper, english)": ACADEMIC_DELIVERABLE_TYPE,
+    "sci paper": ACADEMIC_DELIVERABLE_TYPE,
+    "english sci paper": ACADEMIC_DELIVERABLE_TYPE,
+    "论文": ACADEMIC_DELIVERABLE_TYPE,
+    "英文论文": ACADEMIC_DELIVERABLE_TYPE,
+    "论文写作指导": ACADEMIC_DELIVERABLE_TYPE,
+    "research proposal": "research_proposal",
+    "proposal": "research_proposal",
+    "研究方案": "research_proposal",
+    "paper outline": "paper_outline",
+    "outline": "paper_outline",
+    "论文提纲": "paper_outline",
 }
 
 ACADEMIC_PROFILE_KEYWORDS = (
@@ -76,27 +105,27 @@ class ResearchConfig:
     max_revision_cycles: int = 2
     clarification_attempts: int = 1
     dynamic_budget_enabled: bool = True
-    dynamic_budget_hard_extension: int = 2
+    dynamic_budget_hard_extension: int = 4
     dynamic_budget_progress_bonus: int = 1
     dynamic_budget_score_bonus: int = 1
     stall_rounds_before_terminal_block: int = 2
     query_rewrite_attempts_before_terminal_block: int = 1
     worker_search_budget_by_role: dict[str, int] = field(
         default_factory=lambda: {
-            "citation_worker": 2,
-            "argument_worker": 1,
-            "method_worker": 2,
+            "citation_worker": 3,
+            "argument_worker": 2,
+            "method_worker": 3,
         }
     )
     worker_search_budget_by_module: dict[str, int] = field(
         default_factory=lambda: {
-            "problem_definition": 2,
-            "related_work": 2,
-            "argument_map": 1,
-            "contributions": 1,
-            "limitations": 1,
-            "method_candidates": 2,
-            "experiment_design": 2,
+            "problem_definition": 3,
+            "related_work": 4,
+            "argument_map": 2,
+            "contributions": 2,
+            "limitations": 2,
+            "method_candidates": 3,
+            "experiment_design": 3,
         }
     )
 
@@ -255,7 +284,28 @@ def resolve_deliverable_type(query: str, requested_profile: str | None = None) -
     return REPORT_PROFILE_TO_DELIVERABLE.get(profile, DEFAULT_DELIVERABLE_TYPE)
 
 
+def normalize_deliverable_type(deliverable_type: str | None, *, query: str | None = None) -> str:
+    """把自由文本 deliverable_type 归一化到系统内部 canonical 值。"""
+    normalized = str(deliverable_type or "").strip().lower()
+    if normalized in DELIVERABLE_PROFILES:
+        return normalized
+    if normalized in DELIVERABLE_TYPE_ALIASES:
+        return DELIVERABLE_TYPE_ALIASES[normalized]
+    if normalized:
+        if any(token in normalized for token in ("proposal", "研究方案", "study plan", "research plan")):
+            return "research_proposal"
+        if any(token in normalized for token in ("outline", "提纲", "paper structure")):
+            return "paper_outline"
+        if any(token in normalized for token in ("paper", "article", "journal", "manuscript", "sci", "论文")):
+            return ACADEMIC_DELIVERABLE_TYPE
+        if any(token in normalized for token in ("literature review", "review", "survey", "related work", "综述")):
+            return DEFAULT_DELIVERABLE_TYPE
+    if query:
+        return resolve_deliverable_type(query)
+    return DEFAULT_DELIVERABLE_TYPE
+
+
 def get_deliverable_profile(deliverable_type: str | None) -> DeliverableProfile:
     """获取某种产物类型对应的模板。未知值回落到默认综述模板。"""
-    key = str(deliverable_type or "").strip().lower() or DEFAULT_DELIVERABLE_TYPE
+    key = normalize_deliverable_type(deliverable_type)
     return DELIVERABLE_PROFILES.get(key, DELIVERABLE_PROFILES[DEFAULT_DELIVERABLE_TYPE])

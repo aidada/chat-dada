@@ -480,6 +480,74 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "ok")
         self.assertIn("可作为最终兜底输出", result.result)
 
+    async def test_research_orchestrated_fast_forwards_checkpoint_c_accept(self) -> None:
+        from tempfile import TemporaryDirectory
+        from unittest.mock import AsyncMock, patch
+
+        from capabilities.memory import ResearchMemory as BaseResearchMemory
+        from domain_agents.research.workflow import CHECKPOINT_C_PROMPT
+
+        with TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir)
+
+            def _memory_factory(task_id: str):
+                return BaseResearchMemory(task_id, root=tmp_root)
+
+            memory = _memory_factory("task_checkpoint_c_accept")
+            memory.init("研究主题", "")
+            (memory.task_dir / "aggregated_draft.md").write_text(
+                "## 成稿前确认稿\n\n当前聚合草稿。",
+                encoding="utf-8",
+            )
+            memory.save_checkpoint(
+                2,
+                {
+                    "evaluation": {"passed": True, "summary": "模块评审已通过", "issues": []},
+                    "module_outputs": {
+                        "argument_map": {"content": "论证链 https://example.com/paper"}
+                    },
+                    "blocked_modules": [],
+                    "budget": {"status": "active", "soft_budget_total": 2, "hard_budget_total": 4},
+                },
+            )
+
+            with (
+                patch(
+                    "domain_agents.research.orchestrated.stream_nested_graph",
+                    new=AsyncMock(),
+                ) as mocked_stream,
+                patch(
+                    "domain_agents.research.orchestrated.synthesize_final_payload",
+                    new=AsyncMock(
+                        return_value={
+                            "final_result": "## 最终研究输出\n\n已直接收束到最终稿。",
+                            "workflow_trace": ["checkpoint_c_accept_resume", "synthesize_final"],
+                        }
+                    ),
+                ) as mocked_synth,
+                patch("domain_agents.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+            ):
+                result = await run_research_domain_orchestrated(
+                    {
+                        "query": "研究主题",
+                        "task_id": "task_checkpoint_c_accept",
+                        "clarification_history": [
+                            {
+                                "question": CHECKPOINT_C_PROMPT,
+                                "answer": "无补充，继续",
+                                "nested_graph": "research_workflow",
+                            }
+                        ],
+                    }
+                )
+
+        mocked_stream.assert_not_awaited()
+        mocked_synth.assert_awaited_once()
+        self.assertEqual(result.status, "ok")
+        self.assertIn("已直接收束到最终稿", result.result)
+        self.assertTrue(result.review["passed"])
+        self.assertTrue(any(ref["name"] == "final_report.md" for ref in result.artifact_refs))
+
 
 class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
     async def test_patent_domain_produces_structured_artifacts(self) -> None:

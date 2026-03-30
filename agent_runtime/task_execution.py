@@ -633,6 +633,7 @@ class TaskService:
                     "context": str(pending_question.get("context", "") or "").strip(),
                     "answer": answer_text,
                     "checkpoint_id": str(pending_question.get("checkpoint_id", "") or "").strip(),
+                    "graph_node": str(pending_question.get("graph_node", "") or "").strip(),
                     "nested_graph": str(pending_question.get("nested_graph", "") or "").strip(),
                 }
             )

@@ -14,6 +14,7 @@ from domain_agents.research.config import (
     DEFAULT_DELIVERABLE_TYPE,
     DEFAULT_RESEARCH_MODE,
     get_deliverable_profile,
+    normalize_deliverable_type,
     resolve_deliverable_type,
     resolve_report_profile,
 )
@@ -124,10 +125,11 @@ def _normalize_scalar_text(value: Any, *, empty_markers: set[str] | None = None)
 
 
 def fallback_brief(query: str, requested_profile: str | None, input_data: dict[str, Any]) -> dict[str, Any]:
-    deliverable_type = (
+    deliverable_type = normalize_deliverable_type(
         _normalize_scalar_text(input_data.get("deliverable_type"))
         or resolve_deliverable_type(query, requested_profile)
-        or DEFAULT_DELIVERABLE_TYPE
+        or DEFAULT_DELIVERABLE_TYPE,
+        query=query,
     )
 
     research_mode = _normalize_scalar_text(input_data.get("research_mode")).lower()
@@ -222,8 +224,9 @@ def merge_brief(base: dict[str, Any], override: dict[str, Any], input_data: dict
     merged["raw_query"] = _normalize_scalar_text(merged.get("raw_query"))
     merged["clarified_goal"] = _normalize_scalar_text(merged.get("clarified_goal")) or merged["raw_query"]
     merged["discipline"] = _normalize_scalar_text(merged.get("discipline"))
-    merged["deliverable_type"] = (
-        _normalize_scalar_text(merged.get("deliverable_type")) or DEFAULT_DELIVERABLE_TYPE
+    merged["deliverable_type"] = normalize_deliverable_type(
+        _normalize_scalar_text(merged.get("deliverable_type")) or DEFAULT_DELIVERABLE_TYPE,
+        query=merged["raw_query"],
     )
     merged["research_mode"] = _normalize_scalar_text(merged.get("research_mode")) or DEFAULT_RESEARCH_MODE
     merged["time_scope"] = _normalize_scalar_text(merged.get("time_scope")) or "recent + seminal"

@@ -274,6 +274,54 @@ def _budget_blocker_reason(entry: dict[str, Any]) -> str:
     )
 
 
+def _supports_partial_draft(module_id: str) -> bool:
+    return module_id in {"argument_map", "contributions", "limitations"}
+
+
+def _build_partial_open_gaps(blocked_deps: list[str]) -> list[str]:
+    if not blocked_deps:
+        return []
+    return [
+        (
+            "当前模块基于现有依赖内容生成 partial draft。"
+            f" 以下上游模块尚未完成，相关论断必须保持保守：{', '.join(blocked_deps)}"
+        )
+    ]
+
+
+def _fallback_partial_findings(
+    module: dict[str, Any],
+    dependency_text: str,
+    blocked_deps: list[str],
+) -> str:
+    title = str(module.get("title", "") or module.get("module_id", "") or "module")
+    objective = str(module.get("objective", "") or "").strip()
+    dependency_preview = (dependency_text or "").strip()
+    if len(dependency_preview) > 1000:
+        dependency_preview = dependency_preview[:1000].rstrip() + "\n...\n"
+    blocked_text = ", ".join(blocked_deps) if blocked_deps else "unknown upstream modules"
+    parts = [
+        f"## {title}",
+        "### Current Partial Draft",
+        (
+            "This section is a provisional draft based only on the currently available upstream content. "
+            "It should be treated as structurally useful but not final."
+        ),
+    ]
+    if objective:
+        parts.extend(["### Module Objective", objective])
+    if dependency_preview:
+        parts.extend(["### Available Upstream Context", dependency_preview])
+    parts.extend(
+        [
+            "### Open Gaps",
+            f"- Waiting for upstream completion: {blocked_text}.",
+            "- Claims that depend on the blocked modules must remain conservative until new evidence is integrated.",
+        ]
+    )
+    return normalize_markdown_report("\n\n".join(parts))
+
+
 def _tool_map(tools: list[Any]) -> dict[str, Any]:
     return {str(getattr(tool, "name", "")): tool for tool in tools if getattr(tool, "name", None)}
 
@@ -945,6 +993,163 @@ async def coordinate_modules(
             )
             return module_id, result
 
+    async def _run_partial_one(
+        module: dict[str, Any],
+        step_index: int,
+        blocked_deps: list[str],
+    ) -> tuple[str, dict[str, Any]]:
+        module_id = str(module["module_id"])
+        dependency_text = module_dependency_context(module, outputs)
+        partial_instructions = "\n".join(
+            [
+                "上游模块尚未完成，但允许基于当前可用内容生成 partial draft。",
+                "禁止调用任何检索工具，也不要引入新的外部证据。",
+                "只能基于当前 dependency_context、existing_draft 和已有 evidence_pack 收束结构。",
+                "必须明确写出 open gaps，并说明哪些结论暂时不能写过头。",
+            ]
+        )
+        result = await run_worker(
+            module,
+            brief=brief,
+            tools=[],
+            dependency_context=dependency_text,
+            existing_draft=str((outputs.get(module_id) or {}).get("content", "") or ""),
+            revision_instructions=partial_instructions,
+            memory=memory,
+            step_index=step_index,
+            max_rounds=0,
+            resume_state={"evidence_pack": list(evidence_bank or [])},
+        )
+        findings = normalize_markdown_report(str(result.get("findings", "") or ""))
+        if not findings:
+            findings = _fallback_partial_findings(module, dependency_text, blocked_deps)
+        return module_id, {
+            "module_id": module_id,
+            "status": "partial",
+            "findings": findings,
+            "evidence": list(result.get("evidence", []) or []),
+            "blocker_reason": "; ".join(_build_partial_open_gaps(blocked_deps)),
+            "search_stats": dict(result.get("search_stats", {}) or {}),
+            "worker_state": dict(result.get("worker_state", {}) or {}),
+            "partial_due_to_blocked_deps": True,
+            "blocked_dependencies": list(blocked_deps),
+        }
+
+    def _collect_partial_eligible() -> list[tuple[dict[str, Any], list[str]]]:
+        partial_eligible: list[tuple[dict[str, Any], list[str]]] = []
+        for module in modules:
+            module_id = str(module["module_id"])
+            current_status = status.get(module_id, "pending")
+            if current_status not in {"pending", "needs_revision"}:
+                continue
+            deps = module.get("depends_on", [])
+            blocked_deps = [
+                dep
+                for dep in deps
+                if status.get(dep) in {"blocked", "skipped"}
+            ]
+            if (
+                blocked_deps
+                and _supports_partial_draft(module_id)
+                and all(status.get(dep) in {"completed", "locked", "blocked", "skipped"} for dep in deps)
+            ):
+                dependency_text = module_dependency_context(module, outputs)
+                if dependency_text.strip() or evidence_bank:
+                    partial_eligible.append((module, blocked_deps))
+        return partial_eligible
+
+    async def _apply_partial_results(
+        partial_eligible: list[tuple[dict[str, Any], list[str]]],
+        *,
+        step_start: int,
+        reason: str,
+    ) -> int:
+        nonlocal evidence_bank
+        if not partial_eligible:
+            return 0
+        log.info(
+            "Partial draft pass triggered: reason=%s modules=%s",
+            reason,
+            [
+                {
+                    "module_id": str(module.get("module_id", "") or ""),
+                    "blocked_deps": list(blocked_deps),
+                }
+                for module, blocked_deps in partial_eligible
+            ],
+        )
+        record_monitor_event(
+            layer="agent",
+            name="research_partial_draft_pass",
+            event="start",
+            metadata={
+                "reason": reason,
+                "modules": [
+                    str(module.get("module_id", "") or "")
+                    for module, _ in partial_eligible
+                ],
+                "blocked_dependencies": {
+                    str(module.get("module_id", "") or ""): list(blocked_deps)
+                    for module, blocked_deps in partial_eligible
+                },
+            },
+        )
+        for module, _ in partial_eligible:
+            status[module["module_id"]] = "running"
+        results = await asyncio.gather(
+            *[
+                _run_partial_one(module, step_start + idx, blocked_deps)
+                for idx, (module, blocked_deps) in enumerate(partial_eligible)
+            ]
+        )
+        for module_id, result in results:
+            worker_results.append(result)
+            evidence_bank = merge_evidence(evidence_bank, list(result.get("evidence", []) or []))
+            previous = outputs.get(module_id) or {}
+            version = int(previous.get("version", 0) or 0) + 1
+            worker_role = str(
+                next((module["owner_role"] for module in modules if module["module_id"] == module_id), "argument_worker")
+            )
+            evidence_ids = [item.get("evidence_id", "") for item in result.get("evidence", []) if item.get("evidence_id")]
+            citation_ids = [str(idx) for idx, _ in enumerate(result.get("evidence", []), start=1)]
+            open_gaps = _build_partial_open_gaps(list(result.get("blocked_dependencies", []) or []))
+            module_budget = dict((budget_state.get("module_budgets") or {}).get(module_id, {}) or {})
+            module_budget["last_status"] = "partial"
+            budget_state.setdefault("module_budgets", {})[module_id] = module_budget
+            outputs[module_id] = ResearchModuleDraft(
+                module_id=module_id,
+                version=version,
+                status="partial",
+                content=normalize_markdown_report(str(result.get("findings", "") or "")),
+                evidence_ids=evidence_ids,
+                citation_ids=citation_ids,
+                open_gaps=open_gaps,
+                assumptions=list(previous.get("assumptions", []) or []),
+                last_worker_role=worker_role,
+                last_review_score=float(previous.get("last_review_score", 0.0) or 0.0),
+                locked=False,
+            ).model_dump()
+            status[module_id] = "completed"
+            log.info(
+                "Partial draft generated: module=%s reason=%s blocked_deps=%s content_len=%s",
+                module_id,
+                reason,
+                list(result.get("blocked_dependencies", []) or []),
+                len(str(result.get("findings", "") or "")),
+            )
+            record_monitor_event(
+                layer="agent",
+                name="research_partial_draft_module",
+                event="end",
+                metadata={
+                    "reason": reason,
+                    "module_id": module_id,
+                    "blocked_dependencies": list(result.get("blocked_dependencies", []) or []),
+                    "content_len": len(str(result.get("findings", "") or "")),
+                },
+            )
+        return len(partial_eligible)
+
     max_waves = 12
     step_index = 1
     for _ in range(max_waves):
@@ -957,14 +1162,17 @@ async def coordinate_modules(
             deps = module.get("depends_on", [])
             if all(status.get(dep) in {"completed", "locked"} for dep in deps):
                 eligible.append(module)
+        partial_eligible = _collect_partial_eligible()
 
-        if not eligible:
+        if not eligible and not partial_eligible:
             break
 
         for module in eligible:
             status[module["module_id"]] = "running"
 
-        results = await asyncio.gather(*[_run_one(module, step_index + idx) for idx, module in enumerate(eligible)])
+        results = await asyncio.gather(
+            *[_run_one(module, step_index + idx) for idx, module in enumerate(eligible)],
+        )
         step_index += len(eligible)
 
         for module_id, result in results:
@@ -1063,7 +1271,21 @@ async def coordinate_modules(
             module_budget["terminal_blocked"] = False
             budget_state.setdefault("module_budgets", {})[module_id] = module_budget
 
+        partial_count = await _apply_partial_results(
+            partial_eligible,
+            step_start=step_index,
+            reason="mid_wave_blocked_dependency",
+        )
+        step_index += partial_count
+
     changed = True
+    final_partial_eligible = _collect_partial_eligible()
+    final_partial_count = await _apply_partial_results(
+        final_partial_eligible,
+        step_start=step_index,
+        reason="final_blocked_dependency_pass",
+    )
+    step_index += final_partial_count
     while changed:
         changed = False
         for module in modules:
@@ -1077,6 +1299,20 @@ async def coordinate_modules(
             ]
             if not blocked_deps:
                 continue
+            log.info(
+                "Module skipped due to blocked upstream dependencies: module=%s blocked_deps=%s",
+                module_id,
+                blocked_deps,
+            )
+            record_monitor_event(
+                layer="agent",
+                name="research_blocked_dependency_skip",
+                event="end",
+                metadata={
+                    "module_id": module_id,
+                    "blocked_dependencies": list(blocked_deps),
+                },
+            )
             previous = outputs.get(module_id) or {}
             outputs[module_id] = ResearchModuleDraft(
                 module_id=module_id,

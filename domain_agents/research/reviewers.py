@@ -11,6 +11,31 @@ from capabilities.review_gates import (
     RevisionTarget,
 )
 from domain_agents.research.config import get_deliverable_profile
+from domain_agents.research.utils import collect_urls
+
+
+def _section_alias_groups(deliverable_type: str) -> list[tuple[str, ...]]:
+    key = str(deliverable_type or "").strip().lower()
+    if key == "paper_guidance":
+        return [
+            ("文献综述正文", "related work", "literature review"),
+            ("研究空白与可切入点", "research gap", "gap", "entry point"),
+            ("方法与实验路径建议", "method", "experiment", "experimental path"),
+            ("对后续论文写作的明确建议", "writing advice", "paper structure", "论文结构"),
+        ]
+    return [
+        ("研究问题定义", "research problem definition", "problem definition"),
+        ("相关工作与证据综述", "相关工作与文献脉络", "related work", "literature review"),
+        ("研究空白与论证链", "研究空白", "论证链", "research gap", "argument"),
+        ("可主张的贡献", "贡献与创新点", "contribution", "innovation"),
+    ]
+
+
+def _module_text(module_outputs: dict[str, Any], *module_ids: str) -> str:
+    return " ".join(
+        str((module_outputs.get(module_id) or {}).get("content", "") or "")
+        for module_id in module_ids
+    ).lower()
 
 
 class ResearchReviewGate(ReviewGate):
@@ -80,14 +105,8 @@ class ResearchReviewGate(ReviewGate):
         recency_years = [int(item["year"]) for item in evidence_bank if item.get("year")]
         recent_items = [year for year in recency_years if year >= current_year - 5]
 
-        method_text = " ".join(
-            str((module_outputs.get(module_id) or {}).get("content", "") or "")
-            for module_id in ("method_candidates", "experiment_design")
-        ).lower()
-        argument_text = " ".join(
-            str((module_outputs.get(module_id) or {}).get("content", "") or "")
-            for module_id in ("argument_map", "contributions", "limitations")
-        ).lower()
+        method_text = _module_text(module_outputs, "method_candidates", "experiment_design")
+        argument_text = _module_text(module_outputs, "argument_map", "contributions", "limitations")
 
         dimensions: list[ReviewDimension] = []
 
@@ -109,16 +128,37 @@ class ResearchReviewGate(ReviewGate):
             )
         )
 
-        citation_coverage_score = min(0.35 + coverage_ratio * 0.65, 1.0)
-        if evidence_count < 2:
-            citation_coverage_score = min(citation_coverage_score, 0.5)
+        citation_modules = ("problem_definition", "related_work")
+        citation_module_count = sum(
+            1
+            for module_id in citation_modules
+            if str((module_outputs.get(module_id) or {}).get("content", "") or "").strip()
+        )
+        citation_module_ratio = citation_module_count / len(citation_modules)
+        citation_text = _module_text(module_outputs, *citation_modules)
+        citation_mentions = len(
+            {
+                url
+                for url in collect_urls(citation_text)
+            }
+        )
+        traceable_ratio = min(traceable_count / 5, 1.0)
+        mention_ratio = min(citation_mentions / 3, 1.0)
+        citation_coverage_score = min(
+            0.2 + citation_module_ratio * 0.35 + traceable_ratio * 0.3 + mention_ratio * 0.15,
+            1.0,
+        )
+        if evidence_count < 2 and citation_module_ratio < 1.0:
+            citation_coverage_score = min(citation_coverage_score, 0.55)
         dimensions.append(
             ReviewDimension(
                 name="citation_relevance_coverage",
                 score=citation_coverage_score,
                 passed=citation_coverage_score >= 0.68,
-                strengths=["核心模块基本覆盖"] if coverage_ratio >= 0.8 else [],
-                weaknesses=["关键模块覆盖不足或证据过少"] if coverage_ratio < 0.8 or evidence_count < 2 else [],
+                strengths=["problem_definition 与 related_work 已有较完整证据支撑"] if citation_module_ratio >= 1.0 and traceable_count >= 3 else [],
+                weaknesses=[
+                    "problem_definition / related_work 仍缺正文支撑，或证据虽多但没有被稳定写入模块草稿"
+                ] if citation_module_ratio < 1.0 or traceable_count < 3 else [],
                 affected_modules=["related_work", "problem_definition"],
             )
         )
@@ -170,31 +210,66 @@ class ResearchReviewGate(ReviewGate):
             )
         )
 
-        argument_keywords = ("空白", "gap", "motivation", "贡献", "局限", "risk", "claim", "背景")
-        argument_hits = sum(1 for token in argument_keywords if token in argument_text)
-        argument_score = min(0.35 + argument_hits * 0.08, 0.92)
+        argument_modules = ("argument_map", "contributions", "limitations")
+        argument_module_ratio = (
+            sum(
+                1
+                for module_id in argument_modules
+                if str((module_outputs.get(module_id) or {}).get("content", "") or "").strip()
+            )
+            / len(argument_modules)
+        )
+        argument_concepts = {
+            "background": ("背景", "background", "context"),
+            "gap": ("空白", "gap", "challenge", "motivation", "unresolved"),
+            "method": ("方法", "method", "approach", "framework", "model"),
+            "contribution": ("贡献", "contribution", "novelty", "claim"),
+            "limitation": ("局限", "limitation", "risk", "threat"),
+        }
+        argument_hits = sum(1 for aliases in argument_concepts.values() if any(token in argument_text for token in aliases))
+        argument_score = min(0.2 + (argument_hits / len(argument_concepts)) * 0.45 + argument_module_ratio * 0.3, 0.95)
         dimensions.append(
             ReviewDimension(
                 name="argument_chain_completeness",
                 score=argument_score,
                 passed=argument_score >= 0.68,
-                strengths=["论证链基本闭环"] if argument_hits >= 4 else [],
-                weaknesses=["背景-空白-方法-贡献-局限链条仍不完整"] if argument_hits < 4 else [],
+                strengths=["论证链基本闭环"] if argument_hits >= 4 and argument_module_ratio >= 0.67 else [],
+                weaknesses=["背景-空白-方法-贡献-局限链条仍不完整"] if argument_hits < 4 or argument_module_ratio < 0.67 else [],
                 affected_modules=["argument_map", "contributions", "limitations"],
             )
         )
 
-        section_hits = sum(1 for section in profile.final_sections[: min(4, len(profile.final_sections))] if section in report)
-        intent_score = min(0.4 + section_hits * 0.15, 0.95)
-        if brief.get("deliverable_type") == "paper_guidance" and "论文" not in report and "introduction" not in report.lower():
-            intent_score = min(intent_score, 0.48)
+        report_lower = report.lower()
+        section_groups = _section_alias_groups(str(profile.name))
+        section_hits = sum(
+            1
+            for aliases in section_groups
+            if any(alias.lower() in report_lower for alias in aliases)
+        )
+        required_alignment_modules = (
+            ("problem_definition", "related_work", "argument_map", "contributions")
+            if str(profile.name) != "paper_guidance"
+            else ("related_work", "method_candidates", "experiment_design", "argument_map", "contributions")
+        )
+        aligned_module_ratio = (
+            sum(
+                1
+                for module_id in required_alignment_modules
+                if str((module_outputs.get(module_id) or {}).get("content", "") or "").strip()
+            )
+            / len(required_alignment_modules)
+        )
+        section_ratio = section_hits / max(len(section_groups), 1)
+        intent_score = min(0.25 + section_ratio * 0.35 + aligned_module_ratio * 0.4, 0.95)
+        if str(profile.name) == "paper_guidance" and aligned_module_ratio < 0.4 and section_hits < 2:
+            intent_score = min(intent_score, 0.55)
         dimensions.append(
             ReviewDimension(
                 name="intent_alignment",
                 score=intent_score,
                 passed=intent_score >= 0.65,
-                strengths=["输出结构与目标产物匹配"] if section_hits >= 2 else [],
-                weaknesses=["当前草案与目标产物或用户偏好不够对齐"] if section_hits < 2 else [],
+                strengths=["输出结构与目标产物匹配"] if section_hits >= 2 or aligned_module_ratio >= 0.7 else [],
+                weaknesses=["当前草案与目标产物或用户偏好不够对齐"] if section_hits < 2 and aligned_module_ratio < 0.7 else [],
                 affected_modules=[module["module_id"] for module in payload.get("plan", {}).get("modules", [])],
             )
         )

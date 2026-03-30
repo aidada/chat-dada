@@ -43,6 +43,7 @@ from domain_agents.research.worker import coordinate_modules
 log = logging.getLogger("chatdada.research.workflow")
 
 WORKFLOW_LLM_NODE_MAX_ATTEMPTS = 3
+CHECKPOINT_C_PROMPT = "模块评审已通过。若还要继续微调，请说明；如无修改可忽略，系统将输出最终稿。"
 
 
 def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
@@ -930,7 +931,7 @@ async def checkpoint_c_node(state: ResearchWorkflowState) -> dict[str, Any]:
         files=final_stage_files,
     )
     answer = await ask_user(
-        "模块评审已通过。若还要继续微调，请说明；如无修改可忽略，系统将输出最终稿。",
+        CHECKPOINT_C_PROMPT,
         context=(
             f"目标产物：{profile.label}\n"
             f"目标章节：{list(profile.final_sections)}\n\n"
@@ -966,7 +967,7 @@ async def checkpoint_c_node(state: ResearchWorkflowState) -> dict[str, Any]:
     }
 
 
-async def synthesize_final_node(state: ResearchWorkflowState) -> dict[str, Any]:
+async def synthesize_final_payload(state: ResearchWorkflowState) -> dict[str, Any]:
     """在所有关键模块通过评估后，整合为最终科研输出。"""
     brief = dict(state.get("brief", {}) or {})
     module_outputs = dict(state.get("module_outputs", {}) or {})
@@ -1018,6 +1019,10 @@ async def synthesize_final_node(state: ResearchWorkflowState) -> dict[str, Any]:
         "final_result": final_text,
         "workflow_trace": _append_trace(state, "synthesize_final"),
     }
+
+
+async def synthesize_final_node(state: ResearchWorkflowState) -> dict[str, Any]:
+    return await synthesize_final_payload(state)
 
 
 def build_research_workflow_graph(config: ResearchConfig | None = None) -> Any:
