@@ -1,43 +1,16 @@
 # chat-dada
 
-`chat-dada` 是一个本地优先的多智能体任务平台后端。当前代码已经切到清晰的分层结构，主要入口不再集中在单个大文件里。
+`chat-dada` 是一个本地优先的多智能体任务平台后端。所有源码归入 5 个语义清晰的顶级包，Web 与 Agent 完全隔离：
 
-- `apps/web`：FastAPI 入口、路由、中间件、静态文件、SSE
-- `domain`：认证、任务、对话、额度等业务服务
-- `infra`：SQLAlchemy 模型、仓储、数据库会话、Google OAuth
-- `agent_runtime`：任务执行、路由、事件流、LangGraph 运行时
-- `domain_agents`：`research / patent / zero_report / ppt` 领域工作流
-- `task_platform`、`capabilities`、`tools`、`workflows`：共享的流式协议、检索、规划和编排组件
+- `web/`：FastAPI 入口、路由、中间件、静态文件、SSE
+- `agent/`：全部 AI/LLM 相关 — 运行时、任务编排、领域 agent、能力组件、工具
+- `domain/`：认证、任务、对话、额度等业务服务
+- `infra/`：SQLAlchemy 模型、仓储、数据库会话、Google OAuth、用户存储
+- `core/`：LLM 工厂、日志、内容处理等共享工具
 
-`main.py` 现在只是兼容入口，真正的 FastAPI 应用在 `apps/web/app.py`。
+`main.py` 是兼容启动入口，真正的 FastAPI 应用在 `web/app.py`。
 
-## 当前结构
-
-```text
-apps/web/
-  app.py
-  config.py
-  deps/
-  middleware/
-  routers/
-domain/
-  auth/
-  billing/
-  conversations/
-  tasks/
-infra/
-  db/
-    base.py
-    models/
-    repositories/
-  oauth/
-agent_runtime/
-domain_agents/
-task_platform/
-capabilities/
-tools/
-workflows/
-```
+## 项目结构
 
 ```
 chat-dada/
@@ -50,26 +23,39 @@ chat-dada/
 │   └── middleware/              #   Errors, sessions
 │
 ├── agent/                       # 🤖 AGENT LAYER (全部 AI/LLM 相关)
-│   ├── runtime/                 #   ← agent_runtime/ (图执行引擎)
-│   ├── platform/                #   ← task_platform/ (任务编排 + 注册)
-│   ├── domains/                 #   ← domain_agents/ (research, patent, ppt, zero_report)
-│   ├── capabilities/            #   ← capabilities/ (review_gates, budget, memory...)
-│   ├── workflows/               #   ← workflows/ (通用编排框架)
-│   ├── tools/                   #   ← tools/ (search, image_gen, code_executor...)
-│   └── ppt_engine/              #   ← ppt_engine/ (PPT DSL 渲染)
+│   ├── runtime/                 #   LangGraph 图执行引擎、路由、事件流
+│   ├── platform/                #   任务编排、注册、DAG 规划、能力组合
+│   ├── domains/                 #   领域 agent (research, patent, ppt, zero_report)
+│   │   └── _base/               #   AgentProtocol / AgentManifest / AgentContext
+│   ├── capabilities/            #   可复用组件 (review_gates, budget, memory...)
+│   ├── workflows/               #   通用编排框架 (orchestrator, strategy_selector)
+│   ├── tools/                   #   LLM 可调用工具 (search, image_gen, code_executor)
+│   └── ppt_engine/              #   PPT DSL 渲染引擎
 │
-├── domain/                      # 📦 DOMAIN LAYER (业务逻辑, 不变)
-│   ├── auth/, billing/, conversations/, tasks/, agents/
+├── domain/                      # 📦 DOMAIN LAYER (业务逻辑)
+│   ├── auth/                    #   认证、OAuth、密码
+│   ├── billing/                 #   额度、用量
+│   ├── conversations/           #   对话管理、上下文
+│   ├── tasks/                   #   任务执行服务
+│   └── agents/                  #   Agent 查询服务
 │
-├── infra/                       # 🔧 INFRASTRUCTURE (db, oauth, events + 吸收 storage/)
-│   ├── db/  oauth/  events/
-│   └── storage/                 #   ← storage/ (user_store, user_models)
+├── infra/                       # 🔧 INFRASTRUCTURE
+│   ├── db/                      #   SQLAlchemy models, repositories, session
+│   ├── oauth/                   #   Google OIDC client
+│   ├── events/                  #   Redis Pub/Sub
+│   └── storage/                 #   用户记忆持久化
 │
-├── core/                        # ⚙️ SHARED UTILITIES (不变)
+├── core/                        # ⚙️ SHARED UTILITIES
+│   ├── models.py                #   LLM 工厂 (OpenAI, Claude, Gemini)
+│   ├── logger.py                #   结构化日志
+│   ├── r2_storage.py            #   Cloudflare R2
+│   └── content_utils.py         #   文本处理
 │
-├── tests/  alembic/  scripts/  docs/  skills/    # 辅助
-├── data/  logs/  outputs/  uploads/               # 运行时数据
-├── main.py + pyproject.toml + Dockerfile + ...    # 配置
+├── tests/                       # 测试
+├── alembic/                     # 数据库迁移
+├── scripts/  docs/  skills/     # 辅助
+├── data/  logs/  outputs/  uploads/  # 运行时数据
+└── main.py + pyproject.toml + Dockerfile + ...   # 配置
 ```
 
 ## 当前能力
@@ -120,8 +106,8 @@ chat-dada/
 
 任务流现在是：
 
-1. 路由器根据 `mode`、附件和关键词决定走 `general_chat` 还是 orchestrator
-2. `agent_runtime/task_execution.py` 负责落库、事件流、回复恢复和取消
+1. 路由器根据 `mode`、附件和关键词决定走 `general_chat`、单领域 orchestrator 还是 `composite`（跨领域 DAG 组合）
+2. `agent/runtime/task_execution.py` 负责落库、事件流、回复恢复和取消
 3. 事件通过 Redis Pub/Sub 推到 SSE
 4. 结果、review、budget 和 artifact_refs 会持久化到 Postgres
 
@@ -179,13 +165,14 @@ SSE 事件流会：
 
 当前领域入口如下：
 
-| 领域 | 当前入口 | 说明 |
-| --- | --- | --- |
-| `general_chat` | `agent_runtime/dispatcher.py` + `capabilities/general_chat.py` | 轻量问答 |
-| `research` | `domain_agents/research/orchestrated.py` | 模块化科研工作流 |
-| `patent` | `domain_agents/patent/orchestrated.py` | 专利草稿工作流 |
-| `zero_report` | `domain_agents/zero_report/orchestrated.py` | 归零报告工作流 |
-| `ppt` | `domain_agents/ppt/orchestrated.py` | 生成内容后再渲染 `.pptx` |
+| 领域           | 入口                                                                 | 说明                                    |
+| -------------- | -------------------------------------------------------------------- | --------------------------------------- |
+| `general_chat` | `agent/runtime/dispatcher.py` + `agent/capabilities/general_chat.py` | 轻量问答                                |
+| `research`     | `agent/domains/research/orchestrated.py`                             | 模块化科研工作流                        |
+| `patent`       | `agent/domains/patent/orchestrated.py`                               | 专利草稿工作流                          |
+| `zero_report`  | `agent/domains/zero_report/orchestrated.py`                          | 归零报告工作流                          |
+| `ppt`          | `agent/domains/ppt/orchestrated.py`                                  | 生成内容后再渲染 `.pptx`                |
+| `composite`    | `agent/runtime/root_graph.py` → `agent/platform/task_planner.py`     | 跨领域 DAG 组合（如「先调研再做 PPT」） |
 
 `research` 工作流已经支持的产物类型：
 
@@ -456,8 +443,10 @@ npm run build
 
 ## 当前要点
 
-- 后端主结构已经迁到 `apps/web`、`domain`、`infra`、`agent_runtime` 和 `domain_agents`
-- 旧的 `runtime/*.py` 和 `task_platform/root_graph.py` / `task_platform/router.py` 主实现已移除
+- 所有源码归入 5 个顶级包：`web/`、`agent/`、`domain/`、`infra/`、`core/`
+- 领域 agent 支持 `AgentProtocol` 插件化注册（`agent/domains/_base/protocol.py`）
+- 跨领域任务支持 DAG 组合：`task_planner` 拆解 → `step_runner` 拓扑并行执行
+- 自审门控：`gate_runner` 实现 run → review → retry 循环
 - Google 登录和邮箱密码登录都已接入
 - 主业务 HTTP 接口已经要求登录
 - quota 管理接口和前端额度展示已经接入

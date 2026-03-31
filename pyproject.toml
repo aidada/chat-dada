@@ -30,7 +30,6 @@ dependencies = [
     "python-docx>=1.0.0",
     "python-dotenv>=1.0.0",
     "python-multipart>=0.0.6",
-    "python-pptx>=1.0.0",
     "redis>=7.0",
     "sqlalchemy>=2.0.48",
     "tavily-python>=0.3.0",

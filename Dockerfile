@@ -15,6 +15,12 @@ FROM python:3.13-slim
 WORKDIR /app
 ENV FRONTEND_DIST_DIR=/app/frontend-dist
 
+# Install OfficeCLI (single binary, self-contained .NET runtime)
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash \
+    && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+ENV OFFICECLI_SKIP_UPDATE=1
+
 # Copy installed packages from builder
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin

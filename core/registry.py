@@ -2,6 +2,7 @@
 Unified Capability Registry — every agent, tool, and renderer registers here.
 Orchestrator dispatches by registry lookup. Zero hardcoded flows.
 """
+
 import asyncio
 import importlib
 import json
@@ -163,50 +164,111 @@ def get_tools_for_agent(agent_name: str, exclude_names: set[str] | None = None) 
 # ── Register existing capabilities ──
 
 # Agents
-register("search", fn_path="agents.search_agent:run_search",
-         cap_type="agent", description="Web search + browser scraping, returns structured findings")
-register("doc_analyst", fn_path="agents.doc_agent:run_doc_analysis",
-         cap_type="agent", description="Read PDF/text files, extract key info and data")
-register("writer", fn_path="agents.writer_agent:run_writer",
-         cap_type="agent", description="Generate Slide DSL JSON from storyline and materials")
+register(
+    "search",
+    fn_path="agents.search_agent:run_search",
+    cap_type="agent",
+    description="Web search + browser scraping, returns structured findings",
+)
+register(
+    "doc_analyst",
+    fn_path="agents.doc_agent:run_doc_analysis",
+    cap_type="agent",
+    description="Read PDF/text files, extract key info and data",
+)
+register(
+    "writer",
+    fn_path="agent.domains.ppt.orchestrated:run_ppt_domain_orchestrated",
+    cap_type="agent",
+    description="Generate PPT via OfficeCLI — outline, search, build slides",
+)
 
-# Renderers
-register("ppt_render", fn_path="agent.ppt_engine.renderer:render_pptx",
-         cap_type="renderer", description="Render SlideDeck JSON to editable .pptx file")
+# Renderers (OfficeCLI replaces ppt_engine)
+register(
+    "officecli",
+    fn_path="agent.tools.officecli:run",
+    cap_type="tool",
+    description="Execute officecli CLI commands to create/edit .pptx/.docx/.xlsx",
+    available_to=["ppt"],
+)
 
 # General Chat
-register("general_chat", fn_path="agents.general_chat:run",
-         cap_type="agent", description="Direct Q&A conversation, answers questions without tools")
+register(
+    "general_chat",
+    fn_path="agents.general_chat:run",
+    cap_type="agent",
+    description="Direct Q&A conversation, answers questions without tools",
+)
 
 # Tools
-register("web_search", fn_path="tools.web_search:run",
-         cap_type="tool", description="Search the web via Tavily and return results",
-         available_to=[])
-register("brave_search", fn_path="tools.brave_search:run",
-         cap_type="tool", description="Search the web via Brave and return title/link/snippet results",
-         available_to=["search", "deep_research"])
-register("translator", fn_path="tools.translator:run",
-         cap_type="tool", description="Translate text to a target language via LLM",
-         available_to=["deep_research"])
-register("summarizer", fn_path="tools.summarizer:run",
-         cap_type="tool", description="Summarize text into key points via LLM",
-         available_to=["deep_research", "data_analyst"])
-register("code_executor", fn_path="tools.code_executor:run",
-         cap_type="tool", description="Execute Python code in a sandboxed subprocess",
-         available_to=["deep_research"])
-register("academic_search", fn_path="tools.academic_search:run",
-         cap_type="tool", description="Search Semantic Scholar and arXiv for academic papers",
-         available_to=[])
-register("exa_search", fn_path="tools.exa_search:run",
-         cap_type="tool", description="Deep AI-powered web search via Exa with text/highlights/summary extraction",
-         available_to=["search", "deep_research"])
-register("image_gen", fn_path="tools.image_gen:run",
-         cap_type="tool", description="Generate images from text prompts via Nano Banana2 API",
-         available_to=["deep_research", "data_analyst"])
-register("image_to_diagram", fn_path="tools.image_to_diagram:run",
-         cap_type="tool", description="Convert image to structured diagram JSON via vision model",
-         available_to=["doc_analyst", "deep_research"])
+register(
+    "web_search",
+    fn_path="tools.web_search:run",
+    cap_type="tool",
+    description="Search the web via Tavily and return results",
+    available_to=[],
+)
+register(
+    "brave_search",
+    fn_path="tools.brave_search:run",
+    cap_type="tool",
+    description="Search the web via Brave and return title/link/snippet results",
+    available_to=["search", "deep_research"],
+)
+register(
+    "translator",
+    fn_path="tools.translator:run",
+    cap_type="tool",
+    description="Translate text to a target language via LLM",
+    available_to=["deep_research"],
+)
+register(
+    "summarizer",
+    fn_path="tools.summarizer:run",
+    cap_type="tool",
+    description="Summarize text into key points via LLM",
+    available_to=["deep_research", "data_analyst"],
+)
+register(
+    "code_executor",
+    fn_path="tools.code_executor:run",
+    cap_type="tool",
+    description="Execute Python code in a sandboxed subprocess",
+    available_to=["deep_research"],
+)
+register(
+    "academic_search",
+    fn_path="tools.academic_search:run",
+    cap_type="tool",
+    description="Search Semantic Scholar and arXiv for academic papers",
+    available_to=[],
+)
+register(
+    "exa_search",
+    fn_path="tools.exa_search:run",
+    cap_type="tool",
+    description="Deep AI-powered web search via Exa with text/highlights/summary extraction",
+    available_to=["search", "deep_research"],
+)
+register(
+    "image_gen",
+    fn_path="tools.image_gen:run",
+    cap_type="tool",
+    description="Generate images from text prompts via Nano Banana2 API",
+    available_to=["deep_research", "data_analyst"],
+)
+register(
+    "image_to_diagram",
+    fn_path="tools.image_to_diagram:run",
+    cap_type="tool",
+    description="Convert image to structured diagram JSON via vision model",
+    available_to=["doc_analyst", "deep_research"],
+)
 
 # New Agents (V2)
-register("deep_research", fn_path="agents.deep_research:run",
-         cap_type="agent", description="Multi-round deep research with web + academic search")
+register(
+    "deep_research",
+    fn_path="agents.deep_research:run",
+    cap_type="agent",
+    description="Multi-round deep research with web + academic search",
+)
