@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from apps.web.config import settings
+from web.config import settings
 
 
 def _to_async_database_url(database_url: str) -> str:

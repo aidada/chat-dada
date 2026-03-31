@@ -39,13 +39,55 @@ class DomainRegistry:
 
 registry = DomainRegistry()
 
-# Register known domains — all using orchestrated versions
-from domain_agents.patent.orchestrated import run_patent_domain_orchestrated  # noqa: E402
-from domain_agents.ppt.orchestrated import run_ppt_domain_orchestrated  # noqa: E402
-from domain_agents.research.orchestrated import run_research_domain_orchestrated  # noqa: E402
-from domain_agents.zero_report.orchestrated import run_zero_report_domain_orchestrated  # noqa: E402
 
-registry.register("research", run_research_domain_orchestrated, aliases=["deep_research", "research"])
-registry.register("patent", run_patent_domain_orchestrated, aliases=["patent", "专利"])
-registry.register("zero_report", run_zero_report_domain_orchestrated, aliases=["zero_report", "zero report", "postmortem", "归零"])
-registry.register("ppt", run_ppt_domain_orchestrated, aliases=["ppt", "幻灯片", "powerpoint"])
+def auto_discover() -> None:
+    """Scan agent/domains/*/orchestrated.py and register any AgentProtocol subclasses.
+
+    Falls back to the legacy static imports when an ``orchestrated`` module does
+    not expose an AgentProtocol subclass.
+    """
+    import importlib
+    import logging
+    import pathlib
+
+    from agent.domains._base.protocol import AgentProtocol as _AP
+
+    _log = logging.getLogger("chatdada.domain_registry")
+    agents_root = pathlib.Path(__file__).resolve().parent.parent / "domains"
+
+    for child in sorted(agents_root.iterdir()):
+        if not child.is_dir() or child.name.startswith("_"):
+            continue
+        mod_path = child / "orchestrated.py"
+        if not mod_path.exists():
+            continue
+        module_name = f"agent.domains.{child.name}.orchestrated"
+        try:
+            mod = importlib.import_module(module_name)
+        except Exception:
+            _log.exception("Failed to import %s", module_name)
+            continue
+
+        # Prefer AgentProtocol subclass auto-registration
+        registered_via_protocol = False
+        for attr_name in dir(mod):
+            obj = getattr(mod, attr_name)
+            if isinstance(obj, type) and issubclass(obj, _AP) and obj is not _AP and hasattr(obj, "manifest"):
+                obj.register()
+                _log.info("Auto-registered agent: %s", obj.manifest.name)
+                registered_via_protocol = True
+
+        if registered_via_protocol:
+            continue
+
+        # Fallback: look for legacy run_*_domain_orchestrated function
+        for attr_name in dir(mod):
+            if attr_name.startswith("run_") and attr_name.endswith("_domain_orchestrated"):
+                runner = getattr(mod, attr_name)
+                domain = child.name
+                if not registry.is_registered(domain):
+                    registry.register(domain, runner, aliases=[domain])
+                    _log.info("Legacy-registered domain: %s", domain)
+
+
+auto_discover()

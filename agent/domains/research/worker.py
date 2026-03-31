@@ -12,7 +12,7 @@ from langgraph.graph.message import add_messages
 from langgraph.types import RetryPolicy
 from typing_extensions import TypedDict
 
-from capabilities.retrieval_cache import (
+from agent.capabilities.retrieval_cache import (
     RetrievalCache,
     RetrievalCacheEntry,
     build_query_fingerprint,
@@ -20,14 +20,14 @@ from capabilities.retrieval_cache import (
 from core.content_utils import extract_result_text, normalize_markdown_report
 from core.logger import record_monitor_event
 from core.models import get_llm
-from domain_agents.research.config import ResearchConfig
-from domain_agents.research.prompts import (
+from agent.domains.research.config import ResearchConfig
+from agent.domains.research.prompts import (
     build_draft_worker_messages,
     build_search_worker_messages,
     build_validate_worker_messages,
 )
-from domain_agents.research.schemas import ResearchModuleDraft, WorkerResult
-from domain_agents.research.utils import (
+from agent.domains.research.schemas import ResearchModuleDraft, WorkerResult
+from agent.domains.research.utils import (
     build_citation_bank,
     build_evidence_records,
     collect_urls,
@@ -35,7 +35,7 @@ from domain_agents.research.utils import (
     merge_evidence,
     module_dependency_context,
 )
-from tools.research_notes import set_research_context
+from agent.tools.research_notes import set_research_context
 
 log = logging.getLogger("chatdada.research_worker")
 
@@ -405,7 +405,7 @@ async def _execute_tool_call(tool_name: str, args: dict[str, Any], tools: dict[s
     metadata: dict[str, Any] = {}
 
     if tool_name == "academic_search":
-        from tools.academic_search import run as search_academic
+        from agent.tools.academic_search import run as search_academic
 
         base_result = await search_academic({"query": query})
         text = str(base_result.get("result", "") or "")

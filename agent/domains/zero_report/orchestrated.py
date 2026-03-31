@@ -12,9 +12,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from capabilities.citation_manager import CitationMap
-from capabilities.evidence_store import EvidenceCollection, EvidenceItem
-from domain_agents.zero_report.agent import (
+from agent.capabilities.citation_manager import CitationMap
+from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
+from agent.domains.zero_report.agent import (
     ZERO_REPORT_DATA_ROOT,
     ZeroReportDomainResult,
     _build_actions,
@@ -24,18 +24,18 @@ from domain_agents.zero_report.agent import (
     _build_timeline,
     _persist_artifacts,
 )
-from domain_agents.zero_report.prompts import (
+from agent.domains.zero_report.prompts import (
     ACTION_PLANNER_PROMPT,
     BASE_ZERO_REPORT_SYSTEM,
     ROOT_CAUSE_ANALYST_PROMPT,
     TIMELINE_BUILDER_PROMPT,
 )
-from domain_agents.zero_report.reviewers import ZeroReportReviewGate
-from domain_agents.zero_report.tools import get_zero_report_tools
-from task_platform.streaming import stream_nested_graph
+from agent.domains.zero_report.reviewers import ZeroReportReviewGate
+from agent.domains.zero_report.tools import get_zero_report_tools
+from agent.platform.streaming import stream_nested_graph
 
-from workflows.orchestrator import build_orchestrated_graph
-from workflows.spec import DomainSpec, SubagentConfig
+from agent.workflows.orchestrator import build_orchestrated_graph
+from agent.workflows.spec import DomainSpec, SubagentConfig
 
 _log = logging.getLogger("chatdada.zero_report.orchestrated")
 

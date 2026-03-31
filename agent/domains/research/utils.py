@@ -6,11 +6,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from capabilities.citation_manager import CitationMap
-from capabilities.evidence_store import EvidenceCollection, EvidenceItem
+from agent.capabilities.citation_manager import CitationMap
+from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
 from core.content_utils import extract_result_text, normalize_markdown_report
 
-from domain_agents.research.config import (
+from agent.domains.research.config import (
     DEFAULT_DELIVERABLE_TYPE,
     DEFAULT_RESEARCH_MODE,
     get_deliverable_profile,
@@ -18,7 +18,7 @@ from domain_agents.research.config import (
     resolve_deliverable_type,
     resolve_report_profile,
 )
-from domain_agents.research.schemas import (
+from agent.domains.research.schemas import (
     ResearchBrief,
     ResearchEvidence,
     ResearchModuleDraft,

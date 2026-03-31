@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 
-from domain_agents.research.worker import build_worker_graph, coordinate_modules, run_worker
+from agent.domains.research.worker import build_worker_graph, coordinate_modules, run_worker
 
 
 _LONG_DRAFT = (
@@ -49,7 +49,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
             "objective": "梳理文献并补齐引用。",
         }
 
-        with patch("domain_agents.research.worker.get_llm", return_value=_DraftOnlyLLM()):
+        with patch("agent.domains.research.worker.get_llm", return_value=_DraftOnlyLLM()):
             result = await run_worker(module, brief={"clarified_goal": "test"}, tools=[])
 
         self.assertEqual(result["module_id"], "related_work")
@@ -85,7 +85,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
         }
         module_status = {module["module_id"]: "pending" for module in plan["modules"]}
 
-        with patch("domain_agents.research.worker.get_llm", return_value=_DraftOnlyLLM()):
+        with patch("agent.domains.research.worker.get_llm", return_value=_DraftOnlyLLM()):
             result = await coordinate_modules(
                 plan=plan,
                 brief={"clarified_goal": "test"},
@@ -127,7 +127,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
             ]
         }
 
-        with patch("domain_agents.research.worker.get_llm", return_value=_EmptyLLM()):
+        with patch("agent.domains.research.worker.get_llm", return_value=_EmptyLLM()):
             result = await coordinate_modules(
                 plan=plan,
                 brief={"clarified_goal": "test"},
@@ -181,7 +181,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "worker_state": {"evidence_pack": [], "search_history": [], "query_fingerprints": {}, "search_round": 0, "last_search_metrics": {}},
             }
 
-        with patch("domain_agents.research.worker.run_worker", side_effect=_fake_run_worker):
+        with patch("agent.domains.research.worker.run_worker", side_effect=_fake_run_worker):
             result = await coordinate_modules(
                 plan=plan,
                 brief={"clarified_goal": "test"},
@@ -251,7 +251,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "worker_state": {"evidence_pack": [], "search_history": [], "query_fingerprints": {}, "search_round": 0, "last_search_metrics": {}},
             }
 
-        with patch("domain_agents.research.worker.run_worker", side_effect=_fake_run_worker):
+        with patch("agent.domains.research.worker.run_worker", side_effect=_fake_run_worker):
             result = await coordinate_modules(
                 plan=plan,
                 brief={"clarified_goal": "test"},

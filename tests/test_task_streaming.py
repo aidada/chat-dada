@@ -11,9 +11,9 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import main
-from agent_runtime.dispatcher import RouteDecision, route_task_request
-from agent_runtime.interaction import ask_user
-from agent_runtime.task_execution import TaskService
+from agent.runtime.dispatcher import RouteDecision, route_task_request
+from agent.runtime.interaction import ask_user
+from agent.runtime.task_execution import TaskService
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql://chatdada:chatdada@localhost:5432/chatdada"
@@ -185,8 +185,8 @@ def wait_for_status_http(
 class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._patchers = [
-            patch("agent_runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat),
-            patch("agent_runtime.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
+            patch("agent.runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat),
+            patch("agent.runtime.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
         ]
         for patcher in self._patchers:
             patcher.start()
@@ -347,7 +347,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.service._dispatcher = orchestrator_dispatcher
-        with patch("agent_runtime.root_graph.domain_registry.get", return_value=slow_domain_runner):
+        with patch("agent.runtime.root_graph.domain_registry.get", return_value=slow_domain_runner):
             snapshot = await self.service.submit_task(
                 task_text="帮我执行一个很慢的任务",
                 user_id="user-8",
@@ -416,13 +416,13 @@ class TaskRoutingTests(unittest.TestCase):
 
 class TaskEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
-        from apps.web import runtime as web_runtime
+        from web.web import runtime as web_runtime
 
         self._web_runtime = web_runtime
         self.original_service = web_runtime.task_service
         self._patchers = [
-            patch("agent_runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat),
-            patch("agent_runtime.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
+            patch("agent.runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat),
+            patch("agent.runtime.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
         ]
         for patcher in self._patchers:
             patcher.start()

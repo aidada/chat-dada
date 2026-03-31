@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from domain_agents.research.utils import fallback_brief, feedback_action, merge_brief
+from agent.domains.research.utils import fallback_brief, feedback_action, merge_brief
 
 
 class MergeBriefTests(unittest.TestCase):

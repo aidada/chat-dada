@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from apps.web import runtime as web_runtime
+from web.web import runtime as web_runtime
 
 
 class _FakeRequest:

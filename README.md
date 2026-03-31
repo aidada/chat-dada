@@ -39,6 +39,39 @@ tools/
 workflows/
 ```
 
+```
+chat-dada/
+├── web/                         # 🌐 WEB LAYER (Controller + HTTP)
+│   ├── app.py                   #   FastAPI app factory
+│   ├── config.py                #   WebSettings
+│   ├── runtime.py               #   TaskService wiring
+│   ├── routers/                 #   HTTP endpoints (auth, tasks, conversations...)
+│   ├── deps/                    #   FastAPI DI (auth, services, billing...)
+│   └── middleware/              #   Errors, sessions
+│
+├── agent/                       # 🤖 AGENT LAYER (全部 AI/LLM 相关)
+│   ├── runtime/                 #   ← agent_runtime/ (图执行引擎)
+│   ├── platform/                #   ← task_platform/ (任务编排 + 注册)
+│   ├── domains/                 #   ← domain_agents/ (research, patent, ppt, zero_report)
+│   ├── capabilities/            #   ← capabilities/ (review_gates, budget, memory...)
+│   ├── workflows/               #   ← workflows/ (通用编排框架)
+│   ├── tools/                   #   ← tools/ (search, image_gen, code_executor...)
+│   └── ppt_engine/              #   ← ppt_engine/ (PPT DSL 渲染)
+│
+├── domain/                      # 📦 DOMAIN LAYER (业务逻辑, 不变)
+│   ├── auth/, billing/, conversations/, tasks/, agents/
+│
+├── infra/                       # 🔧 INFRASTRUCTURE (db, oauth, events + 吸收 storage/)
+│   ├── db/  oauth/  events/
+│   └── storage/                 #   ← storage/ (user_store, user_models)
+│
+├── core/                        # ⚙️ SHARED UTILITIES (不变)
+│
+├── tests/  alembic/  scripts/  docs/  skills/    # 辅助
+├── data/  logs/  outputs/  uploads/               # 运行时数据
+├── main.py + pyproject.toml + Dockerfile + ...    # 配置
+```
+
 ## 当前能力
 
 ### 认证

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException
 
-from apps.web.config import settings
-from apps.web.deps.auth import get_current_user
+from web.config import settings
+from web.deps.auth import get_current_user
 
 
 async def get_admin_user(current_user=Depends(get_current_user)):

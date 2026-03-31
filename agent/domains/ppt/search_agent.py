@@ -11,7 +11,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from capabilities.toolkits.browser_toolkit import browser_navigate_task
+from agent.capabilities.toolkits.browser_toolkit import browser_navigate_task
 from core.content_utils import extract_text_content, normalize_markdown_report
 from core.models import get_browser_use_llm, get_llm
 from core.logger import log_async

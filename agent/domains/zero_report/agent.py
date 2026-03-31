@@ -8,14 +8,14 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
-from capabilities.budget_policy import BudgetPolicy
-from capabilities.citation_manager import CitationMap
-from capabilities.evidence_store import EvidenceCollection, EvidenceItem
+from agent.capabilities.budget_policy import BudgetPolicy
+from agent.capabilities.citation_manager import CitationMap
+from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
 from core.content_utils import extract_result_text
-from domain_agents.zero_report.prompts import BASE_ZERO_REPORT_SYSTEM
-from domain_agents.zero_report.renderers import render_zero_report_markdown
-from domain_agents.zero_report.reviewers import ZeroReportReviewGate
-from domain_agents.zero_report.schemas import (
+from agent.domains.zero_report.prompts import BASE_ZERO_REPORT_SYSTEM
+from agent.domains.zero_report.renderers import render_zero_report_markdown
+from agent.domains.zero_report.reviewers import ZeroReportReviewGate
+from agent.domains.zero_report.schemas import (
     ActionItem,
     ActionMatrix,
     IncidentFactSet,
@@ -25,8 +25,8 @@ from domain_agents.zero_report.schemas import (
     TimelineEvent,
     ZeroReportDraft,
 )
-from domain_agents.zero_report.tools import browser_collect_zero_report_context, get_zero_report_tools
-from task_platform.streaming import stream_nested_graph
+from agent.domains.zero_report.tools import browser_collect_zero_report_context, get_zero_report_tools
+from agent.platform.streaming import stream_nested_graph
 
 _log = logging.getLogger("chatdada.zero_report")
 
@@ -62,7 +62,7 @@ async def build_deepagents_zero_report_agent() -> object:
     """Build a deepagents-backed zero-report agent with 5 specialised subagents."""
     from deepagents import create_deep_agent
 
-    from domain_agents.zero_report.prompts import (
+    from agent.domains.zero_report.prompts import (
         ACTION_PLANNER_PROMPT,
         ROOT_CAUSE_ANALYST_PROMPT,
         TIMELINE_BUILDER_PROMPT,

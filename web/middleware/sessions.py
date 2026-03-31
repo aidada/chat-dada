@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
-from apps.web.config import settings
+from web.config import settings
 
 
 def install_session_middleware(app: FastAPI) -> None:

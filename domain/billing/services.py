@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import logging
 
-from apps.web.config import settings
-from capabilities.budget_policy import BudgetDecision, BudgetPolicy
+from web.config import settings
+from agent.capabilities.budget_policy import BudgetDecision, BudgetPolicy
 from domain.billing.schemas import QuotaPeriodView, UserQuotaUpdateRequest, UserQuotaView
 from sqlalchemy.exc import ProgrammingError
 from infra.db.repositories.quota_repo import UsageEventRepository, UserQuotaRepository

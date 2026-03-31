@@ -5,20 +5,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from domain_agents.patent.agent import run_patent_domain
-from domain_agents.research.orchestrated import run_research_domain_orchestrated
-from domain_agents.zero_report.agent import run_zero_report_domain
-from agent_runtime.dispatcher import RouteDecision
-from agent_runtime.dispatcher import build_route_payload, run_general_chat_task
-from agent_runtime.interaction import (
+from agent.domains.patent.agent import run_patent_domain
+from agent.domains.research.orchestrated import run_research_domain_orchestrated
+from agent.domains.zero_report.agent import run_zero_report_domain
+from agent.runtime.dispatcher import RouteDecision
+from agent.runtime.dispatcher import build_route_payload, run_general_chat_task
+from agent.runtime.interaction import (
     ask_user,
     reset_preloaded_user_replies,
     reset_task_interaction_handler,
     set_preloaded_user_replies,
     set_task_interaction_handler,
 )
-from agent_runtime.task_execution import _merge_nested_interrupt_pending
-from task_platform.streaming import extract_checkpoint_id, stream_nested_graph, translate_stream_part
+from agent.runtime.task_execution import _merge_nested_interrupt_pending
+from agent.platform.streaming import extract_checkpoint_id, stream_nested_graph, translate_stream_part
 
 
 class StreamingAdapterTests(unittest.TestCase):
@@ -288,7 +288,7 @@ class NestedGraphStreamingTests(unittest.IsolatedAsyncioTestCase):
             async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
                 yield {"type": "updates", "data": {"__interrupt__": (FakeInterrupt(),)}}
 
-        with patch("task_platform.interrupts.request_interrupt", side_effect=RuntimeError("propagated")) as mocked:
+        with patch("agent.platform.interrupts.request_interrupt", side_effect=RuntimeError("propagated")) as mocked:
             with self.assertRaisesRegex(RuntimeError, "propagated"):
                 await stream_nested_graph(FakeGraph(), {"messages": []})
         mocked.assert_called_once_with(
@@ -308,7 +308,7 @@ class NestedGraphStreamingTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("langgraph.config.get_config", return_value={"configurable": {"nested_interrupt_count": 2}}),
-            patch("task_platform.streaming._sync_parent_interrupt_state") as mocked_sync,
+            patch("agent.platform.streaming._sync_parent_interrupt_state") as mocked_sync,
         ):
             result = await stream_nested_graph(FakeGraph(), {"messages": []})
 
@@ -343,7 +343,7 @@ class GeneralChatStreamingTests(unittest.IsolatedAsyncioTestCase):
                 await on_chunk("partial")
             return {"result": "done"}
 
-        with patch("agent_runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat):
+        with patch("agent.runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat):
             result = await run_general_chat_task("hello", fake_on_step, user_id="u1")
 
         self.assertEqual(result, "done")
@@ -357,7 +357,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
     async def test_research_domain_wrapper_returns_reviewed_artifacts(self) -> None:
         from tempfile import TemporaryDirectory
         from unittest.mock import AsyncMock
-        from capabilities.memory import ResearchMemory as BaseResearchMemory
+        from agent.capabilities.memory import ResearchMemory as BaseResearchMemory
 
         with TemporaryDirectory() as tmp_dir:
             tmp_root = Path(tmp_dir)
@@ -367,7 +367,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "domain_agents.research.orchestrated.stream_nested_graph",
+                    "agent.domains.research.orchestrated.stream_nested_graph",
                     new=AsyncMock(
                         return_value={
                             "final_result": "## 文献综述正文\n\n研究结果 https://example.com/paper",
@@ -380,7 +380,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ) as mocked,
-                patch("domain_agents.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+                patch("agent.domains.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
             ):
                 result = await run_research_domain_orchestrated({"query": "test query", "task_id": "research_test"})
                 report_exists = (tmp_root / "research_test" / "final_report.md").exists()
@@ -408,7 +408,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
     async def test_research_orchestrated_wrapper_uses_stream_bridge(self) -> None:
         from tempfile import TemporaryDirectory
         from unittest.mock import AsyncMock, patch
-        from capabilities.memory import ResearchMemory as BaseResearchMemory
+        from agent.capabilities.memory import ResearchMemory as BaseResearchMemory
 
         with TemporaryDirectory() as tmp_dir:
             tmp_root = Path(tmp_dir)
@@ -418,7 +418,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "domain_agents.research.orchestrated.stream_nested_graph",
+                    "agent.domains.research.orchestrated.stream_nested_graph",
                     new=AsyncMock(
                         return_value={
                             "final_result": "research final https://example.com",
@@ -428,9 +428,9 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ) as mocked,
-                patch("domain_agents.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+                patch("agent.domains.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
             ):
-                from domain_agents.research.orchestrated import run_research_domain_orchestrated
+                from agent.domains.research.orchestrated import run_research_domain_orchestrated
 
                 result = await run_research_domain_orchestrated({"query": "研究主题", "task_id": "task_r"})
                 report_exists = (tmp_root / "task_r" / "final_report.md").exists()
@@ -455,7 +455,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
     async def test_research_orchestrated_wrapper_falls_back_to_aggregated_draft(self) -> None:
         from tempfile import TemporaryDirectory
         from unittest.mock import AsyncMock, patch
-        from capabilities.memory import ResearchMemory as BaseResearchMemory
+        from agent.capabilities.memory import ResearchMemory as BaseResearchMemory
 
         with TemporaryDirectory() as tmp_dir:
             tmp_root = Path(tmp_dir)
@@ -465,7 +465,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "domain_agents.research.orchestrated.stream_nested_graph",
+                    "agent.domains.research.orchestrated.stream_nested_graph",
                     new=AsyncMock(
                         return_value={
                             "aggregated_draft": "## 中间稿\n\n可作为最终兜底输出",
@@ -473,7 +473,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ),
-                patch("domain_agents.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+                patch("agent.domains.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
             ):
                 result = await run_research_domain_orchestrated({"query": "研究主题", "task_id": "task_r_fallback"})
 
@@ -484,8 +484,8 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         from tempfile import TemporaryDirectory
         from unittest.mock import AsyncMock, patch
 
-        from capabilities.memory import ResearchMemory as BaseResearchMemory
-        from domain_agents.research.workflow import CHECKPOINT_C_PROMPT
+        from agent.capabilities.memory import ResearchMemory as BaseResearchMemory
+        from agent.domains.research.workflow import CHECKPOINT_C_PROMPT
 
         with TemporaryDirectory() as tmp_dir:
             tmp_root = Path(tmp_dir)
@@ -513,11 +513,11 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "domain_agents.research.orchestrated.stream_nested_graph",
+                    "agent.domains.research.orchestrated.stream_nested_graph",
                     new=AsyncMock(),
                 ) as mocked_stream,
                 patch(
-                    "domain_agents.research.orchestrated.synthesize_final_payload",
+                    "agent.domains.research.orchestrated.synthesize_final_payload",
                     new=AsyncMock(
                         return_value={
                             "final_result": "## 最终研究输出\n\n已直接收束到最终稿。",
@@ -525,7 +525,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ) as mocked_synth,
-                patch("domain_agents.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+                patch("agent.domains.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
             ):
                 result = await run_research_domain_orchestrated(
                     {
@@ -580,7 +580,7 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
             patch("deepagents.create_deep_agent") as mocked,
             patch("core.models.build_chat_model", return_value=object()),
         ):
-            from domain_agents.patent.agent import build_deepagents_patent_agent
+            from agent.domains.patent.agent import build_deepagents_patent_agent
 
             mocked.return_value = object()
             result = await build_deepagents_patent_agent()
@@ -604,7 +604,7 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
             tmp_root = Path(tmp_dir)
             with (
                 patch(
-                    "domain_agents.patent.orchestrated.stream_nested_graph",
+                    "agent.domains.patent.orchestrated.stream_nested_graph",
                     new=AsyncMock(
                         return_value={
                             "final_result": "patent final",
@@ -613,10 +613,10 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ) as mocked,
-                patch("domain_agents.patent.agent.PATENT_DATA_ROOT", tmp_root),
-                patch("domain_agents.patent.orchestrated.PATENT_DATA_ROOT", tmp_root),
+                patch("agent.domains.patent.agent.PATENT_DATA_ROOT", tmp_root),
+                patch("agent.domains.patent.orchestrated.PATENT_DATA_ROOT", tmp_root),
             ):
-                from domain_agents.patent.orchestrated import run_patent_domain_orchestrated
+                from agent.domains.patent.orchestrated import run_patent_domain_orchestrated
 
                 result = await run_patent_domain_orchestrated({"query": "专利任务", "task_id": "task_p"})
                 report_exists = (tmp_root / "task_p" / "patent_draft.md").exists()
@@ -674,7 +674,7 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
             patch("deepagents.create_deep_agent") as mocked,
             patch("core.models.build_chat_model", return_value=object()),
         ):
-            from domain_agents.zero_report.agent import build_deepagents_zero_report_agent
+            from agent.domains.zero_report.agent import build_deepagents_zero_report_agent
 
             mocked.return_value = object()
             result = await build_deepagents_zero_report_agent()
@@ -698,7 +698,7 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
             tmp_root = Path(tmp_dir)
             with (
                 patch(
-                    "domain_agents.zero_report.orchestrated.stream_nested_graph",
+                    "agent.domains.zero_report.orchestrated.stream_nested_graph",
                     new=AsyncMock(
                         return_value={
                             "final_result": "zero report final",
@@ -707,10 +707,10 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ) as mocked,
-                patch("domain_agents.zero_report.agent.ZERO_REPORT_DATA_ROOT", tmp_root),
-                patch("domain_agents.zero_report.orchestrated.ZERO_REPORT_DATA_ROOT", tmp_root),
+                patch("agent.domains.zero_report.agent.ZERO_REPORT_DATA_ROOT", tmp_root),
+                patch("agent.domains.zero_report.orchestrated.ZERO_REPORT_DATA_ROOT", tmp_root),
             ):
-                from domain_agents.zero_report.orchestrated import run_zero_report_domain_orchestrated
+                from agent.domains.zero_report.orchestrated import run_zero_report_domain_orchestrated
 
                 result = await run_zero_report_domain_orchestrated({"query": "归零任务", "task_id": "task_z"})
                 report_exists = (tmp_root / "task_z" / "zero_report.md").exists()
@@ -771,7 +771,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         store.append_event = AsyncMock()
         store.finish_task = AsyncMock()
 
-        from agent_runtime.task_execution import TaskRunStore
+        from agent.runtime.task_execution import TaskRunStore
         await TaskRunStore._recover_interrupted_tasks(store)
 
         store.finish_task.assert_called_once_with("task_running", "failed")
@@ -793,7 +793,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         store.append_event = AsyncMock()
         store.finish_task = AsyncMock()
 
-        from agent_runtime.task_execution import TaskRunStore
+        from agent.runtime.task_execution import TaskRunStore
         await TaskRunStore._recover_interrupted_tasks(store)
 
         store.finish_task.assert_called_once_with("task_1", "failed")
@@ -827,7 +827,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
         from langgraph.checkpoint.memory import InMemorySaver
         from langgraph.types import Command
-        from agent_runtime.root_graph import build_root_graph
+        from agent.runtime.root_graph import build_root_graph
 
         async def fake_dispatcher(task_text, file_paths, mode, user_id):
             return RouteDecision(
@@ -881,7 +881,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
         from langgraph.checkpoint.memory import InMemorySaver
         from langgraph.types import Command
 
-        from agent_runtime.root_graph import build_root_graph
+        from agent.runtime.root_graph import build_root_graph
 
         class FakeInterrupt:
             def __init__(self, value):
@@ -974,7 +974,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
             "request_payload": {},
         }
 
-        with patch("agent_runtime.root_graph.domain_registry.get", return_value=fake_runner):
+        with patch("agent.runtime.root_graph.domain_registry.get", return_value=fake_runner):
             interrupted_payloads: list[dict] = []
             async for part in graph.astream(
                 initial_state,
@@ -1018,7 +1018,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_interrupt_path_completes(self) -> None:
         """High-confidence tasks should complete without interruption."""
         from langgraph.checkpoint.memory import InMemorySaver
-        from agent_runtime.root_graph import build_root_graph
+        from agent.runtime.root_graph import build_root_graph
 
         async def fake_dispatcher(task_text, file_paths, mode, user_id):
             return RouteDecision(
@@ -1052,7 +1052,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
         config = {"configurable": {"thread_id": "test_no_interrupt"}}
 
         interrupted = False
-        with patch("agent_runtime.dispatcher.run_general_chat_task", new=fake_general_chat):
+        with patch("agent.runtime.dispatcher.run_general_chat_task", new=fake_general_chat):
             async for part in graph.astream(
                 initial_state,
                 config=config,
@@ -1071,7 +1071,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
 
 class CitationMapTests(unittest.TestCase):
     def test_add_deduplicates_by_url(self) -> None:
-        from capabilities.citation_manager import CitationMap
+        from agent.capabilities.citation_manager import CitationMap
 
         cm = CitationMap()
         c1 = cm.add("https://example.com/a", title="Page A")
@@ -1080,7 +1080,7 @@ class CitationMapTests(unittest.TestCase):
         self.assertEqual(len(cm.all()), 1)
 
     def test_sequential_numbering(self) -> None:
-        from capabilities.citation_manager import CitationMap
+        from agent.capabilities.citation_manager import CitationMap
 
         cm = CitationMap()
         c1 = cm.add("https://a.com")
@@ -1091,7 +1091,7 @@ class CitationMapTests(unittest.TestCase):
         self.assertEqual(c3.citation_id, 3)
 
     def test_render_footnotes(self) -> None:
-        from capabilities.citation_manager import CitationMap
+        from agent.capabilities.citation_manager import CitationMap
 
         cm = CitationMap()
         cm.add("https://a.com", title="Site A")
@@ -1101,7 +1101,7 @@ class CitationMapTests(unittest.TestCase):
         self.assertIn("[2] https://b.com", text)
 
     def test_render_markdown_references(self) -> None:
-        from capabilities.citation_manager import CitationMap
+        from agent.capabilities.citation_manager import CitationMap
 
         cm = CitationMap()
         cm.add("https://a.com", title="Site A")
@@ -1110,7 +1110,7 @@ class CitationMapTests(unittest.TestCase):
         self.assertIn("[Site A](https://a.com)", md)
 
     def test_to_dicts(self) -> None:
-        from capabilities.citation_manager import CitationMap
+        from agent.capabilities.citation_manager import CitationMap
 
         cm = CitationMap()
         cm.add("https://a.com", title="A")
@@ -1120,7 +1120,7 @@ class CitationMapTests(unittest.TestCase):
         self.assertEqual(dicts[0]["citation_id"], 1)
 
     def test_url_normalization(self) -> None:
-        from capabilities.citation_manager import CitationMap
+        from agent.capabilities.citation_manager import CitationMap
 
         cm = CitationMap()
         c1 = cm.add("https://example.com/path/")
@@ -1130,7 +1130,7 @@ class CitationMapTests(unittest.TestCase):
 
 class EvidenceCollectionTests(unittest.TestCase):
     def test_add_and_filter_by_type(self) -> None:
-        from capabilities.evidence_store import EvidenceCollection, EvidenceItem
+        from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
 
         ec = EvidenceCollection(task_id="test")
         ec.add(EvidenceItem(evidence_id="1", evidence_type="url", source="https://a.com"))
@@ -1143,7 +1143,7 @@ class EvidenceCollectionTests(unittest.TestCase):
         self.assertEqual(len(quotes), 1)
 
     def test_sources_are_deduplicated_and_ordered(self) -> None:
-        from capabilities.evidence_store import EvidenceCollection, EvidenceItem
+        from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
 
         ec = EvidenceCollection(task_id="test")
         ec.add(EvidenceItem(evidence_id="1", evidence_type="url", source="https://a.com"))
@@ -1155,7 +1155,7 @@ class EvidenceCollectionTests(unittest.TestCase):
 
 class ResearchEvidenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_research_builds_evidence_from_urls_in_report(self) -> None:
-        from domain_agents.research.utils import build_evidence_and_citations
+        from agent.domains.research.utils import build_evidence_and_citations
 
         evidence, citations = build_evidence_and_citations(
             "test_task",
@@ -1166,7 +1166,7 @@ class ResearchEvidenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("https://example.com/paper1", evidence.sources())
 
     async def test_research_builds_evidence_from_worker_results(self) -> None:
-        from domain_agents.research.utils import build_evidence_and_citations
+        from agent.domains.research.utils import build_evidence_and_citations
 
         workers = [
             {"subtask_id": "s1", "topic": "ML", "findings": "Found at https://arxiv.org/abs/1234"},

@@ -6,8 +6,9 @@ Design:
 - LLM handles ambiguous states (~20%)
 - Every decision is recorded in step_history for tracing
 - Follows the project's existing pattern: keyword rules + confidence scoring
-  (same approach as runtime/task_dispatcher.py and task_platform/router.py)
+  (same approach as agent/runtime/dispatcher.py and agent/platform/domain_registry.py)
 """
+
 from __future__ import annotations
 
 import logging
@@ -22,21 +23,23 @@ _log = logging.getLogger("chatdada.strategy_selector")
 
 # ── Strategy enum ────────────────────────────────────────────────────────────
 
+
 class StrategyName(str, Enum):
-    SEQUENTIAL = "sequential"   # 顺序
-    PARALLEL = "parallel"       # 并行
-    ITERATIVE = "iterative"     # 迭代
-    PLANNING = "planning"       # 规划
+    SEQUENTIAL = "sequential"  # 顺序
+    PARALLEL = "parallel"  # 并行
+    ITERATIVE = "iterative"  # 迭代
+    PLANNING = "planning"  # 规划
 
 
 # ── Selection result ─────────────────────────────────────────────────────────
 
+
 @dataclass(frozen=True)
 class SelectionResult:
     strategy: StrategyName
-    confidence: float          # 0.0 – 1.0
+    confidence: float  # 0.0 – 1.0
     reasoning: str
-    source: str                # "rule" | "llm" | "llm_fallback"
+    source: str  # "rule" | "llm" | "llm_fallback"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,8 +56,19 @@ class SelectionResult:
 # Returning None means "I can't decide" → fall through to next rule or LLM.
 
 _MULTI_STEP_HINTS = (
-    "同时", "并且", "以及", "还要", "还需要", "先", "再",
-    "分析", "对比", "综合", "compared", "analyze", "multiple",
+    "同时",
+    "并且",
+    "以及",
+    "还要",
+    "还需要",
+    "先",
+    "再",
+    "分析",
+    "对比",
+    "综合",
+    "compared",
+    "analyze",
+    "multiple",
 )
 
 RULE_CONFIDENCE_THRESHOLD = 0.75
@@ -175,10 +189,10 @@ def _rule_domain_hints(
 
 # Rule chain — evaluated in priority order
 _RULES: list = [
-    _rule_needs_refinement,              # P1: quality feedback
+    _rule_needs_refinement,  # P1: quality feedback
     _rule_has_pending_parallel_subtasks,  # P2: exploit existing plan
-    _rule_complex_goal_no_plan,          # P3: create plan if needed
-    _rule_single_pending_or_simple,      # P4: default sequential
+    _rule_complex_goal_no_plan,  # P3: create plan if needed
+    _rule_single_pending_or_simple,  # P4: default sequential
     # _rule_domain_hints is handled separately (needs strategy_hints param)
 ]
 
@@ -211,10 +225,11 @@ def rule_based_select(
 
 # ── LLM-based layer ──────────────────────────────────────────────────────────
 
+
 class LLMStrategyDecision(BaseModel):
     """Structured output schema for LLM strategy selection."""
 
-    strategy: str   # "sequential" | "parallel" | "iterative" | "planning"
+    strategy: str  # "sequential" | "parallel" | "iterative" | "planning"
     reasoning: str  # one-sentence justification
 
 
@@ -272,10 +287,12 @@ async def llm_select(state: dict[str, Any]) -> SelectionResult:
     try:
         llm = get_llm("orchestrator")
         structured_llm = llm.with_structured_output(LLMStrategyDecision)
-        decision: LLMStrategyDecision = await structured_llm.ainvoke([
-            SystemMessage(content=_STRATEGY_SELECTOR_SYSTEM),
-            HumanMessage(content=prompt),
-        ])
+        decision: LLMStrategyDecision = await structured_llm.ainvoke(
+            [
+                SystemMessage(content=_STRATEGY_SELECTOR_SYSTEM),
+                HumanMessage(content=prompt),
+            ]
+        )
         strategy = StrategyName(decision.strategy)
         return SelectionResult(
             strategy=strategy,
@@ -294,6 +311,7 @@ async def llm_select(state: dict[str, Any]) -> SelectionResult:
 
 
 # ── Hybrid entry point (LangGraph node factory) ─────────────────────────────
+
 
 def make_strategy_selector(strategy_hints: list[str] | None = None):
     """Factory: returns a LangGraph node function for strategy selection.

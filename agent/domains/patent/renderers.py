@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from domain_agents.patent.schemas import ClaimTree, PriorArtMatrix, SpecDraft, TechnicalDisclosure
+from agent.domains.patent.schemas import ClaimTree, PriorArtMatrix, SpecDraft, TechnicalDisclosure
 
 
 def render_patent_markdown(
@@ -48,7 +48,7 @@ def render_patent_pptx(
     output_path: str,
 ) -> str:
     """Render a patent draft as .pptx via the shared PPT capability."""
-    from capabilities.ppt_capability import markdown_to_deck, render_deck_to_pptx
+    from agent.capabilities.ppt_capability import markdown_to_deck, render_deck_to_pptx
 
     md = render_patent_markdown(disclosure, claim_tree, matrix, spec_draft)
     deck = markdown_to_deck(disclosure.title or "Patent Draft", md)

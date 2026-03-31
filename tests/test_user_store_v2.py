@@ -5,8 +5,8 @@ import unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from storage.user_models import UserFact, Project, UserMemoryData
-from storage.user_store_v2 import MemoryStoreV2, MemoryRecallV2
+from infra.storage.user_models import UserFact, Project, UserMemoryData
+from infra.storage.user_store_v2 import MemoryStoreV2, MemoryRecallV2
 
 STALE_DAYS = 14
 
@@ -128,7 +128,7 @@ class RememberTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, prompt):
                 return AIMessage(content='[{"category": "identity", "content": "博士生"}]')
 
-        with patch("storage.user_store_v2.get_llm", return_value=_MockLLM()):
+        with patch("infra.storage.user_store_v2.get_llm", return_value=_MockLLM()):
             await self.store.remember("test_user", "我是博士生", "好的", intent="chat")
 
         mem = UserMemoryData.load(self.root / "test_user")
@@ -144,7 +144,7 @@ class RememberTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, prompt):
                 return AIMessage(content='[]')
 
-        with patch("storage.user_store_v2.get_llm", return_value=_MockLLM()):
+        with patch("infra.storage.user_store_v2.get_llm", return_value=_MockLLM()):
             await self.store.remember("test_user", "hello", "hi", intent="chat")
 
         hot_dir = self.root / "test_user" / "timeline" / "hot"
@@ -160,7 +160,7 @@ class RememberTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, prompt):
                 return AIMessage(content='[{"category": "project", "content": "GNSS NLOS 检测论文"}]')
 
-        with patch("storage.user_store_v2.get_llm", return_value=_MockLLM()):
+        with patch("infra.storage.user_store_v2.get_llm", return_value=_MockLLM()):
             await self.store.remember("test_user", "我在做GNSS论文", "好的", intent="research")
 
         mem = UserMemoryData.load(self.root / "test_user")
@@ -194,7 +194,7 @@ class MergeTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, prompt):
                 return AIMessage(content='[{"id": "merged_1", "category": "identity", "content": "merged fact", "confidence": 0.8}]')
 
-        with patch("storage.user_store_v2.get_llm", return_value=_MergeLLM()):
+        with patch("infra.storage.user_store_v2.get_llm", return_value=_MergeLLM()):
             recall = await self.store.recall_with_merge("test_user", "test")
 
         # After merge, pending should be cleared

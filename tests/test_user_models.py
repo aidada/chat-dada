@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from storage.user_models import UserFact, Project, UserMemoryData
+from infra.storage.user_models import UserFact, Project, UserMemoryData
 
 
 class UserFactTests(unittest.TestCase):

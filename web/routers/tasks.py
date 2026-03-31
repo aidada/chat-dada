@@ -6,14 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from apps.web import runtime as web_runtime
-from apps.web.deps import (
+from web.web import runtime as web_runtime
+from web.deps import (
     ensure_owner_or_404,
     get_current_user,
     get_task_execution_service,
     resolve_current_user_once_with_metadata,
 )
-from capabilities.memory import ResearchMemory
+from agent.capabilities.memory import ResearchMemory
 from domain.tasks.services import TaskExecutionService
 
 router = APIRouter(tags=["tasks"])

@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from apps.web.runtime import OUTPUTS_DIR, UPLOAD_DIR, index_response, save_upload
+from web.runtime import OUTPUTS_DIR, UPLOAD_DIR, index_response, save_upload
 
 router = APIRouter(tags=["files"])
 

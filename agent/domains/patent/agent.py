@@ -8,14 +8,14 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
-from capabilities.budget_policy import BudgetPolicy
-from capabilities.citation_manager import CitationMap
-from capabilities.evidence_store import EvidenceCollection, EvidenceItem
+from agent.capabilities.budget_policy import BudgetPolicy
+from agent.capabilities.citation_manager import CitationMap
+from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
 from core.content_utils import extract_result_text
-from domain_agents.patent.prompts import PATENT_DOMAIN_PROMPT
-from domain_agents.patent.renderers import render_patent_markdown
-from domain_agents.patent.reviewers import PatentReviewGate
-from domain_agents.patent.schemas import (
+from agent.domains.patent.prompts import PATENT_DOMAIN_PROMPT
+from agent.domains.patent.renderers import render_patent_markdown
+from agent.domains.patent.reviewers import PatentReviewGate
+from agent.domains.patent.schemas import (
     ClaimNode,
     ClaimTree,
     PatentRiskNote,
@@ -25,8 +25,8 @@ from domain_agents.patent.schemas import (
     SpecDraft,
     TechnicalDisclosure,
 )
-from domain_agents.patent.tools import browser_verify_patent_page, get_patent_tools
-from task_platform.streaming import stream_nested_graph
+from agent.domains.patent.tools import browser_verify_patent_page, get_patent_tools
+from agent.platform.streaming import stream_nested_graph
 
 _log = logging.getLogger("chatdada.patent")
 
@@ -62,7 +62,7 @@ async def build_deepagents_patent_agent() -> object:
     """Build a deepagents-backed patent agent with 5 specialised subagents."""
     from deepagents import create_deep_agent
 
-    from domain_agents.patent.prompts import (
+    from agent.domains.patent.prompts import (
         CLAIM_DRAFTER_PROMPT,
         DISCLOSURE_ANALYST_PROMPT,
         PATENT_REVIEWER_PROMPT,

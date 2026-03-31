@@ -5,7 +5,7 @@ import time
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.web.config import settings
+from web.config import settings
 from domain.auth.services import AuthService
 from infra.db.session import SessionFactory, get_db_session
 

@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.models import get_llm, response_text
 from core.logger import log_async
-from ppt_engine.dsl_schema import SlideDeck
+from agent.ppt_engine.dsl_schema import SlideDeck
 
 
 WRITER_SYSTEM = """你是一个专业的 PPT 内容撰写专家。你会收到：

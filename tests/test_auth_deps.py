@@ -4,7 +4,7 @@ import unittest
 
 from fastapi import HTTPException
 
-from apps.web.deps import ensure_owner_or_404, resolve_request_user_id
+from web.deps import ensure_owner_or_404, resolve_request_user_id
 
 
 class _User:

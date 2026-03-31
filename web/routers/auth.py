@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from authlib.integrations.base_client.errors import OAuthError
 
-from apps.web.config import settings
-from apps.web.deps import get_auth_service, get_current_user
+from web.config import settings
+from web.deps import get_auth_service, get_current_user
 from domain.auth.schemas import AuthResponse, AuthUserView, LoginRequest, RegisterRequest
 from domain.auth.services import AuthService
 from infra.oauth.google import get_google_client

@@ -10,7 +10,7 @@ from pptx.enum.chart import XL_CHART_TYPE
 from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
 
-from ppt_engine.dsl_schema import SlideDeck, Slide, ChartData
+from agent.ppt_engine.dsl_schema import SlideDeck, Slide, ChartData
 
 
 # Theme color palettes

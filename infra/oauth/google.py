@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from authlib.integrations.starlette_client import OAuth
 
-from apps.web.config import settings
+from web.config import settings
 
 
 oauth = OAuth()

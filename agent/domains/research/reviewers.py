@@ -3,15 +3,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from capabilities.review_gates import (
+from agent.capabilities.review_gates import (
     ReviewDimension,
     ReviewGate,
     ReviewIssue,
     ReviewResult,
     RevisionTarget,
 )
-from domain_agents.research.config import get_deliverable_profile
-from domain_agents.research.utils import collect_urls
+from agent.domains.research.config import get_deliverable_profile
+from agent.domains.research.utils import collect_urls
 
 
 def _section_alias_groups(deliverable_type: str) -> list[tuple[str, ...]]:

@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from capabilities.memory import ResearchMemory
-from domain_agents.research.schemas import ResearchDomainResult
-from domain_agents.research.utils import (
+from agent.capabilities.memory import ResearchMemory
+from agent.domains.research.schemas import ResearchDomainResult
+from agent.domains.research.utils import (
     build_evidence_and_citations,
     collect_artifact_refs,
     fallback_brief,
@@ -22,12 +22,12 @@ from domain_agents.research.utils import (
     persist_evidence_and_citations,
     strategy_summary,
 )
-from domain_agents.research.workflow import (
+from agent.domains.research.workflow import (
     CHECKPOINT_C_PROMPT,
     build_research_workflow_graph,
     synthesize_final_payload,
 )
-from task_platform.streaming import stream_nested_graph
+from agent.platform.streaming import stream_nested_graph
 
 _log = logging.getLogger("chatdada.research.orchestrated")
 _graph = build_research_workflow_graph()

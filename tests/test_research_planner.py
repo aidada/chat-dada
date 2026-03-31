@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 
-from capabilities.planner import (
+from agent.capabilities.planner import (
     ResearchPlan,
     ResearchSubtask,
     _parse_plan_json,
@@ -94,7 +94,7 @@ class ResearchPlannerTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, messages):
                 return AIMessage(content=plan_json)
 
-        with patch("capabilities.planner.get_llm", return_value=_MockLLM()):
+        with patch("agent.capabilities.planner.get_llm", return_value=_MockLLM()):
             plan = await generate_research_plan("GNSS NLOS detection")
 
         self.assertEqual(plan.clarified_goal, "Understand GNSS NLOS detection")
@@ -121,13 +121,13 @@ Done."""
             await generate_research_plan("")
 
     def test_plan_to_dict_includes_version(self) -> None:
-        from capabilities.planner import PLAN_VERSION
+        from agent.capabilities.planner import PLAN_VERSION
         plan = ResearchPlan(original_query="test")
         data = plan.to_dict()
         self.assertEqual(data["_version"], PLAN_VERSION)
 
     def test_subtask_to_dict_includes_version(self) -> None:
-        from capabilities.planner import SUBTASK_VERSION
+        from agent.capabilities.planner import SUBTASK_VERSION
         st = ResearchSubtask(id="sub_1", topic="test")
         data = st.to_dict()
         self.assertEqual(data["_version"], SUBTASK_VERSION)
@@ -137,7 +137,7 @@ Done."""
             async def ainvoke(self, messages):
                 return AIMessage(content="This is not valid JSON at all")
 
-        with patch("capabilities.planner.get_llm", return_value=_BadJsonLLM()):
+        with patch("agent.capabilities.planner.get_llm", return_value=_BadJsonLLM()):
             plan = await generate_research_plan("GNSS test")
 
         # Should fallback to single-subtask plan

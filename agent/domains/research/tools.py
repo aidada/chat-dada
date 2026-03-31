@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
-from agent_runtime.interaction import ask_user
-from capabilities.toolkits.browser_toolkit import browser_navigate_task
+from agent.runtime.interaction import ask_user
+from agent.capabilities.toolkits.browser_toolkit import browser_navigate_task
 from core.models import get_browser_use_llm
-from tools.research_notes import save_research_note, recall_research_notes
-from tools.brave_search import run as run_brave_search
+from agent.tools.research_notes import save_research_note, recall_research_notes
+from agent.tools.brave_search import run as run_brave_search
 
 try:
     from langchain_community.tools.tavily_search import TavilySearchResults
@@ -29,7 +29,7 @@ async def web_search(query: str) -> str:
 @tool
 async def academic_search(query: str) -> str:
     """搜索学术论文元信息，适合补齐作者、题目、引用线索和交叉验证。"""
-    from tools.academic_search import run as search_academic
+    from agent.tools.academic_search import run as search_academic
     result = await search_academic({"query": query})
     return result.get("result", "No results")
 
@@ -60,7 +60,7 @@ async def exa_deep_search(
     - `mode="full_text"`：抓取正文并返回结构化结果，适合核查实验细节、方法步骤、claim 边界。
     - `structured_schema_json`：传 JSON Schema，让 Exa 返回结构化摘要。
     """
-    from tools.exa_search import run as search_exa
+    from agent.tools.exa_search import run as search_exa
 
     result = await search_exa(
         {

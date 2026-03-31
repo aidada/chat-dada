@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from core.models import get_llm, response_text
-from storage.user_models import UserFact, Project, UserMemoryData
+from infra.storage.user_models import UserFact, Project, UserMemoryData
 
 OFFLINE_THRESHOLD_DAYS = 14
 CONFIDENCE_DECAY = 0.7

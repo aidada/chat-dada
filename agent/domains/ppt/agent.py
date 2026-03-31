@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from core.logger import log_async
 from core.models import get_llm, response_text
-from storage.user_store_v2 import MemoryStoreV2
+from infra.storage.user_store_v2 import MemoryStoreV2
 
 _log = logging.getLogger("chatdada.ppt")
 
@@ -73,10 +73,10 @@ def _extract_json(text: str) -> str:
 @log_async("ppt", "run_ppt_domain")
 async def run_ppt_domain(input_data: dict[str, Any]) -> PptDomainResult:
     """Domain runner for PPT generation tasks."""
-    from domain_agents.ppt.search_agent import run_search
-    from domain_agents.ppt.doc_agent import run_doc_analysis
-    from domain_agents.ppt.writer_agent import run_writer
-    from ppt_engine.renderer import render_pptx
+    from agent.domains.ppt.search_agent import run_search
+    from agent.domains.ppt.doc_agent import run_doc_analysis
+    from agent.domains.ppt.writer_agent import run_writer
+    from agent.ppt_engine.renderer import render_pptx
 
     query = input_data.get("query") or input_data.get("task", "")
     task_id = input_data.get("task_id", "ppt_unknown")

@@ -380,7 +380,7 @@ async def stream_nested_graph(
             writer(payload)
 
     if pending_interrupt_payload is not None:
-        from task_platform.interrupts import request_interrupt
+        from agent.platform.interrupts import request_interrupt
 
         request_interrupt(pending_interrupt_payload)
 

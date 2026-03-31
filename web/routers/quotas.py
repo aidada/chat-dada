@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from apps.web.deps import get_admin_user, get_current_user, get_quota_service
+from web.deps import get_admin_user, get_current_user, get_quota_service
 from domain.billing.schemas import UserQuotaUpdateRequest, UserQuotaView
 from domain.billing.services import QuotaService
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from capabilities.review_gates import ReviewGate
+from agent.capabilities.review_gates import ReviewGate
 
 
 @dataclass

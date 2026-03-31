@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.web.config import settings
+from web.config import settings
 from domain.auth.password import hash_password, verify_password
 from infra.db.repositories.session_repo import SessionRepository
 from infra.db.repositories.user_repo import UserRepository

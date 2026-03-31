@@ -5,8 +5,8 @@ import unittest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from apps.web.deps import get_admin_user, get_current_user, get_quota_service
-from apps.web.routers.quotas import router as quota_router
+from web.deps import get_admin_user, get_current_user, get_quota_service
+from web.routers.quotas import router as quota_router
 from domain.billing.schemas import UserQuotaView
 
 

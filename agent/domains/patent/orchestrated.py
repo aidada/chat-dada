@@ -12,9 +12,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from capabilities.citation_manager import CitationMap
-from capabilities.evidence_store import EvidenceCollection, EvidenceItem
-from domain_agents.patent.agent import (
+from agent.capabilities.citation_manager import CitationMap
+from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
+from agent.domains.patent.agent import (
     PATENT_DATA_ROOT,
     PatentDomainResult,
     _build_claim_tree,
@@ -23,7 +23,7 @@ from domain_agents.patent.agent import (
     _build_spec,
     _persist_artifacts,
 )
-from domain_agents.patent.prompts import (
+from agent.domains.patent.prompts import (
     CLAIM_DRAFTER_PROMPT,
     DISCLOSURE_ANALYST_PROMPT,
     PATENT_DOMAIN_PROMPT,
@@ -31,12 +31,12 @@ from domain_agents.patent.prompts import (
     PRIOR_ART_RESEARCHER_PROMPT,
     SPECIFICATION_DRAFTER_PROMPT,
 )
-from domain_agents.patent.reviewers import PatentReviewGate
-from domain_agents.patent.tools import get_patent_tools
-from task_platform.streaming import stream_nested_graph
+from agent.domains.patent.reviewers import PatentReviewGate
+from agent.domains.patent.tools import get_patent_tools
+from agent.platform.streaming import stream_nested_graph
 
-from workflows.orchestrator import build_orchestrated_graph
-from workflows.spec import DomainSpec, SubagentConfig
+from agent.workflows.orchestrator import build_orchestrated_graph
+from agent.workflows.spec import DomainSpec, SubagentConfig
 
 _log = logging.getLogger("chatdada.patent.orchestrated")
 

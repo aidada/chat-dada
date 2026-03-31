@@ -19,9 +19,9 @@ from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from core.content_utils import extract_result_text
-from task_platform.streaming import stream_nested_graph
-from workflows.spec import DomainSpec
-from workflows.strategy_selector import make_strategy_selector
+from agent.platform.streaming import stream_nested_graph
+from agent.workflows.spec import DomainSpec
+from agent.workflows.strategy_selector import make_strategy_selector
 
 _log = logging.getLogger("chatdada.orchestrator")
 

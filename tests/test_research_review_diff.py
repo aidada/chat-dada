@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from domain_agents.research.workflow import evaluate_draft_node
+from agent.domains.research.workflow import evaluate_draft_node
 
 
 class ResearchReviewDiffTests(unittest.IsolatedAsyncioTestCase):
@@ -81,7 +81,7 @@ class ResearchReviewDiffTests(unittest.IsolatedAsyncioTestCase):
             "workflow_trace": [],
         }
 
-        with patch("domain_agents.research.workflow.ResearchReviewGate.evaluate", return_value=review):
+        with patch("agent.domains.research.workflow.ResearchReviewGate.evaluate", return_value=review):
             result = await evaluate_draft_node(state)
 
         diff = result["last_evaluation_diff"]
@@ -129,7 +129,7 @@ class ResearchReviewDiffTests(unittest.IsolatedAsyncioTestCase):
             "workflow_trace": [],
         }
 
-        with patch("domain_agents.research.workflow.ResearchReviewGate.evaluate", return_value=review):
+        with patch("agent.domains.research.workflow.ResearchReviewGate.evaluate", return_value=review):
             result = await evaluate_draft_node(state)
 
         self.assertEqual(result["module_status"]["related_work"], "blocked")

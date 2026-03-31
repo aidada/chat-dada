@@ -32,7 +32,7 @@ class ExaSearchTests(unittest.IsolatedAsyncioTestCase):
         with patch("tools.exa_search.HAS_EXA", True), \
              patch("tools.exa_search.Exa", return_value=mock_exa_instance), \
              patch.dict("os.environ", {"EXA_API_KEY": "test-key"}):
-            from tools.exa_search import run
+            from agent.tools.exa_search import run
             result = await run("GNSS multipath")
 
         self.assertEqual(result["status"], "ok")
@@ -52,7 +52,7 @@ class ExaSearchTests(unittest.IsolatedAsyncioTestCase):
         with patch("tools.exa_search.HAS_EXA", True), \
              patch("tools.exa_search.Exa", return_value=mock_exa_instance), \
              patch.dict("os.environ", {"EXA_API_KEY": "test-key"}):
-            from tools.exa_search import run
+            from agent.tools.exa_search import run
             result = await run({
                 "query": "GNSS",
                 "type": "deep",
@@ -72,7 +72,7 @@ class ExaSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_no_library(self):
         """Missing exa_py should return graceful fallback."""
         with patch("tools.exa_search.HAS_EXA", False):
-            from tools.exa_search import run
+            from agent.tools.exa_search import run
             result = await run("test query")
 
         self.assertEqual(result["status"], "ok")
@@ -82,7 +82,7 @@ class ExaSearchTests(unittest.IsolatedAsyncioTestCase):
         """Missing API key should return graceful fallback."""
         with patch("tools.exa_search.HAS_EXA", True), \
              patch.dict("os.environ", {}, clear=True):
-            from tools.exa_search import run
+            from agent.tools.exa_search import run
             result = await run("test query")
 
         self.assertEqual(result["status"], "ok")
@@ -96,7 +96,7 @@ class ExaSearchTests(unittest.IsolatedAsyncioTestCase):
         with patch("tools.exa_search.HAS_EXA", True), \
              patch("tools.exa_search.Exa", return_value=mock_exa_instance), \
              patch.dict("os.environ", {"EXA_API_KEY": "test-key"}):
-            from tools.exa_search import run
+            from agent.tools.exa_search import run
             result = await run("test query")
 
         self.assertEqual(result["status"], "error")
@@ -112,7 +112,7 @@ class ExaSearchTests(unittest.IsolatedAsyncioTestCase):
         with patch("tools.exa_search.HAS_EXA", True), \
              patch("tools.exa_search.Exa", return_value=mock_exa_instance), \
              patch.dict("os.environ", {"EXA_API_KEY": "test-key"}):
-            from tools.exa_search import run
+            from agent.tools.exa_search import run
             await run({"query": "test", "category": "invalid_cat"})
 
         call_kwargs = mock_exa_instance.search.call_args[1]
@@ -160,7 +160,7 @@ class ExaSearchTests(unittest.IsolatedAsyncioTestCase):
         with patch("tools.exa_search.HAS_EXA", True), \
              patch("tools.exa_search.Exa", return_value=mock_exa_instance), \
              patch.dict("os.environ", {"EXA_API_KEY": "test-key"}):
-            from tools.exa_search import run
+            from agent.tools.exa_search import run
             result = await run({
                 "query": "GNSS multipath",
                 "result_mode": "full_text",

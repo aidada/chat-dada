@@ -4,7 +4,7 @@ import unittest
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from capabilities.progress_tracker import (
+from agent.capabilities.progress_tracker import (
     MAX_KEY_FINDINGS,
     TRACKER_VERSION,
     ProgressTracker,

@@ -18,7 +18,7 @@ def render_markdown(report: str, *, title: str = "", timestamp: str = "") -> str
 
 def render_pptx(report: str, output_path: str, *, title: str = "Research Report") -> str:
     """通过共享 PPT 能力把研究报告渲染为 `.pptx`。"""
-    from capabilities.ppt_capability import markdown_to_deck, render_deck_to_pptx
+    from agent.capabilities.ppt_capability import markdown_to_deck, render_deck_to_pptx
 
     deck = markdown_to_deck(title, report)
     return render_deck_to_pptx(deck, output_path)

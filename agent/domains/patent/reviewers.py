@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from capabilities.review_gates import ReviewGate, ReviewIssue
-from domain_agents.patent.schemas import ClaimTree, SpecDraft
+from agent.capabilities.review_gates import ReviewGate, ReviewIssue
+from agent.domains.patent.schemas import ClaimTree, SpecDraft
 
 
 class PatentReviewGate(ReviewGate):

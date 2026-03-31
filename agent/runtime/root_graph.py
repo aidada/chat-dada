@@ -8,12 +8,12 @@ from langgraph.config import get_stream_writer
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 
-from agent_runtime.dispatcher import build_route_payload
-from agent_runtime.interaction import reset_graph_interrupt_bridge, set_graph_interrupt_bridge
-from task_platform.domain_registry import registry as domain_registry
-from task_platform.interrupts import request_interrupt
-from task_platform.state import RootState
-from task_platform.tracing import build_trace_metadata
+from agent.runtime.dispatcher import build_route_payload
+from agent.runtime.interaction import reset_graph_interrupt_bridge, set_graph_interrupt_bridge
+from agent.platform.domain_registry import registry as domain_registry
+from agent.platform.interrupts import request_interrupt
+from agent.platform.state import RootState
+from agent.platform.tracing import build_trace_metadata
 
 
 Dispatcher = Callable[[str, list[str], str, str], Awaitable[Any]]
@@ -106,8 +106,8 @@ def _interrupt_bridge(payload: dict[str, Any]) -> str:
 
 
 async def run_general_chat(state: RootState) -> dict[str, Any]:
-    from agent_runtime.dispatcher import run_general_chat_task
-    from agent_runtime.task_execution import parse_step_payload
+    from agent.runtime.dispatcher import run_general_chat_task
+    from agent.runtime.task_execution import parse_step_payload
 
     async def on_step(step_info: str) -> None:
         event_type, payload = parse_step_payload(step_info)
@@ -166,6 +166,42 @@ def make_run_registered_domain(domain_name: str, *, enable_interrupt_bridge: boo
     return run_registered_domain
 
 
+async def run_composite(state: RootState) -> dict[str, Any]:
+    """Plan and execute a multi-capability composite task."""
+    from agent.platform.task_planner import plan_task
+    from agent.platform.step_runner import StepRunner
+
+    plan = await plan_task(state["task_text"])
+
+    base_params: dict[str, Any] = {
+        "task_id": state["task_id"],
+        "user_id": state.get("user_id", "anonymous"),
+        "task_text": state["task_text"],
+        "query": state.get("execution_task", state["task_text"]),
+        "file_paths": state.get("file_paths", []),
+    }
+
+    runner = StepRunner()
+    plan_result = await runner.run(plan, base_params=base_params)
+
+    step_dicts = [
+        {"step_id": r.step_id, "status": r.status, "output": r.output, "error": r.error}
+        for r in plan_result.step_results
+    ]
+
+    return {
+        "final_result": plan_result.final_output,
+        "artifact_refs": [],
+        "task_plan": {
+            "steps": [
+                {"id": s.id, "capability": s.capability, "params": s.params, "depends_on": s.depends_on}
+                for s in plan.steps
+            ]
+        },
+        "step_results": step_dicts,
+    }
+
+
 async def persist_summary(state: RootState) -> dict[str, Any]:
     conversation_id = state.get("conversation_id", "")
     if not conversation_id:
@@ -185,7 +221,9 @@ async def persist_summary(state: RootState) -> dict[str, Any]:
         builder = ConversationContextBuilder(pool)
         summary_text = f"用户: {task_text[:200]}\n助手: {final_result[:500]}"
         await builder.store.update_conversation_summary(
-            conversation_id, summary_text, 0,
+            conversation_id,
+            summary_text,
+            0,
         )
     except Exception:
         pass
@@ -206,6 +244,7 @@ def build_root_graph(*, dispatcher: Dispatcher, checkpointer: Any):
     graph.add_node("run_patent", make_run_registered_domain("patent", enable_interrupt_bridge=True))
     graph.add_node("run_zero_report", make_run_registered_domain("zero_report", enable_interrupt_bridge=True))
     graph.add_node("run_ppt", make_run_registered_domain("ppt", enable_interrupt_bridge=True))
+    graph.add_node("run_composite", run_composite)
     graph.add_node("persist_summary", persist_summary)
 
     graph.add_edge(START, "normalize_input")
@@ -219,6 +258,7 @@ def build_root_graph(*, dispatcher: Dispatcher, checkpointer: Any):
             "patent": "run_patent",
             "zero_report": "run_zero_report",
             "ppt": "run_ppt",
+            "composite": "run_composite",
             "needs_clarification": "maybe_clarify",
         },
     )
@@ -228,6 +268,7 @@ def build_root_graph(*, dispatcher: Dispatcher, checkpointer: Any):
     graph.add_edge("run_patent", "persist_summary")
     graph.add_edge("run_zero_report", "persist_summary")
     graph.add_edge("run_ppt", "persist_summary")
+    graph.add_edge("run_composite", "persist_summary")
     graph.add_edge("persist_summary", END)
     return graph.compile(checkpointer=checkpointer, name="chat_dada_root_graph")
 

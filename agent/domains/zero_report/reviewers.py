@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from capabilities.review_gates import ReviewGate, ReviewIssue
-from domain_agents.zero_report.schemas import ActionMatrix, Timeline
+from agent.capabilities.review_gates import ReviewGate, ReviewIssue
+from agent.domains.zero_report.schemas import ActionMatrix, Timeline
 
 
 class ZeroReportReviewGate(ReviewGate):

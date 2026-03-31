@@ -14,14 +14,14 @@ import asyncpg
 import redis.asyncio as aioredis
 from langgraph.types import Command
 
-from agent_runtime.dispatcher import RouteDecision, build_route_payload, dispatch_task
-from agent_runtime.interaction import (
+from agent.runtime.dispatcher import RouteDecision, build_route_payload, dispatch_task
+from agent.runtime.interaction import (
     reset_preloaded_user_replies,
     reset_task_interaction_handler,
     set_preloaded_user_replies,
     set_task_interaction_handler,
 )
-from agent_runtime.root_graph import build_root_graph
+from agent.runtime.root_graph import build_root_graph
 from core.langsmith_config import build_langsmith_run_config
 from core.logger import monitor, new_trace_id
 from core.models import set_thinking_level
@@ -31,7 +31,7 @@ from infra.db.repositories.quota_repo import UsageEventRepository, UserQuotaRepo
 from infra.db.repositories.task_event_repo import TaskEventRepository
 from infra.db.repositories.task_repo import TaskRunRepository
 from infra.db.session import SessionFactory
-from task_platform.streaming import extract_checkpoint_id, translate_stream_part
+from agent.platform.streaming import extract_checkpoint_id, translate_stream_part
 
 log = logging.getLogger("chatdada.tasks")
 

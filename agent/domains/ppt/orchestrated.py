@@ -12,13 +12,13 @@ import logging
 import uuid
 from typing import Any
 
-from capabilities.review_gates import ReviewGate
-from domain_agents.ppt.agent import PptDomainResult, STORYLINE_SYSTEM
-from domain_agents.research.tools import get_research_tools
-from task_platform.streaming import stream_nested_graph
+from agent.capabilities.review_gates import ReviewGate
+from agent.domains.ppt.agent import PptDomainResult, STORYLINE_SYSTEM
+from agent.domains.research.tools import get_research_tools
+from agent.platform.streaming import stream_nested_graph
 
-from workflows.orchestrator import build_orchestrated_graph
-from workflows.spec import DomainSpec, SubagentConfig
+from agent.workflows.orchestrator import build_orchestrated_graph
+from agent.workflows.spec import DomainSpec, SubagentConfig
 
 _log = logging.getLogger("chatdada.ppt.orchestrated")
 
@@ -144,8 +144,8 @@ async def run_ppt_domain_orchestrated(
 
     # Attempt to render content to .pptx
     try:
-        from domain_agents.ppt.writer_agent import run_writer
-        from ppt_engine.renderer import render_pptx
+        from agent.domains.ppt.writer_agent import run_writer
+        from agent.ppt_engine.renderer import render_pptx
 
         _safe_emit("step", "✍️ 正在生成幻灯片 DSL...")
         deck = await run_writer(

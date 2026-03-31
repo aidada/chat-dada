@@ -10,7 +10,9 @@ class RouteDecisionPayload(TypedDict):
     route_name: str
     reason: str
     confidence: float
-    execution_path: Literal["general_chat", "research", "patent", "zero_report", "ppt", "needs_clarification"]
+    execution_path: Literal[
+        "general_chat", "research", "patent", "zero_report", "ppt", "needs_clarification", "composite"
+    ]
 
 
 class UIEventPayload(TypedDict, total=False):
@@ -86,4 +88,6 @@ class RootState(TypedDict, total=False):
     budget: dict[str, Any]
     trace_metadata: dict[str, Any]
     latest_checkpoint_id: str
+    task_plan: dict[str, Any]
+    step_results: list[dict[str, Any]]
     ui_events: Annotated[list[UIEventPayload], operator.add]

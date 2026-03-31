@@ -5,8 +5,8 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
-from capabilities.general_chat import run as run_general_chat
-from task_platform.state import RouteDecisionPayload
+from agent.capabilities.general_chat import run as run_general_chat
+from agent.platform.state import RouteDecisionPayload
 
 _log = logging.getLogger("chatdada.router")
 
@@ -285,11 +285,25 @@ def build_route_payload(
     if any(keyword in lowered for keyword in PPT_KEYWORDS):
         execution_path = "ppt"
 
-    from task_platform.domain_registry import registry as domain_registry
+    # Detect composite (cross-domain) tasks: multiple domain hits + multi-step hints
+    domain_hits = sum(
+        [
+            bool(any(k in lowered for k in RESEARCH_KEYWORDS)),
+            bool(any(k in lowered for k in PATENT_KEYWORDS)),
+            bool(any(k in lowered for k in ZERO_REPORT_KEYWORDS)),
+            bool(any(k in lowered for k in PPT_KEYWORDS)),
+        ]
+    )
+    multi_step_hits = _matched_keywords(lowered, MULTI_STEP_HINTS)
+    if domain_hits >= 2 or (domain_hits >= 1 and len(multi_step_hits) >= 2):
+        execution_path = "composite"
+
+    from agent.platform.domain_registry import registry as domain_registry
 
     if not domain_registry.is_registered(execution_path) and execution_path not in (
         "general_chat",
         "needs_clarification",
+        "composite",
     ):
         _log.warning("Routed to unregistered domain %r — execution may fail", execution_path)
 

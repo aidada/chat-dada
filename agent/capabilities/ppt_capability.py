@@ -83,8 +83,8 @@ def markdown_to_deck(title: str, markdown_report: str, *, author: str = "") -> P
 def render_deck_to_pptx(deck: PPTDeck, output_path: str) -> str:
     """Render a PPTDeck to .pptx file — fallback writes placeholder text."""
     try:
-        from ppt_engine.renderer import render_pptx
-        from ppt_engine.dsl_schema import SlideDeck as PptSlideDeck, DeckMeta, Slide
+        from agent.ppt_engine.renderer import render_pptx
+        from agent.ppt_engine.dsl_schema import SlideDeck as PptSlideDeck, DeckMeta, Slide
 
         ppt_slides = [
             Slide(layout="content_only", title=sc.heading, body=sc.body, speaker_notes=sc.notes or None)

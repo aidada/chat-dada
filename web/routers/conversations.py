@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from apps.web.deps import ensure_owner_or_404, get_conversation_service, get_current_user
+from web.deps import ensure_owner_or_404, get_conversation_service, get_current_user
 from domain.conversations.services import ConversationService
 
 router = APIRouter(tags=["conversations"])

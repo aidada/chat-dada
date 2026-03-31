@@ -7,15 +7,15 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from apps.web.config import settings
-from apps.web.middleware import install_session_middleware, register_exception_handlers
-from apps.web.routers.auth import router as auth_router
-from apps.web.routers.conversations import router as conversation_router
-from apps.web.routers.files import router as file_router
-from apps.web.routers.quotas import router as quota_router
-from apps.web.routers.system import router as system_router
-from apps.web.routers.tasks import router as task_router
-from apps.web.runtime import FRONTEND_ASSETS_DIR, OUTPUTS_DIR, task_service
+from web.config import settings
+from web.middleware import install_session_middleware, register_exception_handlers
+from web.routers.auth import router as auth_router
+from web.routers.conversations import router as conversation_router
+from web.routers.files import router as file_router
+from web.routers.quotas import router as quota_router
+from web.routers.system import router as system_router
+from web.routers.tasks import router as task_router
+from web.runtime import FRONTEND_ASSETS_DIR, OUTPUTS_DIR, task_service
 from core.langsmith_config import verify_langsmith_connection
 from core.logger import setup_logging
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from domain_agents.research.config import (
+from agent.domains.research.config import (
     ACADEMIC_PAPER_GUIDANCE_PROFILE,
     DEFAULT_REPORT_PROFILE,
     get_deliverable_profile,

@@ -11,7 +11,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from capabilities.memory import ResearchMemory
+from agent.capabilities.memory import ResearchMemory
 
 _current_memory: ContextVar[ResearchMemory | None] = ContextVar(
     "current_research_memory", default=None,

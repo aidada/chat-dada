@@ -10,23 +10,23 @@ from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 from langgraph.types import RetryPolicy
 
-from capabilities.memory import ResearchMemory
+from agent.capabilities.memory import ResearchMemory
 from core.content_utils import normalize_markdown_report
 from core.models import get_llm
-from agent_runtime.interaction import ask_user
+from agent.runtime.interaction import ask_user
 
-from domain_agents.research.config import ResearchConfig, get_deliverable_profile
-from domain_agents.research.prompts import (
+from agent.domains.research.config import ResearchConfig, get_deliverable_profile
+from agent.domains.research.prompts import (
     build_aggregator_messages,
     build_intake_messages,
     build_optimizer_messages,
     build_planner_messages,
     build_synthesizer_messages,
 )
-from domain_agents.research.reviewers import ResearchReviewGate
-from domain_agents.research.state import ResearchWorkflowState
-from domain_agents.research.tools import get_research_tools
-from domain_agents.research.utils import (
+from agent.domains.research.reviewers import ResearchReviewGate
+from agent.domains.research.state import ResearchWorkflowState
+from agent.domains.research.tools import get_research_tools
+from agent.domains.research.utils import (
     aggregate_module_outputs,
     best_text,
     extract_json_payload,
@@ -38,7 +38,7 @@ from domain_agents.research.utils import (
     merge_brief,
     normalize_plan,
 )
-from domain_agents.research.worker import coordinate_modules
+from agent.domains.research.worker import coordinate_modules
 
 log = logging.getLogger("chatdada.research.workflow")
 

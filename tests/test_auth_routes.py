@@ -7,13 +7,13 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from apps.web.deps import (
+from web.deps import (
     get_auth_service,
     get_current_user,
     resolve_current_user_once,
     resolve_current_user_once_with_metadata,
 )
-from apps.web.routers.auth import router as auth_router
+from web.routers.auth import router as auth_router
 
 
 class _FakeUser:
@@ -107,8 +107,8 @@ class AuthRouteTests(unittest.TestCase):
             cookies = {"chat_dada_session": "session-token"}
 
         async def _run():
-            with patch("apps.web.deps.auth.SessionFactory", return_value=_FakeSessionContext()):
-                with patch("apps.web.deps.auth.AuthService", _FakeAuthService):
+            with patch("web.deps.auth.SessionFactory", return_value=_FakeSessionContext()):
+                with patch("web.deps.auth.AuthService", _FakeAuthService):
                     user = await resolve_current_user_once(_Request())
             return user
 
@@ -122,8 +122,8 @@ class AuthRouteTests(unittest.TestCase):
             cookies = {"chat_dada_session": "session-token"}
 
         async def _run():
-            with patch("apps.web.deps.auth.SessionFactory", return_value=_FakeSessionContext()):
-                with patch("apps.web.deps.auth.AuthService", _FakeAuthService):
+            with patch("web.deps.auth.SessionFactory", return_value=_FakeSessionContext()):
+                with patch("web.deps.auth.AuthService", _FakeAuthService):
                     return await resolve_current_user_once_with_metadata(_Request())
 
         import asyncio

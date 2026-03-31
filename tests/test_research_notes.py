@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from capabilities.memory import ResearchMemory
-from tools.research_notes import (
+from agent.capabilities.memory import ResearchMemory
+from agent.tools.research_notes import (
     recall_research_notes,
     save_research_note,
     set_research_context,

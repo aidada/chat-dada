@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from domain_agents.zero_report.schemas import (
+from agent.domains.zero_report.schemas import (
     ActionMatrix,
     IncidentFactSet,
     RootCauseNode,
@@ -62,7 +62,7 @@ def render_zero_report_pptx(
     output_path: str,
 ) -> str:
     """Render a zero report as .pptx via the shared PPT capability."""
-    from capabilities.ppt_capability import markdown_to_deck, render_deck_to_pptx
+    from agent.capabilities.ppt_capability import markdown_to_deck, render_deck_to_pptx
 
     md = render_zero_report_markdown(facts, timeline, root_cause_tree, action_matrix, draft)
     title = draft.title or facts.title or "Zero Report"

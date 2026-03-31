@@ -8,8 +8,8 @@ import json
 from typing import Any, Callable
 
 from langchain_core.tools import StructuredTool
-from task_platform.domain_registry import registry as domain_registry
-from task_platform.renderer_registry import registry as renderer_registry
+from agent.platform.domain_registry import registry as domain_registry
+from agent.platform.renderer_registry import registry as renderer_registry
 
 
 # Each entry: {fn_path, type, description, input_schema, output_schema, available_to}
@@ -171,7 +171,7 @@ register("writer", fn_path="agents.writer_agent:run_writer",
          cap_type="agent", description="Generate Slide DSL JSON from storyline and materials")
 
 # Renderers
-register("ppt_render", fn_path="ppt_engine.renderer:render_pptx",
+register("ppt_render", fn_path="agent.ppt_engine.renderer:render_pptx",
          cap_type="renderer", description="Render SlideDeck JSON to editable .pptx file")
 
 # General Chat

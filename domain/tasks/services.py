@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from agent_runtime.task_execution import TaskService
+from agent.runtime.task_execution import TaskService
 
 
 class TaskExecutionService:
     """任务执行领域服务包装。
 
-    当前先作为 `agent_runtime.TaskService` 的语义化入口，
+    当前先作为 `agent.runtime.TaskService` 的语义化入口，
     后续再把业务规则继续从运行时层抽离。
     """
 

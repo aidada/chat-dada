@@ -10,13 +10,13 @@ from typing import Any
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-from agent_runtime.task_execution import (
+from agent.runtime.task_execution import (
     HEARTBEAT_INTERVAL_SECONDS,
     TaskService,
     format_sse,
     task_is_terminal,
 )
-from apps.web.config import settings
+from web.config import settings
 from infra.db.session import engine as app_db_engine
 
 log = logging.getLogger("chatdada.web")
