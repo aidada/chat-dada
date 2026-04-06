@@ -11,7 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import main
-from agent.runtime.dispatcher import RouteDecision, route_task_request
+from agent.platform.state import RouteDecisionPayload
 from agent.runtime.interaction import ask_user
 from agent.runtime.task_execution import TaskService
 
@@ -52,13 +52,14 @@ async def fake_interactive_runner(task: str, on_step, user_id: str = "anonymous"
 
 async def fake_dispatcher(
     task_text: str, file_paths: list[str], mode: str = "auto", user_id: str = "anonymous"
-) -> RouteDecision:
-    route_name, reason, confidence = route_task_request(task_text, file_paths, mode)
-    return RouteDecision(
-        route_name=route_name,
-        reason=reason,
-        confidence=confidence,
-    )
+) -> RouteDecisionPayload:
+    # C7: Dispatcher deleted — return minimal placeholder payload for testing
+    return {
+        "route_name": "orchestrator",
+        "reason": "test dispatcher stub",
+        "confidence": 1.0,
+        "execution_path": "research",
+    }
 
 
 def _emit_stream_event(payload: dict) -> None:
@@ -182,7 +183,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         ]
         for patcher in self._patchers:
             patcher.start()
-        self.service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=fake_dispatcher)
+        self.service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL)
         await self.service.connect()
         # Clean tables before each test for isolation
         async with self.service.store.pool.acquire() as conn:
@@ -218,19 +219,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]["type"], "monitoring")
 
     async def test_task_can_pause_for_user_reply_and_resume(self) -> None:
-        async def interactive_dispatcher(
-            task_text: str,
-            file_paths: list[str],
-            mode: str = "auto",
-            user_id: str = "anonymous",
-        ) -> RouteDecision:
-            return RouteDecision(
-                route_name="orchestrator",
-                reason="interactive research test",
-                confidence=1.0,
-            )
-
-        service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=interactive_dispatcher)
+        service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL)
         await service.connect()
         try:
             snapshot = await service.submit_task(
@@ -261,19 +250,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.close()
 
     async def test_waiting_task_emits_monitoring_summary_before_user_reply(self) -> None:
-        async def interactive_dispatcher(
-            task_text: str,
-            file_paths: list[str],
-            mode: str = "auto",
-            user_id: str = "anonymous",
-        ) -> RouteDecision:
-            return RouteDecision(
-                route_name="orchestrator",
-                reason="interactive research test",
-                confidence=1.0,
-            )
-
-        service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=interactive_dispatcher)
+        service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL)
         await service.connect()
         try:
             snapshot = await service.submit_task(
@@ -307,19 +284,6 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.close()
 
     async def test_running_task_can_be_cancelled(self) -> None:
-        async def orchestrator_dispatcher(
-            task_text: str,
-            file_paths: list[str],
-            mode: str = "auto",
-            user_id: str = "anonymous",
-        ) -> RouteDecision:
-            return RouteDecision(
-                route_name="orchestrator",
-                reason="cancel test",
-                confidence=1.0,
-            )
-
-        self.service._dispatcher = orchestrator_dispatcher
         with patch("agent.runtime.root_graph.domain_registry.get", return_value=slow_domain_runner):
             snapshot = await self.service.submit_task(
                 task_text="帮我执行一个很慢的任务",
@@ -345,46 +309,6 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
 
-class TaskRoutingTests(unittest.TestCase):
-    def test_mode_chat_forces_general_chat(self) -> None:
-        route_name, reason, confidence = route_task_request("帮我搜索 AI 新闻", [], "chat")
-        self.assertEqual(route_name, "general_chat")
-        self.assertEqual(reason, "forced by mode=chat")
-        self.assertEqual(confidence, 1.0)
-
-    def test_mode_agent_forces_orchestrator(self) -> None:
-        route_name, reason, confidence = route_task_request("hi", [], "agent")
-        self.assertEqual(route_name, "orchestrator")
-        self.assertEqual(reason, "forced by mode=agent")
-        self.assertEqual(confidence, 1.0)
-
-    def test_auto_routes_simple_question_to_general_chat(self) -> None:
-        route_name, reason, confidence = route_task_request("解释一下 FastAPI 是什么", [], "auto")
-        self.assertEqual(route_name, "general_chat")
-        self.assertIn("direct chat", reason)
-        self.assertGreater(confidence, 0.5)
-
-    def test_auto_routes_task_request_to_orchestrator(self) -> None:
-        route_name, reason, confidence = route_task_request("帮我搜索今天的 AI 新闻并整理成报告", [], "auto")
-        self.assertEqual(route_name, "orchestrator")
-        self.assertIn("keywords", reason)
-        self.assertGreater(confidence, 0.5)
-
-    def test_auto_routes_research_request_to_orchestrator_even_if_it_mentions_how(self) -> None:
-        route_name, reason, confidence = route_task_request(
-            "对于如何构建多路径时空图仍然没研究，我想要识别 NLOS 信号，同时还要构建纯 GNSS 提取的城市多路径时空图，用于后续 GNSS 定位抑制多路径误差",
-            [],
-            "auto",
-        )
-        self.assertEqual(route_name, "orchestrator")
-        self.assertIn("research", reason)
-        self.assertGreater(confidence, 0.5)
-
-    def test_auto_routes_capability_question_about_paper_writing_to_general_chat(self) -> None:
-        route_name, reason, confidence = route_task_request("你能帮我写论文吗？", [], "auto")
-        self.assertEqual(route_name, "general_chat")
-        self.assertIn("capability inquiry", reason)
-        self.assertGreater(confidence, 0.8)
 
 
 class TaskEndpointTests(unittest.TestCase):
@@ -399,7 +323,7 @@ class TaskEndpointTests(unittest.TestCase):
         for patcher in self._patchers:
             patcher.start()
         # TestClient lifespan will call connect()/close() automatically
-        web_runtime.task_service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL, dispatcher=fake_dispatcher)
+        web_runtime.task_service = TaskService(TEST_DATABASE_URL, TEST_REDIS_URL)
 
     def tearDown(self) -> None:
         self._web_runtime.task_service = self.original_service
@@ -452,22 +376,9 @@ class TaskEndpointTests(unittest.TestCase):
             self.assertIn("chat 模式暂不支持附件", response.json()["detail"])
 
     def test_reply_endpoint_resumes_waiting_task(self) -> None:
-        async def interactive_dispatcher(
-            task_text: str,
-            file_paths: list[str],
-            mode: str = "auto",
-            user_id: str = "anonymous",
-        ) -> RouteDecision:
-            return RouteDecision(
-                route_name="orchestrator",
-                reason="interactive research test",
-                confidence=1.0,
-            )
-
         main.task_service = TaskService(
             TEST_DATABASE_URL,
             TEST_REDIS_URL,
-            dispatcher=interactive_dispatcher,
         )
 
         with TestClient(main.app) as client:

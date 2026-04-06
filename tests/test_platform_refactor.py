@@ -8,8 +8,6 @@ from unittest.mock import patch
 from agent.domains.patent.agent import run_patent_domain
 from agent.domains.research.orchestrated import run_research_domain_orchestrated
 from agent.domains.zero_report.agent import run_zero_report_domain
-from agent.runtime.dispatcher import RouteDecision
-from agent.runtime.dispatcher import build_route_payload
 from agent.runtime.interaction import (
     ask_user,
     reset_preloaded_user_replies,
@@ -607,19 +605,6 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(ref["name"] == "claim_tree.json" for ref in result.artifact_refs))
         self.assertTrue(report_exists)
 
-    def test_router_can_select_patent_domain(self) -> None:
-        decision = RouteDecision(
-            route_name="orchestrator",
-            reason="detected patent task",
-            confidence=0.9,
-        )
-        route = build_route_payload(
-            task_text="请根据技术交底生成专利权利要求和说明书草稿",
-            file_paths=[],
-            decision=decision,
-        )
-        self.assertEqual(route["execution_path"], "patent")
-
 
 class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
     async def test_zero_report_domain_produces_structured_artifacts(self) -> None:
@@ -701,19 +686,6 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(ref["name"] == "zero_report.md" for ref in result.artifact_refs))
         self.assertTrue(any(ref["name"] == "timeline.json" for ref in result.artifact_refs))
         self.assertTrue(report_exists)
-
-    def test_router_can_select_zero_report_domain(self) -> None:
-        decision = RouteDecision(
-            route_name="orchestrator",
-            reason="detected incident analysis task",
-            confidence=0.9,
-        )
-        route = build_route_payload(
-            task_text="请输出事故复盘的时间线、根因分析和整改矩阵",
-            file_paths=[],
-            decision=decision,
-        )
-        self.assertEqual(route["execution_path"], "zero_report")
 
 
 class InteractionHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -807,18 +779,8 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
         from langgraph.types import Command
         from agent.runtime.root_graph import build_root_graph
 
-        async def fake_dispatcher(task_text, file_paths, mode, user_id):
-            return RouteDecision(
-                route_name="orchestrator",
-                reason="test interrupt",
-                confidence=0.5,
-            )
-
         checkpointer = InMemorySaver()
-        graph = build_root_graph(
-            dispatcher=fake_dispatcher,
-            checkpointer=checkpointer,
-        )
+        graph = build_root_graph(checkpointer=checkpointer)
 
         initial_state = {
             "task_id": "test_interrupt_resume",
@@ -914,13 +876,6 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
 
         nested_graph = FakeNestedGraph()
 
-        async def fake_dispatcher(task_text, file_paths, mode, user_id):
-            return RouteDecision(
-                route_name="research",
-                reason="nested interrupt test",
-                confidence=1.0,
-            )
-
         async def fake_runner(input_data):
             result = await stream_nested_graph(
                 nested_graph,
@@ -936,7 +891,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         checkpointer = InMemorySaver()
-        graph = build_root_graph(dispatcher=fake_dispatcher, checkpointer=checkpointer)
+        graph = build_root_graph(checkpointer=checkpointer)
         base_config = {"configurable": {"thread_id": "nested_interrupt_resume"}}
         initial_state = {
             "task_id": "nested_interrupt_resume",
@@ -993,7 +948,8 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(state_snapshot.values.get("final_result"), "nested final result")
 
-    class CitationMapTests(unittest.TestCase):
+
+class CitationMapTests(unittest.TestCase):
     def test_add_deduplicates_by_url(self) -> None:
         from agent.capabilities.citation_manager import CitationMap
 

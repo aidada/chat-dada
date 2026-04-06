@@ -9,7 +9,6 @@ from langgraph.graph import StateGraph
 from agent.platform.interrupts import request_interrupt
 from agent.platform.state import RootState
 
-Dispatcher = Callable[[str, list[str], str, str], Awaitable[Any]]
 
 
 # ── Coordinator Nodes ──────────────────────────────────────────────────────
@@ -156,7 +155,7 @@ async def persist_summary(state: RootState) -> dict[str, Any]:
 # ── 构建 Root Graph ──────────────────────────────────────────────────────────
 
 
-def build_root_graph(*, dispatcher: Dispatcher, checkpointer: Any):
+def build_root_graph(*, checkpointer: Any):
     graph = StateGraph(RootState)
     graph.add_node("normalize_input", normalize_input)
     graph.add_node("run_coordinator", run_coordinator)
