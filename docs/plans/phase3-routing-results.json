@@ -1,0 +1,187 @@
+{
+  "results": [
+    {
+      "id": 1,
+      "query": "你好",
+      "expected_mode": "direct",
+      "llm_mode": "direct",
+      "old_dispatcher_mode": "direct",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 2,
+      "query": "嗨，今天怎么样？",
+      "expected_mode": "direct",
+      "llm_mode": "direct",
+      "old_dispatcher_mode": "direct",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 3,
+      "query": "早上好呀",
+      "expected_mode": "direct",
+      "llm_mode": "direct",
+      "old_dispatcher_mode": "direct",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 4,
+      "query": "hey, how are you?",
+      "expected_mode": "direct",
+      "llm_mode": "direct",
+      "old_dispatcher_mode": "direct",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 5,
+      "query": "晚上好，有什么好看的电影吗？",
+      "expected_mode": "direct",
+      "llm_mode": "direct",
+      "old_dispatcher_mode": "direct",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 6,
+      "query": "帮我研究量子计算的最新进展",
+      "expected_mode": "single_skill",
+      "llm_mode": "single_skill",
+      "old_dispatcher_mode": "single_skill",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 7,
+      "query": "写一个关于区块链的专利申请",
+      "expected_mode": "single_skill",
+      "llm_mode": "single_skill",
+      "old_dispatcher_mode": "single_skill",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 8,
+      "query": "帮我写一份事故分析报告",
+      "expected_mode": "single_skill",
+      "llm_mode": "single_skill",
+      "old_dispatcher_mode": "direct",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": false
+    },
+    {
+      "id": 9,
+      "query": "制作一个关于AI的PPT",
+      "expected_mode": "single_skill",
+      "llm_mode": "single_skill",
+      "old_dispatcher_mode": "single_skill",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 10,
+      "query": "调研一下新能源技术的发展现状",
+      "expected_mode": "single_skill",
+      "llm_mode": "single_skill",
+      "old_dispatcher_mode": "single_skill",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 11,
+      "query": "写一个技术方案文档",
+      "expected_mode": "single_skill",
+      "llm_mode": "single_skill",
+      "old_dispatcher_mode": "direct",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": false
+    },
+    {
+      "id": 12,
+      "query": "整理一份竞品分析报告",
+      "expected_mode": "single_skill",
+      "llm_mode": "single_skill",
+      "old_dispatcher_mode": "direct",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": false
+    },
+    {
+      "id": 13,
+      "query": "帮我搜索一下最新的大模型论文",
+      "expected_mode": "single_skill",
+      "llm_mode": "single_skill",
+      "old_dispatcher_mode": "single_skill",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 14,
+      "query": "研究竞品技术方案后撰写专利",
+      "expected_mode": "dag",
+      "llm_mode": "dag",
+      "old_dispatcher_mode": "dag",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 15,
+      "query": "调研市场现状并制作分析报告PPT",
+      "expected_mode": "dag",
+      "llm_mode": "dag",
+      "old_dispatcher_mode": "dag",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 16,
+      "query": "先做文献综述，再写专利申请",
+      "expected_mode": "dag",
+      "llm_mode": "dag",
+      "old_dispatcher_mode": "dag",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 17,
+      "query": "调研AI技术发展并制作演示文稿",
+      "expected_mode": "dag",
+      "llm_mode": "dag",
+      "old_dispatcher_mode": "dag",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 18,
+      "query": "先分析问题根因，再写整改报告",
+      "expected_mode": "dag",
+      "llm_mode": "dag",
+      "old_dispatcher_mode": "direct",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": false
+    },
+    {
+      "id": 19,
+      "query": "研究竞品同时制作对比PPT",
+      "expected_mode": "dag",
+      "llm_mode": "dag",
+      "old_dispatcher_mode": "dag",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": true
+    },
+    {
+      "id": 20,
+      "query": "深度研究量子计算并撰写学术论文",
+      "expected_mode": "dag",
+      "llm_mode": "dag",
+      "old_dispatcher_mode": "single_skill",
+      "llm_matches_expected": true,
+      "llm_matches_old_dispatcher": false
+    }
+  ],
+  "accuracy": 100.0,
+  "total": 20,
+  "correct": 20
+}

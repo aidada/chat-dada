@@ -50,7 +50,10 @@ def auto_discover() -> None:
     import logging
     import pathlib
 
-    from agent.domains._base.protocol import AgentProtocol as _AP
+    try:
+        from agent.domains._base.protocol import AgentProtocol as _AP
+    except ImportError:
+        _AP = None  # type: ignore[assignment]
 
     _log = logging.getLogger("chatdada.domain_registry")
     agents_root = pathlib.Path(__file__).resolve().parent.parent / "domains"
@@ -72,7 +75,7 @@ def auto_discover() -> None:
         registered_via_protocol = False
         for attr_name in dir(mod):
             obj = getattr(mod, attr_name)
-            if isinstance(obj, type) and issubclass(obj, _AP) and obj is not _AP and hasattr(obj, "manifest"):
+            if _AP is not None and isinstance(obj, type) and issubclass(obj, _AP) and obj is not _AP and hasattr(obj, "manifest"):
                 obj.register()
                 _log.info("Auto-registered agent: %s", obj.manifest.name)
                 registered_via_protocol = True
