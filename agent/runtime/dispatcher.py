@@ -298,9 +298,11 @@ def build_route_payload(
     if domain_hits >= 2 or (domain_hits >= 1 and len(multi_step_hits) >= 2):
         execution_path = "composite"
 
-    from agent.platform.domain_registry import registry as domain_registry
+    from agent.coordinator.skills import skill_registry
 
-    if not domain_registry.is_registered(execution_path) and execution_path not in (
+    # Convert execution_path to skill name format for checking
+    skill_name = f"do_{execution_path}" if not execution_path.startswith("do_") else execution_path
+    if not skill_registry.is_registered(skill_name) and execution_path not in (
         "general_chat",
         "needs_clarification",
         "composite",

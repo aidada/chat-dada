@@ -1,93 +1,145 @@
+"""
+Domain Registry — DEPRECATED
+
+This module is deprecated. Use agent.coordinator.skills.skill_registry instead.
+
+The global `registry` instance is kept for backward compatibility but delegates
+to skill_registry internally. All imports should migrate to:
+
+    from agent.coordinator.skills import skill_registry
+
+This file will be removed in the next release cycle after migration is complete.
+"""
 from __future__ import annotations
 
+import warnings
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 DomainRunner = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
+def _deprecated() -> None:
+    """Emit deprecation warning for domain_registry usage."""
+    warnings.warn(
+        "domain_registry is deprecated; use agent.coordinator.skills.skill_registry instead. "
+        "See PRD §8.3 C4 for migration details.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
 class DomainRegistry:
+    """
+    DEPRECATED: Legacy domain runner registry.
+
+    Use agent.coordinator.skills.SkillRegistry instead.
+
+    This class is preserved for backward compatibility and delegates to
+    the new SkillRegistry internally.
+    """
+
     def __init__(self) -> None:
+        _deprecated()
+        # Internal state kept for backward compatibility with tests that mock this class
         self._runners: dict[str, DomainRunner] = {}
         self._aliases: dict[str, str] = {}
 
     def register(self, name: str, runner: DomainRunner, aliases: list[str] | None = None) -> None:
+        """Register a domain runner. DEPRECATED: Use skill_registry.register()."""
+        _deprecated()
+        from agent.coordinator.skills import SkillDescription, skill_registry
+
+        # Store in legacy internal state for backward compatibility
         self._runners[name] = runner
         self._aliases[name.lower()] = name
         for alias in aliases or []:
             self._aliases[alias.lower()] = name
 
+        # Delegate to skill_registry
+        skill_name = f"do_{name}" if not name.startswith("do_") else name
+        description = SkillDescription(
+            name=skill_name,
+            description=f"Domain: {name}",
+        )
+        skill_registry.register(skill_name, runner, description=description, aliases=aliases)
+
     def get(self, name: str) -> DomainRunner | None:
+        """Get a domain runner by name. DEPRECATED: Use skill_registry.get_runner()."""
+        _deprecated()
+        from agent.coordinator.skills import skill_registry
+
+        # First check legacy internal state (for test mocks)
         canonical = self._aliases.get(name.lower(), name)
-        return self._runners.get(canonical)
+        if canonical in self._runners:
+            return self._runners.get(canonical)
+
+        # Delegate to skill_registry
+        skill_name = f"do_{name}" if not name.startswith("do_") else name
+        return skill_registry.get_runner(skill_name)
 
     def is_registered(self, name: str) -> bool:
-        return self.get(name) is not None
+        """Check if a domain is registered. DEPRECATED: Use skill_registry.is_registered()."""
+        _deprecated()
+        from agent.coordinator.skills import skill_registry
+
+        # First check legacy internal state (for test mocks)
+        canonical = self._aliases.get(name.lower(), name)
+        if canonical in self._runners:
+            return True
+
+        # Delegate to skill_registry
+        skill_name = f"do_{name}" if not name.startswith("do_") else name
+        return skill_registry.is_registered(skill_name)
 
     def resolve_alias(self, name: str) -> str | None:
-        return self._aliases.get(name.lower())
+        """Resolve a domain alias. DEPRECATED: Use skill_registry.resolve_alias()."""
+        _deprecated()
+        from agent.coordinator.skills import skill_registry
+
+        # First check legacy internal state (for test mocks)
+        if name.lower() in self._aliases:
+            return self._aliases.get(name.lower())
+
+        # Delegate to skill_registry
+        return skill_registry.resolve_alias(name)
 
     def summary(self) -> str:
-        lines = []
-        for alias, canonical in sorted(self._aliases.items()):
-            if alias == canonical:
-                lines.append(f"- {canonical}")
-            else:
-                lines.append(f"- {alias} -> {canonical}")
-        return "\n".join(lines)
+        """Generate a summary of registered domains. DEPRECATED: Use skill_registry.summary()."""
+        _deprecated()
+        from agent.coordinator.skills import skill_registry
+
+        # First check legacy internal state
+        if self._aliases:
+            lines = []
+            for alias, canonical in sorted(self._aliases.items()):
+                if alias == canonical:
+                    lines.append(f"- {canonical}")
+                else:
+                    lines.append(f"- {alias} -> {canonical}")
+            return "\n".join(lines)
+
+        # Delegate to skill_registry
+        return skill_registry.summary()
 
 
+# Legacy global registry instance — kept for backward compatibility
 registry = DomainRegistry()
 
 
 def auto_discover() -> None:
-    """Scan agent/domains/*/orchestrated.py and register any AgentProtocol subclasses.
-
-    Falls back to the legacy static imports when an ``orchestrated`` module does
-    not expose an AgentProtocol subclass.
     """
-    import importlib
-    import logging
-    import pathlib
+    DEPRECATED: Legacy auto-discovery function.
 
-    from agent.domains._base.protocol import AgentProtocol as _AP
+    Use agent.coordinator.skills.discover_skills() instead.
+    This function delegates to discover_skills() for backward compatibility.
+    """
+    _deprecated()
+    from agent.coordinator.skills import discover_skills
 
-    _log = logging.getLogger("chatdada.domain_registry")
-    agents_root = pathlib.Path(__file__).resolve().parent.parent / "domains"
-
-    for child in sorted(agents_root.iterdir()):
-        if not child.is_dir() or child.name.startswith("_"):
-            continue
-        mod_path = child / "orchestrated.py"
-        if not mod_path.exists():
-            continue
-        module_name = f"agent.domains.{child.name}.orchestrated"
-        try:
-            mod = importlib.import_module(module_name)
-        except Exception:
-            _log.exception("Failed to import %s", module_name)
-            continue
-
-        # Prefer AgentProtocol subclass auto-registration
-        registered_via_protocol = False
-        for attr_name in dir(mod):
-            obj = getattr(mod, attr_name)
-            if isinstance(obj, type) and issubclass(obj, _AP) and obj is not _AP and hasattr(obj, "manifest"):
-                obj.register()
-                _log.info("Auto-registered agent: %s", obj.manifest.name)
-                registered_via_protocol = True
-
-        if registered_via_protocol:
-            continue
-
-        # Fallback: look for legacy run_*_domain_orchestrated function
-        for attr_name in dir(mod):
-            if attr_name.startswith("run_") and attr_name.endswith("_domain_orchestrated"):
-                runner = getattr(mod, attr_name)
-                domain = child.name
-                if not registry.is_registered(domain):
-                    registry.register(domain, runner, aliases=[domain])
-                    _log.info("Legacy-registered domain: %s", domain)
+    discover_skills()
 
 
-auto_discover()
+# Legacy auto-discovery call — no longer executed at import time
+# The new skill_registry auto-discovery happens in skills.py
+# auto_discover()  # REMOVED: skill_registry.discover_skills() runs in skills.py
