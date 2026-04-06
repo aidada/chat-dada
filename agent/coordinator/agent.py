@@ -29,8 +29,17 @@ def _safe_emit(event_type: str, payload: dict[str, Any]) -> None:
 
 async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
     """理解用户目标，判断执行模式"""
-    from agent.coordinator.prompts import build_understand_goal_prompt
     from agent.coordinator.skills import skill_registry
+
+    # P1 DAG resume: task_dag already restored from interrupt state — skip LLM
+    if state.get("task_dag") and state.get("execution_mode") == ExecutionMode.DAG:
+        return {
+            "trace_id": state.get("trace_id") or str(uuid.uuid4()),
+            "config": state.get("config") or CoordinatorConfig(),
+            "available_skills": skill_registry.list_skills(),
+        }
+
+    from agent.coordinator.prompts import build_understand_goal_prompt
     from core.models import get_llm, response_text
     from langchain_core.messages import HumanMessage, SystemMessage
 

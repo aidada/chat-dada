@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import uuid
@@ -191,6 +192,10 @@ async def _call_llm_json(messages: list[dict], *, description: str = "") -> dict
 
 async def decompose_tasks_node(state: CoordinatorState) -> dict[str, Any]:
     """LLM 生成任务 DAG"""
+    # P1 DAG resume: task_dag already restored from interrupt state — skip decomposition
+    if state.get("task_dag"):
+        return {}
+
     from agent.coordinator.prompts import build_decompose_tasks_prompt
     from agent.coordinator.skills import skill_registry
 
@@ -328,7 +333,7 @@ async def execute_tasks_node(state: CoordinatorState) -> dict[str, Any]:
             skill_invocation_id=skill_invocation_id,
             skill_name=task.assigned_skill,
             trace_id=trace_id,
-            request_payload={"report_profile": ""},
+            request_payload={"report_profile": config.report_profile},
             clarification_history=list(state.get("clarification_history") or []),
             task_vars=task_vars,
             upstream_artifacts=upstream.get("upstream_artifacts", []),
@@ -395,6 +400,19 @@ async def execute_tasks_node(state: CoordinatorState) -> dict[str, Any]:
                     "skill": interrupted_skill,
                     "skill_invocation_id": interrupted_invocation_id,
                     "coordinator_task_id": coordinator_task_id,
+                    # P1: serialised DAG state for resume replay
+                    "_dag_resume_state": {
+                        "task_dag": [dataclasses.asdict(t) for t in task_dag],
+                        "completed_tasks": {k: dataclasses.asdict(v) for k, v in completed.items()},
+                        "failed_tasks":    {k: dataclasses.asdict(v) for k, v in failed.items()},
+                        "skill_runs":      dict(skill_runs),
+                        "task_vars":       {k: dataclasses.asdict(v) for k, v in task_vars.items()},
+                        "pending_tasks": [
+                            t.id for t in task_dag
+                            if t.id not in set(completed.keys()) | set(failed.keys())
+                            and t.id != interrupted_task_id
+                        ],
+                    },
                 },
                 "running_tasks": {t.id: t for t in ready_tasks},
             }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from contextvars import Token
 from typing import Any
@@ -8,13 +9,14 @@ from langgraph.config import get_stream_writer
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 
-from agent.runtime.dispatcher import build_route_payload
+from agent.runtime.dispatcher import build_route_payload  # DEPRECATED: Phase 4 cleanup
 from agent.runtime.interaction import reset_graph_interrupt_bridge, set_graph_interrupt_bridge
 from agent.platform.domain_registry import registry as domain_registry
 from agent.platform.interrupts import request_interrupt
 from agent.platform.state import RootState
 from agent.platform.tracing import build_trace_metadata
 
+_log = logging.getLogger("chatdada.root_graph")
 
 Dispatcher = Callable[[str, list[str], str, str], Awaitable[Any]]
 
@@ -24,13 +26,7 @@ def _emit_custom(payload: dict[str, Any]) -> None:
     writer(payload)
 
 
-def _build_clarification_prompt(state: RootState) -> dict[str, Any]:
-    return {
-        "content": "这个任务目标还不够明确。你更希望我直接回答、做深度研究，还是保留现有多工具流程？",
-        "context": f"原始任务：{state['task_text']}",
-        "placeholder": "例如：请直接做深度研究，并重点关注论文与实验。",
-        "interrupt_type": "clarification",
-    }
+# ── 新 Coordinator 节点 ──────────────────────────────────────────────────────
 
 
 async def normalize_input(state: RootState) -> dict[str, Any]:
@@ -42,6 +38,167 @@ async def normalize_input(state: RootState) -> dict[str, Any]:
     }
 
 
+async def run_coordinator(state: RootState) -> dict[str, Any]:
+    """Coordinator 统一执行入口 — 替代旧的多分支路由执行模式"""
+    from agent.coordinator.agent import build_coordinator_graph
+    from agent.coordinator.state import CoordinatorConfig, CoordinatorState, ExecutionMode
+    from agent.platform.streaming import stream_nested_graph
+
+    request_payload = state.get("request_payload") or {}
+    route_payload = state.get("initial_route_payload") or {}
+
+    # P2: Honour needs_clarification route — matches old maybe_clarify behaviour.
+    # Uses root-level langgraph interrupt so task_execution.py sees a question event
+    # and resumes via Command(resume=answer) (not nested_interrupt_pending restart).
+    if (route_payload.get("execution_path") == "needs_clarification"
+            and not request_payload.get("clarification_answer")):
+        from agent.platform.interrupts import request_interrupt
+        clarification_answer = request_interrupt({
+            "content": "这个任务目标还不够明确。你更希望我直接回答、做深度研究，还是保留现有多工具流程？",
+            "context": f"原始任务：{state.get('task_text', '')}",
+            "placeholder": "例如：请直接做深度研究，并重点关注论文与实验。",
+            "interrupt_type": "clarification",
+        })
+        # LangGraph resumes here — clarification_answer is the user's reply
+        goal = (str(state.get("execution_task") or state.get("task_text") or "")
+                + "\n\n用户补充：" + str(clarification_answer or ""))
+    else:
+        goal = str(state.get("execution_task") or state.get("task_text") or "")
+
+    coordinator_graph = build_coordinator_graph()
+
+    # P3: Forward explicit report_profile from caller so skills use it, not the default "".
+    report_profile = str(request_payload.get("report_profile") or "")
+
+    coordinator_input: CoordinatorState = {
+        "original_goal": goal,
+        "trace_id": state.get("task_id", ""),
+        "config": CoordinatorConfig(report_profile=report_profile),
+        "conversation_context": state.get("conversation_context") or "",
+        "clarification_history": list(request_payload.get("clarification_history") or []),
+        "artifact_refs": [],
+        "review": {},
+        "budget": {},
+        "strategy_trace": [],
+        "pending_tasks": [],
+        "running_tasks": {},
+        "completed_tasks": {},
+        "failed_tasks": {},
+        "skill_runs": {},
+        "task_vars": {},
+    }
+
+    # P1: Restore serialised DAG state saved by execute_tasks_node on interrupt so the
+    # resumed coordinator continues from where it left off instead of re-running finished tasks.
+    existing_interrupt = state.get("interrupt_state") or {}
+    dag_resume = existing_interrupt.get("_dag_resume_state") or {}
+    if dag_resume:
+        from agent.coordinator.state import Task, TaskVarEntry
+        coordinator_input.update({
+            "execution_mode": ExecutionMode.DAG,
+            "task_dag": [Task(**t) for t in dag_resume.get("task_dag", [])],
+            "completed_tasks": {k: Task(**v) for k, v in dag_resume.get("completed_tasks", {}).items()},
+            "failed_tasks":    {k: Task(**v) for k, v in dag_resume.get("failed_tasks", {}).items()},
+            "skill_runs":      dict(dag_resume.get("skill_runs") or {}),
+            "task_vars":       {k: TaskVarEntry(**v) for k, v in dag_resume.get("task_vars", {}).items()},
+            "pending_tasks":   list(dag_resume.get("pending_tasks") or []),
+        })
+
+    result = await stream_nested_graph(
+        coordinator_graph,
+        coordinator_input,
+        config={"configurable": {"thread_id": state.get("task_id", "")}},
+        extra_payload={
+            "nested_graph": "coordinator",
+            "trace_id": state.get("task_id", ""),
+        },
+    )
+
+    if result is None:
+        result = {}
+
+    payload: dict[str, Any] = {
+        "final_result": str(result.get("final_result") or ""),
+        "artifact_refs": list(result.get("artifact_refs") or []),
+        "review": dict(result.get("review") or {}),
+        "budget": dict(result.get("budget") or {}),
+    }
+
+    strategy_trace = result.get("strategy_trace") or []
+    if strategy_trace:
+        payload["research_strategy"] = " → ".join(str(s) for s in strategy_trace)
+
+    interrupt_state = result.get("interrupt_state")
+    if interrupt_state:
+        payload["interrupt_state"] = interrupt_state
+
+    latest_checkpoint_id = result.get("latest_checkpoint_id")
+    if latest_checkpoint_id:
+        payload["latest_checkpoint_id"] = latest_checkpoint_id
+
+    return payload
+
+
+async def persist_summary(state: RootState) -> dict[str, Any]:
+    conversation_id = state.get("conversation_id", "")
+    if not conversation_id:
+        return {}
+    final_result = state.get("final_result", "")
+    task_text = state.get("task_text", "")
+    if not final_result:
+        return {}
+    try:
+        from domain.conversations.context import ConversationContextBuilder
+        from langgraph.config import get_configurable
+
+        configurable = get_configurable()
+        pool = configurable.get("pool") if configurable else None
+        if pool is None:
+            return {}
+        builder = ConversationContextBuilder(pool)
+        summary_text = f"用户: {task_text[:200]}\n助手: {final_result[:500]}"
+        await builder.store.update_conversation_summary(
+            conversation_id,
+            summary_text,
+            0,
+        )
+    except Exception:
+        pass
+    return {}
+
+
+# ── 构建 Root Graph ──────────────────────────────────────────────────────────
+
+
+def build_root_graph(*, dispatcher: Dispatcher, checkpointer: Any):
+    graph = StateGraph(RootState)
+    graph.add_node("normalize_input", normalize_input)
+    graph.add_node("run_coordinator", run_coordinator)
+    graph.add_node("persist_summary", persist_summary)
+
+    graph.add_edge(START, "normalize_input")
+    graph.add_edge("normalize_input", "run_coordinator")
+    graph.add_edge("run_coordinator", "persist_summary")
+    graph.add_edge("persist_summary", END)
+    return graph.compile(checkpointer=checkpointer, name="chat_dada_root_graph")
+
+
+# ── DEPRECATED: Phase 4 cleanup ─────────────────────────────────────────────
+# The functions below are retained for backward compatibility during the
+# Phase 1→4 migration.  They are no longer wired into the root graph.
+
+
+# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
+def _build_clarification_prompt(state: RootState) -> dict[str, Any]:
+    return {
+        "content": "这个任务目标还不够明确。你更希望我直接回答、做深度研究，还是保留现有多工具流程？",
+        "context": f"原始任务：{state['task_text']}",
+        "placeholder": "例如：请直接做深度研究，并重点关注论文与实验。",
+        "interrupt_type": "clarification",
+    }
+
+
+# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
 def make_route_domain(dispatcher: Dispatcher):
     async def route_domain(state: RootState) -> dict[str, Any]:
         route = state.get("initial_route_payload")
@@ -89,6 +246,7 @@ def make_route_domain(dispatcher: Dispatcher):
     return route_domain
 
 
+# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
 async def maybe_clarify(state: RootState) -> dict[str, Any]:
     if state["route_decision"]["execution_path"] != "needs_clarification":
         return {}
@@ -101,10 +259,12 @@ async def maybe_clarify(state: RootState) -> dict[str, Any]:
     }
 
 
+# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
 def _interrupt_bridge(payload: dict[str, Any]) -> str:
     return str(request_interrupt({**payload, "interrupt_type": "human_input"}))
 
 
+# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
 async def run_general_chat(state: RootState) -> dict[str, Any]:
     from agent.runtime.dispatcher import run_general_chat_task
     from agent.runtime.task_execution import parse_step_payload
@@ -126,6 +286,7 @@ async def run_general_chat(state: RootState) -> dict[str, Any]:
     }
 
 
+# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
 def make_run_registered_domain(domain_name: str, *, enable_interrupt_bridge: bool = False):
     async def run_registered_domain(state: RootState) -> dict[str, Any]:
         runner = domain_registry.get(domain_name)
@@ -166,6 +327,7 @@ def make_run_registered_domain(domain_name: str, *, enable_interrupt_bridge: boo
     return run_registered_domain
 
 
+# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
 async def run_composite(state: RootState) -> dict[str, Any]:
     """Plan and execute a multi-capability composite task."""
     from agent.platform.task_planner import plan_task
@@ -202,75 +364,9 @@ async def run_composite(state: RootState) -> dict[str, Any]:
     }
 
 
-async def persist_summary(state: RootState) -> dict[str, Any]:
-    conversation_id = state.get("conversation_id", "")
-    if not conversation_id:
-        return {}
-    final_result = state.get("final_result", "")
-    task_text = state.get("task_text", "")
-    if not final_result:
-        return {}
-    try:
-        from domain.conversations.context import ConversationContextBuilder
-        from langgraph.config import get_configurable
-
-        configurable = get_configurable()
-        pool = configurable.get("pool") if configurable else None
-        if pool is None:
-            return {}
-        builder = ConversationContextBuilder(pool)
-        summary_text = f"用户: {task_text[:200]}\n助手: {final_result[:500]}"
-        await builder.store.update_conversation_summary(
-            conversation_id,
-            summary_text,
-            0,
-        )
-    except Exception:
-        pass
-    return {}
-
-
+# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
 def select_path(state: RootState) -> str:
     return state["route_decision"]["execution_path"]
-
-
-def build_root_graph(*, dispatcher: Dispatcher, checkpointer: Any):
-    graph = StateGraph(RootState)
-    graph.add_node("normalize_input", normalize_input)
-    graph.add_node("route_domain", make_route_domain(dispatcher))
-    graph.add_node("maybe_clarify", maybe_clarify)
-    graph.add_node("run_general_chat", run_general_chat)
-    graph.add_node("run_research", make_run_registered_domain("research", enable_interrupt_bridge=True))
-    graph.add_node("run_patent", make_run_registered_domain("patent", enable_interrupt_bridge=True))
-    graph.add_node("run_zero_report", make_run_registered_domain("zero_report", enable_interrupt_bridge=True))
-    graph.add_node("run_ppt", make_run_registered_domain("ppt", enable_interrupt_bridge=True))
-    graph.add_node("run_composite", run_composite)
-    graph.add_node("persist_summary", persist_summary)
-
-    graph.add_edge(START, "normalize_input")
-    graph.add_edge("normalize_input", "route_domain")
-    graph.add_conditional_edges(
-        "route_domain",
-        select_path,
-        {
-            "general_chat": "run_general_chat",
-            "research": "run_research",
-            "patent": "run_patent",
-            "zero_report": "run_zero_report",
-            "ppt": "run_ppt",
-            "composite": "run_composite",
-            "needs_clarification": "maybe_clarify",
-        },
-    )
-    graph.add_edge("maybe_clarify", "route_domain")
-    graph.add_edge("run_general_chat", "persist_summary")
-    graph.add_edge("run_research", "persist_summary")
-    graph.add_edge("run_patent", "persist_summary")
-    graph.add_edge("run_zero_report", "persist_summary")
-    graph.add_edge("run_ppt", "persist_summary")
-    graph.add_edge("run_composite", "persist_summary")
-    graph.add_edge("persist_summary", END)
-    return graph.compile(checkpointer=checkpointer, name="chat_dada_root_graph")
 
 
 __all__ = ["build_root_graph"]
