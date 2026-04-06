@@ -1,6 +1,9 @@
 """
 PPT domain agent — OfficeCLI version.
 
+Uses domain-internal workflow for PPT tasks.
+(PRD §8.3 C1: inlined build_orchestrated_graph to domain module)
+
 The agent receives the officecli SKILL.md as system context and uses
 officecli_run / officecli_batch tools to create .pptx files directly.
 Research tools (web_search, etc.) are also available for content gathering.
@@ -16,24 +19,14 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agent.capabilities.review_gates import ReviewGate
-from agent.domains.ppt.tools import get_ppt_tools
+from agent.domains.ppt.workflow import (
+    build_ppt_workflow_graph,
+    PPT_MAX_COST,
+    PPT_MAX_STEPS,
+)
 from agent.platform.streaming import stream_nested_graph
-from agent.workflows.orchestrator import build_orchestrated_graph
-from agent.workflows.spec import DomainSpec, SubagentConfig
 
 _log = logging.getLogger("chatdada.ppt.orchestrated")
-
-# ── Load OfficeCLI SKILL.md (once at import time) ───────────────────────────
-
-_SKILL_PATH = Path(__file__).resolve().parents[3] / "skills" / "officecli" / "SKILL.md"
-
-_OFFICECLI_SKILL: str = ""
-if _SKILL_PATH.exists():
-    _OFFICECLI_SKILL = _SKILL_PATH.read_text(encoding="utf-8")
-    _log.info("Loaded OfficeCLI SKILL.md (%d chars)", len(_OFFICECLI_SKILL))
-else:
-    _log.warning("OfficeCLI SKILL.md not found at %s", _SKILL_PATH)
 
 
 # ── Shared result model ─────────────────────────────────────────────────────
@@ -46,67 +39,12 @@ class PptDomainResult(BaseModel):
     budget: dict[str, Any]
 
 
-# ── System prompt ────────────────────────────────────────────────────────────
+# ── Compiled graph ───────────────────────────────────────────────────────────
 
-_PPT_SYSTEM = """\
-你是 PPT 生成专家。你可以用 officecli 工具直接创建和编辑 PowerPoint 文件。
-
-## 工作流程
-
-1. **搜索素材**：先用 web_search / academic_search 等工具搜索相关素材和数据
-2. **规划大纲**：确定 PPT 结构（封面、各章节、总结）
-3. **创建 PPT**：用 officecli_run("create <filename>.pptx") 创建空文件
-4. **逐步构建**：用 officecli_run 或 officecli_batch 添加幻灯片和内容
-5. **验证检查**：用 officecli_run("validate <filename>.pptx") 检查文件质量
-6. **修复问题**：如果 validate 或 view issues 发现问题，用 set/remove 修复
-
-## 关键规则
-
-- 文件名只用英文字母/数字/下划线，例如 "report_q4.pptx"
-- 所有文件操作自动在 outputs/ 目录下进行，只传文件名
-- 不确定属性名时，先运行 officecli_run("pptx set shape") 查询帮助
-- 每页正文控制在 50-80 字，要点化表达
-- 使用中文内容
-- 完成后必须运行 validate 确认文件有效
-
-## 输出要求
-
-完成 PPT 创建后，你的最终回复必须包含以下 JSON（用 ```json 包裹）：
-```json
-{{"filename": "<文件名>.pptx", "title": "<PPT标题>", "slide_count": <页数>}}
-```
-
-## OfficeCLI 参考手册
-
-{skill_content}
-"""
+_graph = build_ppt_workflow_graph()
 
 
-# ── DomainSpec ───────────────────────────────────────────────────────────────
-
-PPT_SPEC = DomainSpec(
-    name="ppt",
-    model_role="orchestrator",
-    system_prompt=_PPT_SYSTEM.format(skill_content=_OFFICECLI_SKILL),
-    tools=get_ppt_tools(),
-    subagents=[
-        SubagentConfig(
-            name="content_researcher",
-            description="Search for relevant data, statistics, and materials for PPT slides.",
-            system_prompt="搜索与 PPT 主题相关的数据、案例和素材。输出结构化的要点和来源。",
-            tools=[t for t in get_ppt_tools() if t.name not in ("officecli_run", "officecli_batch")],
-        ),
-    ],
-    evaluator=ReviewGate(),
-    strategy_hints=["sequential"],
-    max_steps=15,  # More steps needed: agent iterates create→add→validate→fix
-    max_cost=3.0,
-)
-
-_graph = build_orchestrated_graph(PPT_SPEC)
-
-
-# ── Entry point ──────────────────────────────────────────────────────────────
+# ── Helper functions ─────────────────────────────────────────────────────────
 
 def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
     try:
@@ -140,12 +78,12 @@ def _extract_result_json(text: str) -> dict | None:
 async def run_ppt_domain_orchestrated(
     input_data: dict[str, Any],
 ) -> PptDomainResult:
-    """Run PPT domain: agent uses officecli tools to create .pptx directly."""
+    """Run PPT domain using the domain-internal workflow."""
     query = input_data.get("query") or input_data.get("task", "")
     task_id = input_data.get("task_id", "ppt_unknown")
 
-    _log.info("Starting OfficeCLI PPT: query=%s task_id=%s", str(query)[:60], task_id)
-    _safe_emit("step", "🎨 PPT 生成中（OfficeCLI）...")
+    _log.info("Starting PPT workflow: query=%s task_id=%s", str(query)[:60], task_id)
+    _safe_emit("step", "PPT generation started...")
 
     result = await stream_nested_graph(
         _graph,
@@ -156,8 +94,8 @@ async def run_ppt_domain_orchestrated(
             "cost": 0.0,
             "progress": 0.0,
             "confidence": 0.0,
-            "max_cost": PPT_SPEC.max_cost,
-            "max_steps": PPT_SPEC.max_steps,
+            "max_cost": PPT_MAX_COST,
+            "max_steps": PPT_MAX_STEPS,
             "intermediate_results": [],
             "evaluations": [],
             "step_history": [],
@@ -165,9 +103,9 @@ async def run_ppt_domain_orchestrated(
         },
         config={"configurable": {"thread_id": str(task_id)}},
         extra_payload={
-            "nested_graph": "ppt_orchestrated_graph",
+            "nested_graph": "ppt_workflow",
             "domain_name": "ppt",
-            "source": "domain_orchestrated_wrapper",
+            "source": "ppt_workflow",
         },
     )
 
@@ -181,7 +119,7 @@ async def run_ppt_domain_orchestrated(
             result="PPT 生成失败：agent 未返回结果。",
             artifact_refs=[],
             review={"passed": False, "reason": "No content generated"},
-            budget={"action": "allow", "reason": f"orchestrated({' → '.join(strategies_used)})"},
+            budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
         )
 
     # Extract filename from agent's structured JSON output
@@ -195,7 +133,7 @@ async def run_ppt_domain_orchestrated(
         output_path = outputs_dir / filename
 
         if output_path.exists():
-            _safe_emit("step", f"✅ PPT 已生成: {filename}")
+            _safe_emit("step", f"PPT created: {filename}")
             _safe_emit("file", json.dumps({"type": "file", "url": f"/download/{filename}", "name": filename}))
 
             result_text = f"PPT 已生成：《{title}》，共 {slide_count} 页。\n下载: /download/{filename}"
@@ -204,7 +142,7 @@ async def run_ppt_domain_orchestrated(
                 result=result_text,
                 artifact_refs=[{"name": filename, "type": "pptx", "url": f"/download/{filename}"}],
                 review={"passed": True, "reason": "PPT created via OfficeCLI"},
-                budget={"action": "allow", "reason": f"orchestrated({' → '.join(strategies_used)})"},
+                budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
             )
 
     # Fallback: look for any .pptx file created during this run
@@ -212,7 +150,7 @@ async def run_ppt_domain_orchestrated(
     if pptx_files:
         latest = pptx_files[0]
         filename = latest.name
-        _safe_emit("step", f"✅ PPT 已生成: {filename}")
+        _safe_emit("step", f"PPT created: {filename}")
         _safe_emit("file", json.dumps({"type": "file", "url": f"/download/{filename}", "name": filename}))
 
         return PptDomainResult(
@@ -220,7 +158,7 @@ async def run_ppt_domain_orchestrated(
             result=f"PPT 已生成：{filename}\n下载: /download/{filename}\n\n{content_text}",
             artifact_refs=[{"name": filename, "type": "pptx", "url": f"/download/{filename}"}],
             review={"passed": True, "reason": "PPT file found in outputs"},
-            budget={"action": "allow", "reason": f"orchestrated({' → '.join(strategies_used)})"},
+            budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
         )
 
     # No file produced — return raw content
@@ -230,5 +168,5 @@ async def run_ppt_domain_orchestrated(
         result=content_text,
         artifact_refs=[],
         review={"passed": False, "reason": "No .pptx file produced"},
-        budget={"action": "allow", "reason": f"orchestrated({' → '.join(strategies_used)})"},
+        budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
     )

@@ -14,7 +14,7 @@ import asyncpg
 import redis.asyncio as aioredis
 from langgraph.types import Command
 
-from agent.runtime.dispatcher import RouteDecision, build_route_payload, dispatch_task
+from agent.platform.state import RouteDecisionPayload
 from agent.runtime.interaction import (
     reset_preloaded_user_replies,
     reset_task_interaction_handler,
@@ -38,7 +38,6 @@ log = logging.getLogger("chatdada.tasks")
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 HEARTBEAT_INTERVAL_SECONDS = 10
 
-TaskDispatcher = AbcCallable[[str, list[str], str, str], Awaitable[RouteDecision]]
 
 
 def compose_task_text(task: str, file_paths: list[str]) -> str:
@@ -422,12 +421,10 @@ class TaskService:
         self,
         database_url: str,
         redis_url: str,
-        dispatcher: TaskDispatcher = dispatch_task,
     ) -> None:
         self._store = TaskRunStore(database_url)
         self._database_url = database_url
         self._redis_url = redis_url
-        self._dispatcher = dispatcher
         self._redis: aioredis.Redis | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._runner_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -453,10 +450,7 @@ class TaskService:
         await self._store.connect()
         self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
         self._checkpointer = await self._open_checkpointer()
-        self._root_graph = build_root_graph(
-            dispatcher=self._dispatcher,
-            checkpointer=self._checkpointer,
-        )
+        self._root_graph = build_root_graph(checkpointer=self._checkpointer)
 
     async def close(self) -> None:
         for task in list(self._runner_tasks.values()):
@@ -696,12 +690,14 @@ class TaskService:
         decision = None
         route_payload = snapshot.get("initial_route_payload")
         if resume_value is None:
-            decision = await self._dispatcher(task_text, file_paths, mode, user_id)
-            route_payload = build_route_payload(
-                task_text=task_text,
-                file_paths=file_paths,
-                decision=decision,
-            )
+            # C7: Dispatcher routing deleted — Coordinator's understand_goal does routing internally.
+            # Use minimal placeholder route_payload; actual routing happens in run_coordinator.
+            route_payload: RouteDecisionPayload = {
+                "route_name": "general_chat",
+                "reason": "placeholder for coordinator routing",
+                "confidence": 0.0,
+                "execution_path": "general_chat",
+            }
             public_route_name = route_payload["route_name"]
             await self._store.set_route_info(
                 task_id,
