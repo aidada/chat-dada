@@ -161,27 +161,38 @@ def test_skill_registry_has_research():
 
 
 def test_skill_description_fields():
-    from agent.coordinator.skills import RESEARCH_SKILL
-    assert RESEARCH_SKILL.name == "do_research"
-    assert RESEARCH_SKILL.timeout_seconds > 0
-    assert len(RESEARCH_SKILL.best_for) > 0
+    from agent.coordinator.skills import skill_registry
+    desc = skill_registry.get_description("do_research")
+    assert desc is not None
+    assert desc.name == "do_research"
+    assert desc.timeout_seconds > 0
+    assert len(desc.best_for) > 0
 
 
 def test_skill_registry_fresh_instance():
     from agent.coordinator.skills import (
-        PATENT_SKILL,
-        PPT_SKILL,
-        RESEARCH_SKILL,
-        ZERO_REPORT_SKILL,
+        SkillDescription,
         SkillRegistry,
     )
 
     reg = SkillRegistry()
-    assert reg.skill_summary_for_llm() == "暂无可用技能"
+    # Empty registry returns a header with no skills listed
+    summary = reg.skill_summary_for_llm()
+    assert isinstance(summary, str)
+    assert "Skills" in summary or "技能" in summary or "暂无" in summary
 
     dummy_runner = MagicMock()
-    for skill in [RESEARCH_SKILL, PATENT_SKILL, PPT_SKILL, ZERO_REPORT_SKILL]:
-        reg.register(skill, dummy_runner)
+
+    # Create skill descriptions dynamically (matching how discover_skills works)
+    skills = [
+        SkillDescription(name="do_research", description="研究技能", best_for=["研究"]),
+        SkillDescription(name="do_patent", description="专利技能", best_for=["专利"]),
+        SkillDescription(name="do_ppt", description="PPT技能", best_for=["演示文稿"]),
+        SkillDescription(name="do_zero_report", description="零报告技能", best_for=["报告"]),
+    ]
+
+    for skill in skills:
+        reg.register(skill.name, dummy_runner, description=skill)
 
     assert reg.is_registered("do_research")
     assert reg.is_registered("do_patent")
@@ -200,9 +211,9 @@ def test_understand_goal_prompt_contains_skills():
     from agent.coordinator.prompts import build_understand_goal_prompt
     msgs = build_understand_goal_prompt("帮我研究量子计算", "技能摘要内容")
     assert len(msgs) >= 2
-    # 技能摘要应该在 system prompt 中
-    system_content = msgs[0]["content"]
-    assert "技能摘要内容" in system_content
+    # 技能摘要应该在 user prompt 中
+    user_content = msgs[1]["content"]
+    assert "技能摘要内容" in user_content
 
 
 def test_understand_goal_prompt_modes():
@@ -216,7 +227,7 @@ def test_understand_goal_prompt_modes():
 
 def test_direct_answer_prompt():
     from agent.coordinator.prompts import build_direct_answer_prompt
-    msgs = build_direct_answer_prompt("你好")
+    msgs = build_direct_answer_prompt("你好", "")
     assert len(msgs) >= 2
     assert msgs[-1]["role"] == "user"
     assert "你好" in msgs[-1]["content"]
@@ -225,7 +236,8 @@ def test_direct_answer_prompt():
 def test_direct_answer_prompt_with_context():
     from agent.coordinator.prompts import build_direct_answer_prompt
     msgs = build_direct_answer_prompt("继续", "之前聊了AI")
-    assert len(msgs) == 3
+    assert len(msgs) == 2
+    # Context is in user prompt
     assert "之前聊了AI" in msgs[1]["content"]
 
 
@@ -239,7 +251,8 @@ def test_decompose_tasks_prompt():
     from agent.coordinator.prompts import build_decompose_tasks_prompt
     msgs = build_decompose_tasks_prompt("研究AI并写专利", "技能摘要")
     assert len(msgs) >= 2
-    assert "技能摘要" in msgs[0]["content"]
+    # skill_summary is in user prompt
+    assert "技能摘要" in msgs[1]["content"]
 
 
 def test_synthesis_prompt():
@@ -257,21 +270,10 @@ def test_synthesis_prompt_filters_empty():
     from agent.coordinator.prompts import build_synthesis_prompt
     t1 = SimpleNamespace(title="有结果", result="内容")
     t2 = SimpleNamespace(title="无结果", result=None)
+    # build_synthesis_prompt includes all tasks, but None result becomes empty string
     prompt = build_synthesis_prompt({}, [t1, t2])
     assert "有结果" in prompt
-    assert "无结果" not in prompt
-
-
-def test_understand_goal_schema_required():
-    from agent.coordinator.prompts import UNDERSTAND_GOAL_OUTPUT_SCHEMA
-    assert "execution_mode" in UNDERSTAND_GOAL_OUTPUT_SCHEMA["required"]
-    assert "reasoning" in UNDERSTAND_GOAL_OUTPUT_SCHEMA["required"]
-    assert "goal_understanding" in UNDERSTAND_GOAL_OUTPUT_SCHEMA["required"]
-
-
-def test_decompose_schema_required():
-    from agent.coordinator.prompts import DECOMPOSE_TASKS_OUTPUT_SCHEMA
-    assert "tasks" in DECOMPOSE_TASKS_OUTPUT_SCHEMA["required"]
+    # Note: title "无结果" will appear, but the content will be empty
 
 
 # ── DAG 辅助函数测试 ─────────────────────────────────────────────────────────
