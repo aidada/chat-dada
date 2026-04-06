@@ -907,7 +907,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
             "request_payload": {},
         }
 
-        with patch("agent.runtime.root_graph.domain_registry.get", return_value=fake_runner):
+        with patch("agent.coordinator.skills.skill_registry.get_runner", return_value=fake_runner):
             interrupted_payloads: list[dict] = []
             async for part in graph.astream(
                 initial_state,
