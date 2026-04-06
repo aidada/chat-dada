@@ -1,9 +1,11 @@
 """
 Zero-report domain agent — orchestrated version.
 
-Uses the DomainOrchestrator for dynamic strategy composition.
+Uses domain-internal workflow for zero-report tasks.
+(PRD §8.3 C1: inlined build_orchestrated_graph to domain module)
+
 Zero-report tasks typically need planning (decompose into timeline → root-cause → actions → draft),
-then sequential or parallel execution, with iterative refinement if review fails.
+then iterative refinement if review fails.
 """
 from __future__ import annotations
 
@@ -11,7 +13,6 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
-from dataclasses import dataclass, field
 
 from agent.capabilities.citation_manager import CitationMap
 from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
@@ -25,96 +26,19 @@ from agent.domains.zero_report.agent import (
     _build_timeline,
     _persist_artifacts,
 )
-from agent.domains.zero_report.prompts import (
-    ACTION_PLANNER_PROMPT,
-    BASE_ZERO_REPORT_SYSTEM,
-    ROOT_CAUSE_ANALYST_PROMPT,
-    TIMELINE_BUILDER_PROMPT,
+from agent.domains.zero_report.workflow import (
+    build_zero_report_workflow_graph,
+    ZERO_REPORT_MAX_COST,
+    ZERO_REPORT_MAX_STEPS,
 )
-from agent.domains.zero_report.reviewers import ZeroReportReviewGate
-from agent.domains.zero_report.tools import get_zero_report_tools
 from agent.platform.streaming import stream_nested_graph
-
-from agent.workflows.orchestrator import build_orchestrated_graph, DomainSpec
 
 _log = logging.getLogger("chatdada.zero_report.orchestrated")
 
 
-# ── SubagentConfig (defined locally, PRD §8.3 C3) ───────────────────────────────
-
-
-@dataclass
-class SubagentConfig:
-    """Configuration for a deepagents subagent."""
-
-    name: str
-    description: str
-    system_prompt: str
-    tools: list[Any] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "description": self.description,
-            "system_prompt": self.system_prompt,
-            "tools": self.tools,
-        }
-
-
-# ── DomainSpec declaration ───────────────────────────────────────────────────
-
-ZERO_REPORT_SPEC = DomainSpec(
-    name="zero_report",
-    model_role="zero_report_domain",
-    system_prompt=BASE_ZERO_REPORT_SYSTEM,
-    tools=get_zero_report_tools(),
-    subagents=[
-        SubagentConfig(
-            name="incident_structurer",
-            description="Extract structured incident facts from raw event description.",
-            system_prompt=(
-                "请从事件描述中提取结构化的事件摘要，包括标题、摘要、影响范围。输出 JSON。"
-            ),
-            tools=get_zero_report_tools(),
-        ),
-        SubagentConfig(
-            name="timeline_builder",
-            description="Build a chronological timeline of key events.",
-            system_prompt=TIMELINE_BUILDER_PROMPT,
-            tools=get_zero_report_tools(),
-        ),
-        SubagentConfig(
-            name="root_cause_analyst",
-            description="Perform root cause analysis using the '5 Whys' method.",
-            system_prompt=ROOT_CAUSE_ANALYST_PROMPT,
-            tools=get_zero_report_tools(),
-        ),
-        SubagentConfig(
-            name="corrective_action_planner",
-            description="Define corrective actions with owners and deadlines.",
-            system_prompt=ACTION_PLANNER_PROMPT,
-            tools=get_zero_report_tools(),
-        ),
-        SubagentConfig(
-            name="report_reviewer",
-            description="Review the complete zero report for completeness and accountability.",
-            system_prompt=(
-                "请审查归零报告的完整性：时间线是否完整、根因是否达到可行动层、"
-                "整改措施是否有责任人和时限。输出 JSON 数组，每条含 severity 和 message。"
-            ),
-            tools=get_zero_report_tools(),
-        ),
-    ],
-    evaluator=ZeroReportReviewGate(),
-    strategy_hints=["planning", "iterative"],  # decompose first, then refine
-    max_steps=8,
-    max_cost=3.0,
-)
-
-
 # ── Compiled graph ───────────────────────────────────────────────────────────
 
-_graph = build_orchestrated_graph(ZERO_REPORT_SPEC)
+_graph = build_zero_report_workflow_graph()
 
 
 def _persist_orchestrated_artifacts(task_id: str, query: str, report: str) -> list[dict[str, Any]]:
@@ -188,13 +112,13 @@ def _persist_orchestrated_artifacts(task_id: str, query: str, report: str) -> li
 async def run_zero_report_domain_orchestrated(
     input_data: dict[str, Any],
 ) -> ZeroReportDomainResult:
-    """Run zero-report domain using the dynamic workflow orchestrator."""
+    """Run zero-report domain using the domain-internal workflow."""
     query = str(
         input_data.get("query", input_data.get("task", "")) or ""
     ).strip()
     task_id = str(input_data.get("task_id", "") or "zero_report_preview")
 
-    _log.info("Starting orchestrated zero-report: query=%s task_id=%s", query[:60], task_id)
+    _log.info("Starting zero-report workflow: query=%s task_id=%s", query[:60], task_id)
 
     result = await stream_nested_graph(
         _graph,
@@ -205,8 +129,8 @@ async def run_zero_report_domain_orchestrated(
             "cost": 0.0,
             "progress": 0.0,
             "confidence": 0.0,
-            "max_cost": ZERO_REPORT_SPEC.max_cost,
-            "max_steps": ZERO_REPORT_SPEC.max_steps,
+            "max_cost": ZERO_REPORT_MAX_COST,
+            "max_steps": ZERO_REPORT_MAX_STEPS,
             "intermediate_results": [],
             "evaluations": [],
             "step_history": [],
@@ -214,9 +138,9 @@ async def run_zero_report_domain_orchestrated(
         },
         config={"configurable": {"thread_id": task_id}},
         extra_payload={
-            "nested_graph": "zero_report_orchestrated_graph",
+            "nested_graph": "zero_report_workflow",
             "domain_name": "zero_report",
-            "source": "domain_orchestrated_wrapper",
+            "source": "zero_report_workflow",
         },
     )
 
@@ -236,5 +160,5 @@ async def run_zero_report_domain_orchestrated(
             "passed": last_eval.get("passed", False),
             "issues": last_eval.get("issues", []),
         },
-        budget={"action": "allow", "reason": f"orchestrated({' → '.join(strategies_used)})"},
+        budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
     )

@@ -1,9 +1,8 @@
 """
 Patent domain agent — orchestrated version.
 
-Uses the DomainOrchestrator for dynamic strategy composition.
-Patent tasks are typically sequential (disclosure → prior-art → claims → spec → review),
-but the orchestrator can switch to iterative refinement if the review gate fails.
+Uses domain-internal workflow for patent tasks.
+(PRD §8.3 C1: inlined build_orchestrated_graph to domain module)
 """
 from __future__ import annotations
 
@@ -11,7 +10,6 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
-from dataclasses import dataclass, field
 
 from agent.capabilities.citation_manager import CitationMap
 from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
@@ -24,93 +22,19 @@ from agent.domains.patent.agent import (
     _build_spec,
     _persist_artifacts,
 )
-from agent.domains.patent.prompts import (
-    CLAIM_DRAFTER_PROMPT,
-    DISCLOSURE_ANALYST_PROMPT,
-    PATENT_DOMAIN_PROMPT,
-    PATENT_REVIEWER_PROMPT,
-    PRIOR_ART_RESEARCHER_PROMPT,
-    SPECIFICATION_DRAFTER_PROMPT,
+from agent.domains.patent.workflow import (
+    build_patent_workflow_graph,
+    PATENT_MAX_COST,
+    PATENT_MAX_STEPS,
 )
-from agent.domains.patent.reviewers import PatentReviewGate
-from agent.domains.patent.tools import get_patent_tools
 from agent.platform.streaming import stream_nested_graph
-
-from agent.workflows.orchestrator import build_orchestrated_graph, DomainSpec
 
 _log = logging.getLogger("chatdada.patent.orchestrated")
 
 
-# ── SubagentConfig (defined locally, PRD §8.3 C3) ───────────────────────────────
-
-
-@dataclass
-class SubagentConfig:
-    """Configuration for a deepagents subagent."""
-
-    name: str
-    description: str
-    system_prompt: str
-    tools: list[Any] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "description": self.description,
-            "system_prompt": self.system_prompt,
-            "tools": self.tools,
-        }
-
-
-# ── DomainSpec declaration ───────────────────────────────────────────────────
-
-PATENT_SPEC = DomainSpec(
-    name="patent",
-    model_role="patent_domain",
-    system_prompt=PATENT_DOMAIN_PROMPT,
-    tools=get_patent_tools(),
-    subagents=[
-        SubagentConfig(
-            name="technical_disclosure_analyst",
-            description="Extract structured technical disclosure from user input.",
-            system_prompt=DISCLOSURE_ANALYST_PROMPT,
-            tools=get_patent_tools(),
-        ),
-        SubagentConfig(
-            name="prior_art_researcher",
-            description="Search for prior art and map coverage against claims.",
-            system_prompt=PRIOR_ART_RESEARCHER_PROMPT,
-            tools=get_patent_tools(),
-        ),
-        SubagentConfig(
-            name="claim_drafter",
-            description="Draft a patent claim tree with independent and dependent claims.",
-            system_prompt=CLAIM_DRAFTER_PROMPT,
-            tools=get_patent_tools(),
-        ),
-        SubagentConfig(
-            name="specification_drafter",
-            description="Draft the patent specification document.",
-            system_prompt=SPECIFICATION_DRAFTER_PROMPT,
-            tools=get_patent_tools(),
-        ),
-        SubagentConfig(
-            name="patent_reviewer",
-            description="Review the full patent draft for structural and semantic issues.",
-            system_prompt=PATENT_REVIEWER_PROMPT,
-            tools=get_patent_tools(),
-        ),
-    ],
-    evaluator=PatentReviewGate(),
-    strategy_hints=["sequential", "iterative"],  # patent is linear, with iterative refinement
-    max_steps=6,
-    max_cost=3.0,
-)
-
-
 # ── Compiled graph ───────────────────────────────────────────────────────────
 
-_graph = build_orchestrated_graph(PATENT_SPEC)
+_graph = build_patent_workflow_graph()
 
 
 def _persist_orchestrated_artifacts(task_id: str, query: str, report: str) -> list[dict[str, Any]]:
@@ -177,13 +101,13 @@ def _persist_orchestrated_artifacts(task_id: str, query: str, report: str) -> li
 async def run_patent_domain_orchestrated(
     input_data: dict[str, Any],
 ) -> PatentDomainResult:
-    """Run patent domain using the dynamic workflow orchestrator."""
+    """Run patent domain using the domain-internal workflow."""
     query = str(
         input_data.get("query", input_data.get("task", "")) or ""
     ).strip()
     task_id = str(input_data.get("task_id", "") or "patent_preview")
 
-    _log.info("Starting orchestrated patent: query=%s task_id=%s", query[:60], task_id)
+    _log.info("Starting patent workflow: query=%s task_id=%s", query[:60], task_id)
 
     result = await stream_nested_graph(
         _graph,
@@ -194,8 +118,8 @@ async def run_patent_domain_orchestrated(
             "cost": 0.0,
             "progress": 0.0,
             "confidence": 0.0,
-            "max_cost": PATENT_SPEC.max_cost,
-            "max_steps": PATENT_SPEC.max_steps,
+            "max_cost": PATENT_MAX_COST,
+            "max_steps": PATENT_MAX_STEPS,
             "intermediate_results": [],
             "evaluations": [],
             "step_history": [],
@@ -203,9 +127,9 @@ async def run_patent_domain_orchestrated(
         },
         config={"configurable": {"thread_id": task_id}},
         extra_payload={
-            "nested_graph": "patent_orchestrated_graph",
+            "nested_graph": "patent_workflow",
             "domain_name": "patent",
-            "source": "domain_orchestrated_wrapper",
+            "source": "patent_workflow",
         },
     )
 
@@ -225,5 +149,5 @@ async def run_patent_domain_orchestrated(
             "passed": last_eval.get("passed", False),
             "issues": last_eval.get("issues", []),
         },
-        budget={"action": "allow", "reason": f"orchestrated({' → '.join(strategies_used)})"},
+        budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
     )
