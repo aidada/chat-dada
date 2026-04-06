@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
-from agent.capabilities.general_chat import run as run_general_chat
 from agent.platform.state import RouteDecisionPayload
 
 _log = logging.getLogger("chatdada.router")
@@ -208,29 +205,6 @@ def route_task_request(task_text: str, file_paths: list[str], mode: str = "auto"
     return "general_chat", "defaulted to direct chat because no orchestration signals were found", 0.65
 
 
-async def run_general_chat_task(
-    task: str,
-    on_step: Callable[[str], Awaitable[None]],
-    user_id: str = "anonymous",
-    conversation_context: str = "",
-) -> str:
-    await on_step("💬 正在回答...")
-
-    async def on_chunk(content: str) -> None:
-        if not content:
-            return
-        await on_step(json.dumps({"type": "token", "content": content}, ensure_ascii=False))
-        await on_step(json.dumps({"type": "result_delta", "content": content}, ensure_ascii=False))
-
-    result = await run_general_chat(
-        {"query": task, "conversation_context": conversation_context},
-        on_chunk=on_chunk,
-    )
-    if isinstance(result, dict):
-        return str(result.get("result", result))
-    return str(result)
-
-
 async def dispatch_task(
     task_text: str,
     file_paths: list[str],
@@ -327,5 +301,4 @@ __all__ = [
     "is_research_task",
     "needs_clarification",
     "route_task_request",
-    "run_general_chat_task",
 ]

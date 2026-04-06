@@ -9,7 +9,7 @@ from agent.domains.patent.agent import run_patent_domain
 from agent.domains.research.orchestrated import run_research_domain_orchestrated
 from agent.domains.zero_report.agent import run_zero_report_domain
 from agent.runtime.dispatcher import RouteDecision
-from agent.runtime.dispatcher import build_route_payload, run_general_chat_task
+from agent.runtime.dispatcher import build_route_payload
 from agent.runtime.interaction import (
     ask_user,
     reset_preloaded_user_replies,
@@ -329,28 +329,6 @@ class NestedGraphStreamingTests(unittest.IsolatedAsyncioTestCase):
             await stream_nested_graph(FakeGraph(), {"messages": []})
 
         self.assertEqual(getattr(seen["input_data"], "resume", None), "reply")
-
-
-class GeneralChatStreamingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_general_chat_emits_token_and_result_delta(self) -> None:
-        collected: list[str] = []
-
-        async def fake_on_step(step: str) -> None:
-            collected.append(step)
-
-        async def fake_run_general_chat(input_data, on_chunk=None):
-            if on_chunk is not None:
-                await on_chunk("partial")
-            return {"result": "done"}
-
-        with patch("agent.runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat):
-            result = await run_general_chat_task("hello", fake_on_step, user_id="u1")
-
-        self.assertEqual(result, "done")
-        self.assertEqual(len(collected), 3)
-        self.assertEqual(collected[0], "💬 正在回答...")
-        self.assertIn('"type": "token"', collected[1])
-        self.assertIn('"type": "result_delta"', collected[2])
 
 
 class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
@@ -1015,61 +993,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(state_snapshot.values.get("final_result"), "nested final result")
 
-    async def test_non_interrupt_path_completes(self) -> None:
-        """High-confidence tasks should complete without interruption."""
-        from langgraph.checkpoint.memory import InMemorySaver
-        from agent.runtime.root_graph import build_root_graph
-
-        async def fake_dispatcher(task_text, file_paths, mode, user_id):
-            return RouteDecision(
-                route_name="general_chat",
-                reason="simple question",
-                confidence=0.95,
-            )
-
-        async def fake_general_chat(task, on_step, **kwargs):
-            return "Hello!"
-
-        checkpointer = InMemorySaver()
-        graph = build_root_graph(
-            dispatcher=fake_dispatcher,
-            checkpointer=checkpointer,
-        )
-
-        initial_state = {
-            "task_id": "test_no_interrupt",
-            "thread_id": "test_no_interrupt",
-            "user_id": "test_user",
-            "mode": "auto",
-            "thinking_level": "medium",
-            "task_text": "你好",
-            "execution_task": "你好",
-            "file_paths": [],
-            "conversation_id": "",
-            "conversation_context": "",
-            "request_payload": {},
-        }
-        config = {"configurable": {"thread_id": "test_no_interrupt"}}
-
-        interrupted = False
-        with patch("agent.runtime.dispatcher.run_general_chat_task", new=fake_general_chat):
-            async for part in graph.astream(
-                initial_state,
-                config=config,
-                version="v2",
-                stream_mode=["updates"],
-            ):
-                data = part.get("data") or {}
-                if data.get("__interrupt__"):
-                    interrupted = True
-
-        self.assertFalse(interrupted, "High-confidence task should not interrupt")
-        state = await graph.aget_state(config)
-        values = getattr(state, "values", {}) or {}
-        self.assertEqual(values.get("final_result"), "Hello!")
-
-
-class CitationMapTests(unittest.TestCase):
+    class CitationMapTests(unittest.TestCase):
     def test_add_deduplicates_by_url(self) -> None:
         from agent.capabilities.citation_manager import CitationMap
 

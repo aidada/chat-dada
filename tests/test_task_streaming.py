@@ -61,13 +61,6 @@ async def fake_dispatcher(
     )
 
 
-async def fake_run_general_chat(input_data, on_chunk=None):
-    query = input_data.get("query", "")
-    if on_chunk is not None:
-        await on_chunk(f"chat chunk for {query}")
-    return {"result": f"chat result for {query}"}
-
-
 def _emit_stream_event(payload: dict) -> None:
     try:
         from langgraph.config import get_stream_writer
@@ -185,7 +178,6 @@ def wait_for_status_http(
 class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._patchers = [
-            patch("agent.runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat),
             patch("agent.runtime.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
         ]
         for patcher in self._patchers:
@@ -224,25 +216,6 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         file_event = next(event for event in events if event["type"] == "file")
         self.assertEqual(file_event["name"], "fake.txt")
         self.assertEqual(events[-1]["type"], "monitoring")
-
-    async def test_submit_task_routes_to_general_chat_for_simple_greeting(self) -> None:
-        snapshot = await self.service.submit_task(
-            task_text="hi",
-            user_id="user-3",
-            mode="auto",
-            thinking_level="medium",
-            file_paths=[],
-        )
-
-        final_snapshot = await wait_for_terminal(self.service, snapshot["task_id"])
-        self.assertEqual(final_snapshot["status"], "succeeded")
-        self.assertEqual(final_snapshot["route_name"], "general_chat")
-        self.assertIn("direct chat", final_snapshot["route_reason"])
-        self.assertIn("chat result", final_snapshot["result"])
-
-        events = await self.service.get_events_after(snapshot["task_id"], 0)
-        route_event = next(event for event in events if event["type"] == "step" and "Route: general_chat" in event.get("content", ""))
-        self.assertIn("Route: general_chat", route_event["content"])
 
     async def test_task_can_pause_for_user_reply_and_resume(self) -> None:
         async def interactive_dispatcher(
@@ -421,7 +394,6 @@ class TaskEndpointTests(unittest.TestCase):
         self._web_runtime = web_runtime
         self.original_service = web_runtime.task_service
         self._patchers = [
-            patch("agent.runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat),
             patch("agent.runtime.root_graph.domain_registry.get", side_effect=lambda _name: fake_domain_runner),
         ]
         for patcher in self._patchers:
