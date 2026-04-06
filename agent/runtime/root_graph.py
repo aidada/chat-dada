@@ -1,32 +1,18 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Awaitable, Callable
-from contextvars import Token
 from typing import Any
 
-from langgraph.config import get_stream_writer
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 
-from agent.runtime.dispatcher import build_route_payload  # DEPRECATED: Phase 4 cleanup
-from agent.runtime.interaction import reset_graph_interrupt_bridge, set_graph_interrupt_bridge
-from agent.platform.domain_registry import registry as domain_registry
 from agent.platform.interrupts import request_interrupt
 from agent.platform.state import RootState
-from agent.platform.tracing import build_trace_metadata
-
-_log = logging.getLogger("chatdada.root_graph")
 
 Dispatcher = Callable[[str, list[str], str, str], Awaitable[Any]]
 
 
-def _emit_custom(payload: dict[str, Any]) -> None:
-    writer = get_stream_writer()
-    writer(payload)
-
-
-# ── 新 Coordinator 节点 ──────────────────────────────────────────────────────
+# ── Coordinator Nodes ──────────────────────────────────────────────────────
 
 
 async def normalize_input(state: RootState) -> dict[str, Any]:
@@ -181,192 +167,6 @@ def build_root_graph(*, dispatcher: Dispatcher, checkpointer: Any):
     graph.add_edge("run_coordinator", "persist_summary")
     graph.add_edge("persist_summary", END)
     return graph.compile(checkpointer=checkpointer, name="chat_dada_root_graph")
-
-
-# ── DEPRECATED: Phase 4 cleanup ─────────────────────────────────────────────
-# The functions below are retained for backward compatibility during the
-# Phase 1→4 migration.  They are no longer wired into the root graph.
-
-
-# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
-def _build_clarification_prompt(state: RootState) -> dict[str, Any]:
-    return {
-        "content": "这个任务目标还不够明确。你更希望我直接回答、做深度研究，还是保留现有多工具流程？",
-        "context": f"原始任务：{state['task_text']}",
-        "placeholder": "例如：请直接做深度研究，并重点关注论文与实验。",
-        "interrupt_type": "clarification",
-    }
-
-
-# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
-def make_route_domain(dispatcher: Dispatcher):
-    async def route_domain(state: RootState) -> dict[str, Any]:
-        route = state.get("initial_route_payload")
-        decision = None
-        if route is None:
-            decision = await dispatcher(
-                state["task_text"],
-                state.get("file_paths", []),
-                state.get("mode", "auto"),
-                state.get("user_id", "anonymous"),
-            )
-            route = build_route_payload(
-                task_text=state["task_text"],
-                file_paths=state.get("file_paths", []),
-                decision=decision,
-            )
-        clarification_answer = str(state.get("request_payload", {}).get("clarification_answer", "") or "").strip()
-        if clarification_answer and route["execution_path"] == "needs_clarification":
-            enriched_text = f"{state['task_text']}\n\n用户补充：{clarification_answer}"
-            route = build_route_payload(
-                task_text=enriched_text,
-                file_paths=state.get("file_paths", []),
-                decision=decision,
-            )
-            if route["execution_path"] == "needs_clarification":
-                route["route_name"] = "research"
-                route["execution_path"] = "research"
-                route["reason"] = f"{route['reason']}; clarification answer provided"
-        domain = route["execution_path"]
-        return {
-            "route_decision": route,
-            "route_name": route["route_name"],
-            "route_reason": route["reason"],
-            "route_confidence": route["confidence"],
-            "domain": domain,
-            "trace_metadata": build_trace_metadata(
-                task_id=state["task_id"],
-                user_id=state["user_id"],
-                mode=state["mode"],
-                route_name=route["route_name"],
-                domain=domain,
-            ),
-        }
-
-    return route_domain
-
-
-# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
-async def maybe_clarify(state: RootState) -> dict[str, Any]:
-    if state["route_decision"]["execution_path"] != "needs_clarification":
-        return {}
-    payload = _build_clarification_prompt(state)
-    answer = request_interrupt(payload)
-    return {
-        "interrupt_state": None,
-        "pending_question": None,
-        "request_payload": {**state["request_payload"], "clarification_answer": str(answer)},
-    }
-
-
-# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
-def _interrupt_bridge(payload: dict[str, Any]) -> str:
-    return str(request_interrupt({**payload, "interrupt_type": "human_input"}))
-
-
-# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
-async def run_general_chat(state: RootState) -> dict[str, Any]:
-    from agent.runtime.dispatcher import run_general_chat_task
-    from agent.runtime.task_execution import parse_step_payload
-
-    async def on_step(step_info: str) -> None:
-        event_type, payload = parse_step_payload(step_info)
-        payload["event_type"] = event_type
-        _emit_custom(payload)
-
-    result = await run_general_chat_task(
-        state["execution_task"],
-        on_step,
-        user_id=state["user_id"],
-        conversation_context=state.get("conversation_context", ""),
-    )
-    return {
-        "final_result": result,
-        "artifact_refs": [],
-    }
-
-
-# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
-def make_run_registered_domain(domain_name: str, *, enable_interrupt_bridge: bool = False):
-    async def run_registered_domain(state: RootState) -> dict[str, Any]:
-        runner = domain_registry.get(domain_name)
-        if runner is None:
-            raise RuntimeError(f"Domain runner not registered: {domain_name}")
-
-        token: Token[Any] | None = None
-        if enable_interrupt_bridge:
-            token = set_graph_interrupt_bridge(_interrupt_bridge)
-        try:
-            result = await runner(
-                {
-                    "task_id": state["task_id"],
-                    "query": state["execution_task"],
-                    "task": state["task_text"],
-                    "report_profile": state.get("request_payload", {}).get("report_profile", ""),
-                    "clarification_history": state.get("request_payload", {}).get("clarification_history", []),
-                    "parallel": domain_name == "research",
-                    "use_deepagents": domain_name == "research",
-                    "browser_enabled": False,
-                }
-            )
-        finally:
-            if token is not None:
-                reset_graph_interrupt_bridge(token)
-
-        payload = {
-            "final_result": result.result,
-            "artifact_refs": result.artifact_refs,
-            "review": getattr(result, "review", {}),
-            "budget": getattr(result, "budget", {}),
-        }
-        strategy = getattr(result, "strategy", "")
-        if strategy:
-            payload["research_strategy"] = strategy
-        return payload
-
-    return run_registered_domain
-
-
-# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
-async def run_composite(state: RootState) -> dict[str, Any]:
-    """Plan and execute a multi-capability composite task."""
-    from agent.platform.task_planner import plan_task
-    from agent.platform.step_runner import StepRunner
-
-    plan = await plan_task(state["task_text"])
-
-    base_params: dict[str, Any] = {
-        "task_id": state["task_id"],
-        "user_id": state.get("user_id", "anonymous"),
-        "task_text": state["task_text"],
-        "query": state.get("execution_task", state["task_text"]),
-        "file_paths": state.get("file_paths", []),
-    }
-
-    runner = StepRunner()
-    plan_result = await runner.run(plan, base_params=base_params)
-
-    step_dicts = [
-        {"step_id": r.step_id, "status": r.status, "output": r.output, "error": r.error}
-        for r in plan_result.step_results
-    ]
-
-    return {
-        "final_result": plan_result.final_output,
-        "artifact_refs": [],
-        "task_plan": {
-            "steps": [
-                {"id": s.id, "capability": s.capability, "params": s.params, "depends_on": s.depends_on}
-                for s in plan.steps
-            ]
-        },
-        "step_results": step_dicts,
-    }
-
-
-# DEPRECATED: Phase 4 cleanup — replaced by Coordinator
-def select_path(state: RootState) -> str:
-    return state["route_decision"]["execution_path"]
 
 
 __all__ = ["build_root_graph"]
