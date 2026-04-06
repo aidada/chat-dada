@@ -22,7 +22,6 @@ from typing_extensions import TypedDict
 from core.content_utils import extract_result_text
 from agent.capabilities.review_gates import ReviewGate
 from agent.platform.streaming import stream_nested_graph
-from agent.workflows.strategy_selector import make_strategy_selector
 
 _log = logging.getLogger("chatdada.orchestrator")
 
@@ -574,6 +573,64 @@ def route_to_strategy(state: OrchestratorState) -> str:
     return f"exec_{state['selected_strategy']}"
 
 
+def make_select_strategy(spec: DomainSpec):
+    """Create a strategy selection node that uses provided strategy or default.
+
+    Strategy is determined in priority order:
+    1. If `selected_strategy` is already in state (provided by Coordinator), use it
+    2. Use the first strategy_hint from DomainSpec
+    3. Default to "sequential"
+
+    This replaces the old strategy_selector.py (PRD §8.3 C2).
+    """
+    default_strategy = (spec.strategy_hints[0] if spec.strategy_hints else "sequential")
+
+    async def select_strategy_node(state: OrchestratorState) -> dict[str, Any]:
+        # Use provided strategy or default
+        strategy = state.get("selected_strategy") or default_strategy
+
+        # Validate strategy is valid
+        valid_strategies = {"sequential", "parallel", "iterative", "planning"}
+        if strategy not in valid_strategies:
+            _log.warning(
+                "Invalid strategy '%s', falling back to default '%s'",
+                strategy, default_strategy,
+            )
+            strategy = default_strategy
+
+        _log.info(
+            "Strategy selected: %s (source=%s)",
+            strategy,
+            "provided" if state.get("selected_strategy") else "default",
+        )
+
+        try:
+            from langgraph.config import get_stream_writer
+
+            get_stream_writer()(
+                {
+                    "event_type": "strategy",
+                    "strategy": strategy,
+                    "source": "provided" if state.get("selected_strategy") else "default",
+                    "content": f"Strategy selected: {strategy}",
+                }
+            )
+        except Exception:
+            pass
+
+        return {
+            "selected_strategy": strategy,
+            "step_history": [{
+                "strategy": strategy,
+                "confidence": 1.0,
+                "reasoning": f"Strategy from {'coordinator' if state.get('selected_strategy') else 'default'}",
+                "source": "provided" if state.get("selected_strategy") else "default",
+            }],
+        }
+
+    return select_strategy_node
+
+
 def should_continue(state: OrchestratorState) -> str:
     if state.get("final_result"):
         return "done"
@@ -605,6 +662,9 @@ def build_orchestrated_graph(spec: DomainSpec):
                   └──────────── continue ────────────────────────┘
                                                                  │
                                                               done → END
+
+    Note: Strategy selection now uses provided strategy from state (via Coordinator)
+    or defaults to spec.strategy_hints[0] or "sequential" (PRD §8.3 C2).
     """
     graph = StateGraph(OrchestratorState)
 
@@ -612,7 +672,7 @@ def build_orchestrated_graph(spec: DomainSpec):
     graph.add_node("analyze", analyze_node)
     graph.add_node(
         "select_strategy",
-        make_strategy_selector(spec.strategy_hints),
+        make_select_strategy(spec),
     )
     graph.add_node("exec_sequential", make_sequential(spec))
     graph.add_node("exec_parallel", make_parallel(spec))

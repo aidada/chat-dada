@@ -22,6 +22,7 @@ def build_understand_goal_prompt(goal: str, skill_summary: str) -> list[dict[str
     - goal_understanding: str
     - reasoning: str
     - (if single_skill) selected_skill: str, skill_input: dict
+    - (if dag) dag_strategy: str (optional, for domain strategy guidance)
     """
     system_prompt = """你是 Coordinator Agent 的目标理解模块。你的任务是分析用户请求，判断最适合的执行模式。
 
@@ -39,6 +40,77 @@ def build_understand_goal_prompt(goal: str, skill_summary: str) -> list[dict[str
    - 示例："研究竞品技术方案并撰写专利"、"调研后生成 PPT"
    - LLM 生成任务 DAG → 分配技能 → 执行
 
+## 领域执行策略（仅 dag 模式需要）
+
+当任务涉及多步骤领域执行时，需为每个领域任务选择执行策略：
+
+- **sequential**: 顺序执行，适合线性任务或单一子任务
+- **parallel**: 并行执行，适合多个独立子任务同时进行
+- **iterative**: 迭代优化，适合上次输出质量不足需要改进
+- **planning**: 动态规划，适合复杂任务需要先分解再执行
+
+### 策略选择规则（优先级从高到低）
+
+1. **评审反馈触发迭代**: 上次评审未通过 → iterative（根据反馈改进）
+2. **多子任务并行**: 多个独立子任务待执行 → parallel（提高效率）
+3. **复杂目标分解**: 目标复杂且未分解 → planning（先规划再执行）
+4. **简单任务**: 目标简短或单一子任务 → sequential（直接执行）
+
+### 策略选择示例
+
+示例 1: 单一专利撰写任务
+```json
+{
+  "execution_mode": "single_skill",
+  "reasoning": "明确的专利撰写请求，单领域任务",
+  "goal_understanding": "用户需要撰写一份专利草案",
+  "selected_skill": "do_patent",
+  "skill_input": {"query": "根据以下技术描述撰写专利..."}
+}
+```
+→ single_skill 模式无需策略参数，领域内部默认 sequential
+
+示例 2: 竞品研究后撰写专利
+```json
+{
+  "execution_mode": "dag",
+  "reasoning": "涉及研究和专利两个领域，需先研究再撰写",
+  "goal_understanding": "竞品技术分析并撰写专利布局",
+  "dag_strategy": "sequential",
+  "tasks": [
+    {"id": "t1", "assigned_skill": "do_research", "strategy": "planning"},
+    {"id": "t2", "assigned_skill": "do_patent", "depends_on": ["t1"], "strategy": "sequential"}
+  ]
+}
+```
+→ dag 模式：研究阶段用 planning 策略分解，专利阶段用 sequential 策略撰写
+
+示例 3: 多个子任务并行研究
+```json
+{
+  "execution_mode": "dag",
+  "reasoning": "研究多个独立技术方向，可并行",
+  "goal_understanding": "并行研究量子计算、AI芯片、云计算三个方向",
+  "dag_strategy": "parallel",
+  "tasks": [
+    {"id": "t1", "assigned_skill": "do_research", "strategy": "planning"},
+    {"id": "t2", "assigned_skill": "do_research", "strategy": "planning"},
+    {"id": "t3", "assigned_skill": "do_research", "strategy": "planning"}
+  ]
+}
+```
+→ dag 模式：三个研究方向可并行，各用 planning 策略内部分解
+
+示例 4: 简单问答
+```json
+{
+  "execution_mode": "direct",
+  "reasoning": "简单问候，无需领域技能",
+  "goal_understanding": "用户打招呼"
+}
+```
+→ direct 模式无需策略
+
 ## 输出格式
 
 请返回 JSON 格式（使用 markdown 代码块）：
@@ -49,7 +121,8 @@ def build_understand_goal_prompt(goal: str, skill_summary: str) -> list[dict[str
   "reasoning": "判断理由",
   "goal_understanding": "对用户目标的精炼理解",
   "selected_skill": "技能名称（仅 single_skill 模式）",
-  "skill_input": {"query": "传入技能的参数（仅 single_skill 模式）"}
+  "skill_input": {"query": "传入技能的参数（仅 single_skill 模式）"},
+  "dag_strategy": "dag 执行策略（仅 dag 模式，可选）"
 }
 ```
 
