@@ -13,16 +13,37 @@ import os
 import uuid
 from pathlib import Path
 from typing import Any
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
 from agent.capabilities.review_gates import ReviewGate
 from agent.domains.ppt.tools import get_ppt_tools
 from agent.platform.streaming import stream_nested_graph
-from agent.workflows.orchestrator import build_orchestrated_graph
-from agent.workflows.spec import DomainSpec, SubagentConfig
+from agent.workflows.orchestrator import build_orchestrated_graph, DomainSpec
 
 _log = logging.getLogger("chatdada.ppt.orchestrated")
+
+
+# ── SubagentConfig (defined locally, PRD §8.3 C3) ───────────────────────────────
+
+
+@dataclass
+class SubagentConfig:
+    """Configuration for a deepagents subagent."""
+
+    name: str
+    description: str
+    system_prompt: str
+    tools: list[Any] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "system_prompt": self.system_prompt,
+            "tools": self.tools,
+        }
 
 # ── Load OfficeCLI SKILL.md (once at import time) ───────────────────────────
 

@@ -42,6 +42,10 @@ class SkillDescription:
     retryable: bool = True  # Whether retry is allowed
     nested_depth_limit: int = 0  # Max nested call depth, 0 = no nesting allowed
 
+    # Fields merged from DomainSpec (PRD §8.3 C3)
+    tools: list[Any] = field(default_factory=list)  # Tools available to this skill
+    strategy_hints: list[str] = field(default_factory=list)  # Execution strategy preferences
+
 
 class SkillRegistry:
     """Central registry for domain skills and basic tools.

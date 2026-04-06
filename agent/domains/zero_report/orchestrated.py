@@ -11,6 +11,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+from dataclasses import dataclass, field
 
 from agent.capabilities.citation_manager import CitationMap
 from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
@@ -34,10 +35,30 @@ from agent.domains.zero_report.reviewers import ZeroReportReviewGate
 from agent.domains.zero_report.tools import get_zero_report_tools
 from agent.platform.streaming import stream_nested_graph
 
-from agent.workflows.orchestrator import build_orchestrated_graph
-from agent.workflows.spec import DomainSpec, SubagentConfig
+from agent.workflows.orchestrator import build_orchestrated_graph, DomainSpec
 
 _log = logging.getLogger("chatdada.zero_report.orchestrated")
+
+
+# ── SubagentConfig (defined locally, PRD §8.3 C3) ───────────────────────────────
+
+
+@dataclass
+class SubagentConfig:
+    """Configuration for a deepagents subagent."""
+
+    name: str
+    description: str
+    system_prompt: str
+    tools: list[Any] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "system_prompt": self.system_prompt,
+            "tools": self.tools,
+        }
 
 
 # ── DomainSpec declaration ───────────────────────────────────────────────────
