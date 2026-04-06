@@ -9,7 +9,7 @@ import json
 from typing import Any, Callable
 
 from langchain_core.tools import StructuredTool
-from agent.platform.domain_registry import registry as domain_registry
+from agent.coordinator.skills import skill_registry
 from agent.platform.renderer_registry import registry as renderer_registry
 
 
@@ -33,7 +33,6 @@ DISPLAY_NAMES: dict[str, str] = {
     "doc_analyst": "文档分析",
     "data_analyst": "数据分析",
     "writer": "内容撰写",
-    "general_chat": "对话",
     # Tools
     "web_search": "网页搜索",
     "brave_search": "网页搜索",
@@ -113,7 +112,7 @@ def registry_summary() -> str:
             lines.append(f"\n## {cap_type.title()}s")
             for c in caps:
                 lines.append(f"- **{c['name']}**: {c['description']}")
-    domain_summary = domain_registry.summary()
+    domain_summary = skill_registry.summary()
     if domain_summary:
         lines.append("\n## Domain Entrypoints")
         lines.append(domain_summary)
@@ -190,14 +189,6 @@ register(
     cap_type="tool",
     description="Execute officecli CLI commands to create/edit .pptx/.docx/.xlsx",
     available_to=["ppt"],
-)
-
-# General Chat
-register(
-    "general_chat",
-    fn_path="agents.general_chat:run",
-    cap_type="agent",
-    description="Direct Q&A conversation, answers questions without tools",
 )
 
 # Tools

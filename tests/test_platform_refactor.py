@@ -8,8 +8,6 @@ from unittest.mock import patch
 from agent.domains.patent.agent import run_patent_domain
 from agent.domains.research.orchestrated import run_research_domain_orchestrated
 from agent.domains.zero_report.agent import run_zero_report_domain
-from agent.runtime.dispatcher import RouteDecision
-from agent.runtime.dispatcher import build_route_payload, run_general_chat_task
 from agent.runtime.interaction import (
     ask_user,
     reset_preloaded_user_replies,
@@ -331,28 +329,6 @@ class NestedGraphStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(getattr(seen["input_data"], "resume", None), "reply")
 
 
-class GeneralChatStreamingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_general_chat_emits_token_and_result_delta(self) -> None:
-        collected: list[str] = []
-
-        async def fake_on_step(step: str) -> None:
-            collected.append(step)
-
-        async def fake_run_general_chat(input_data, on_chunk=None):
-            if on_chunk is not None:
-                await on_chunk("partial")
-            return {"result": "done"}
-
-        with patch("agent.runtime.dispatcher.run_general_chat", side_effect=fake_run_general_chat):
-            result = await run_general_chat_task("hello", fake_on_step, user_id="u1")
-
-        self.assertEqual(result, "done")
-        self.assertEqual(len(collected), 3)
-        self.assertEqual(collected[0], "💬 正在回答...")
-        self.assertIn('"type": "token"', collected[1])
-        self.assertIn('"type": "result_delta"', collected[2])
-
-
 class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
     async def test_research_domain_wrapper_returns_reviewed_artifacts(self) -> None:
         from tempfile import TemporaryDirectory
@@ -629,19 +605,6 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(ref["name"] == "claim_tree.json" for ref in result.artifact_refs))
         self.assertTrue(report_exists)
 
-    def test_router_can_select_patent_domain(self) -> None:
-        decision = RouteDecision(
-            route_name="orchestrator",
-            reason="detected patent task",
-            confidence=0.9,
-        )
-        route = build_route_payload(
-            task_text="请根据技术交底生成专利权利要求和说明书草稿",
-            file_paths=[],
-            decision=decision,
-        )
-        self.assertEqual(route["execution_path"], "patent")
-
 
 class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
     async def test_zero_report_domain_produces_structured_artifacts(self) -> None:
@@ -723,19 +686,6 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(ref["name"] == "zero_report.md" for ref in result.artifact_refs))
         self.assertTrue(any(ref["name"] == "timeline.json" for ref in result.artifact_refs))
         self.assertTrue(report_exists)
-
-    def test_router_can_select_zero_report_domain(self) -> None:
-        decision = RouteDecision(
-            route_name="orchestrator",
-            reason="detected incident analysis task",
-            confidence=0.9,
-        )
-        route = build_route_payload(
-            task_text="请输出事故复盘的时间线、根因分析和整改矩阵",
-            file_paths=[],
-            decision=decision,
-        )
-        self.assertEqual(route["execution_path"], "zero_report")
 
 
 class InteractionHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -829,18 +779,8 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
         from langgraph.types import Command
         from agent.runtime.root_graph import build_root_graph
 
-        async def fake_dispatcher(task_text, file_paths, mode, user_id):
-            return RouteDecision(
-                route_name="orchestrator",
-                reason="test interrupt",
-                confidence=0.5,
-            )
-
         checkpointer = InMemorySaver()
-        graph = build_root_graph(
-            dispatcher=fake_dispatcher,
-            checkpointer=checkpointer,
-        )
+        graph = build_root_graph(checkpointer=checkpointer)
 
         initial_state = {
             "task_id": "test_interrupt_resume",
@@ -936,13 +876,6 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
 
         nested_graph = FakeNestedGraph()
 
-        async def fake_dispatcher(task_text, file_paths, mode, user_id):
-            return RouteDecision(
-                route_name="research",
-                reason="nested interrupt test",
-                confidence=1.0,
-            )
-
         async def fake_runner(input_data):
             result = await stream_nested_graph(
                 nested_graph,
@@ -958,7 +891,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         checkpointer = InMemorySaver()
-        graph = build_root_graph(dispatcher=fake_dispatcher, checkpointer=checkpointer)
+        graph = build_root_graph(checkpointer=checkpointer)
         base_config = {"configurable": {"thread_id": "nested_interrupt_resume"}}
         initial_state = {
             "task_id": "nested_interrupt_resume",
@@ -974,7 +907,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
             "request_payload": {},
         }
 
-        with patch("agent.runtime.root_graph.domain_registry.get", return_value=fake_runner):
+        with patch("agent.coordinator.skills.skill_registry.get_runner", return_value=fake_runner):
             interrupted_payloads: list[dict] = []
             async for part in graph.astream(
                 initial_state,
@@ -1014,59 +947,6 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
                 {**base_config, "configurable": {**base_config["configurable"], "nested_interrupt_count": 1}}
             )
             self.assertEqual(state_snapshot.values.get("final_result"), "nested final result")
-
-    async def test_non_interrupt_path_completes(self) -> None:
-        """High-confidence tasks should complete without interruption."""
-        from langgraph.checkpoint.memory import InMemorySaver
-        from agent.runtime.root_graph import build_root_graph
-
-        async def fake_dispatcher(task_text, file_paths, mode, user_id):
-            return RouteDecision(
-                route_name="general_chat",
-                reason="simple question",
-                confidence=0.95,
-            )
-
-        async def fake_general_chat(task, on_step, **kwargs):
-            return "Hello!"
-
-        checkpointer = InMemorySaver()
-        graph = build_root_graph(
-            dispatcher=fake_dispatcher,
-            checkpointer=checkpointer,
-        )
-
-        initial_state = {
-            "task_id": "test_no_interrupt",
-            "thread_id": "test_no_interrupt",
-            "user_id": "test_user",
-            "mode": "auto",
-            "thinking_level": "medium",
-            "task_text": "你好",
-            "execution_task": "你好",
-            "file_paths": [],
-            "conversation_id": "",
-            "conversation_context": "",
-            "request_payload": {},
-        }
-        config = {"configurable": {"thread_id": "test_no_interrupt"}}
-
-        interrupted = False
-        with patch("agent.runtime.dispatcher.run_general_chat_task", new=fake_general_chat):
-            async for part in graph.astream(
-                initial_state,
-                config=config,
-                version="v2",
-                stream_mode=["updates"],
-            ):
-                data = part.get("data") or {}
-                if data.get("__interrupt__"):
-                    interrupted = True
-
-        self.assertFalse(interrupted, "High-confidence task should not interrupt")
-        state = await graph.aget_state(config)
-        values = getattr(state, "values", {}) or {}
-        self.assertEqual(values.get("final_result"), "Hello!")
 
 
 class CitationMapTests(unittest.TestCase):
