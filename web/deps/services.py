@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import Depends
 
-from web.web import runtime as web_runtime
+from web import runtime as web_runtime
 from domain.conversations.services import ConversationService
 from domain.tasks.services import TaskExecutionService
 
