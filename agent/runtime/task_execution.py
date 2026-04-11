@@ -97,14 +97,13 @@ class TaskRunStore:
 
     async def connect(self) -> None:
         self.pool = await asyncpg.create_pool(self._database_url, min_size=2, max_size=10)
-        await self._recover_interrupted_tasks()
 
     async def close(self) -> None:
         if self.pool:
             await self.pool.close()
             self.pool = None
 
-    async def _recover_interrupted_tasks(self) -> None:
+    async def _recover_interrupted_tasks(self) -> list[str]:
         if not isinstance(self, TaskRunStore) and getattr(self, "pool", None) is not None:
             rows = await self.pool.fetch(
                 """
@@ -119,33 +118,7 @@ class TaskRunStore:
             async with SessionFactory() as session:
                 repo = TaskRunRepository(session)
                 task_ids = await repo.list_interrupted()
-        if not task_ids:
-            return
-
-        log.warning("Recovering %s interrupted task(s) after process restart", len(task_ids))
-        for task_id in task_ids:
-            snapshot = await self.get_task(task_id) or {}
-            if snapshot.get("status") == "waiting_for_user":
-                continue
-            message = "任务因服务重启而中断，请重新提交。"
-            await self.set_error_text(task_id, message)
-            await self.append_event(task_id, "error", {"content": message, "recovered": True})
-            await self.append_event(
-                task_id,
-                "monitoring",
-                {
-                    "content": {
-                        "trace_id": None,
-                        "total_duration_ms": 0,
-                        "llm_call_count": 0,
-                        "total_tokens": 0,
-                        "error_count": 1,
-                        "events": [],
-                        "interrupted": True,
-                    }
-                },
-            )
-            await self.finish_task(task_id, "failed")
+        return task_ids
 
     async def create_task(
         self,
@@ -417,6 +390,15 @@ class TaskRunStore:
 
 
 class TaskService:
+    """Harness Runtime — 无状态编排层。
+
+    只依赖 Session 和 Hands 的稳定接口：
+    - SessionRuntime: emit_event, get_events, get_projection, wake, record_transition
+    - ToolGateway: execute (Phase 3 逐步接入)
+
+    本地保留 _runner_tasks 作为 process-local cancel handle。
+    """
+
     def __init__(
         self,
         database_url: str,
@@ -426,6 +408,7 @@ class TaskService:
         self._database_url = database_url
         self._redis_url = redis_url
         self._redis: aioredis.Redis | None = None
+        self._session: Any | None = None  # SessionRuntime
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._runner_tasks: dict[str, asyncio.Task[Any]] = {}
         self._checkpointer_cm: Any | None = None
@@ -449,8 +432,12 @@ class TaskService:
     async def connect(self) -> None:
         await self._store.connect()
         self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
+        from agent.session.runtime import SessionRuntime
+
+        self._session = SessionRuntime(self._redis)
         self._checkpointer = await self._open_checkpointer()
         self._root_graph = build_root_graph(checkpointer=self._checkpointer)
+        await self._recover_interrupted_tasks()
 
     async def close(self) -> None:
         for task in list(self._runner_tasks.values()):
@@ -470,6 +457,11 @@ class TaskService:
     def store(self) -> TaskRunStore:
         return self._store
 
+    @property
+    def session(self) -> Any:
+        """SessionRuntime instance — the durable state boundary."""
+        return self._session
+
     def _track_runner(self, task_id: str, task: asyncio.Task[Any]) -> None:
         self._runner_tasks[task_id] = task
         self._background_tasks.add(task)
@@ -480,6 +472,43 @@ class TaskService:
                 self._runner_tasks.pop(task_id, None)
 
         task.add_done_callback(_cleanup)
+
+    async def _recover_interrupted_tasks(self) -> None:
+        if self._session is None:
+            return
+
+        task_ids = await self._session.recover_interrupted_tasks()
+        if not task_ids:
+            return
+
+        log.warning(
+            "Recovering %s interrupted task(s) after process restart via Session.wake",
+            len(task_ids),
+        )
+        for task_id in task_ids:
+            snapshot = await self._store.get_task(task_id) or {}
+            if snapshot.get("status") == "queued":
+                background = asyncio.create_task(
+                    self._execute_task(task_id),
+                    name=f"task-requeue-{task_id}",
+                )
+                self._track_runner(task_id, background)
+                continue
+            if snapshot.get("status") == "waiting_for_user":
+                log.info("Preserving waiting_for_user task without auto-restart: %s", task_id)
+                continue
+
+            try:
+                resume_handle = await self._session.wake(task_id)
+            except Exception:
+                log.exception("Failed to build resume handle for interrupted task %s", task_id)
+                continue
+
+            background = asyncio.create_task(
+                self._execute_task(task_id, resume_handle=resume_handle),
+                name=f"task-recover-{task_id}",
+            )
+            self._track_runner(task_id, background)
 
     async def _finalize_cancelled(self, task_id: str, message: str = "任务已取消") -> dict[str, Any] | None:
         snapshot = await self._store.get_task(task_id)
@@ -574,6 +603,10 @@ class TaskService:
     async def record_event(
         self, task_id: str, event_type: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
+        """Delegate to SessionRuntime — the canonical event write path."""
+        if self._session is not None:
+            return await self._session.emit_event(task_id, event_type, payload)
+        # Fallback for startup before session init
         event = await self._store.append_event(task_id, event_type, payload)
         await self._publish(task_id, event)
         return event
@@ -656,6 +689,10 @@ class TaskService:
         if task_is_terminal(snapshot["status"]):
             raise RuntimeError("任务已经结束，无法取消。")
 
+        # Signal cancellation via Session
+        if self._session is not None:
+            await self._session.request_cancel(task_id)
+
         runner = self._runner_tasks.get(task_id)
         if runner is not None:
             runner.cancel()
@@ -669,10 +706,18 @@ class TaskService:
         cancelled = await self._finalize_cancelled(task_id)
         return cancelled or snapshot
 
-    async def _execute_task(self, task_id: str, *, resume_value: str | None = None) -> None:
+    async def _execute_task(
+        self,
+        task_id: str,
+        *,
+        resume_value: str | None = None,
+        resume_handle: Any | None = None,
+    ) -> None:
         snapshot = await self._store.get_task(task_id)
         if snapshot is None:
             return
+        if resume_value is not None and resume_handle is not None:
+            raise ValueError("resume_value and resume_handle are mutually exclusive")
 
         task_text = snapshot["task"]
         user_id = snapshot["user_id"]
@@ -683,13 +728,19 @@ class TaskService:
         execution_task = compose_task_text(task_text, file_paths)
         trace_id = new_trace_id()
         interrupted = False
-        latest_checkpoint_id = snapshot.get("latest_checkpoint_id", "")
+        is_human_resume = resume_value is not None
+        is_recovery_resume = resume_handle is not None
+        latest_checkpoint_id = str(
+            (getattr(resume_handle, "checkpoint_id", None) if resume_handle is not None else None)
+            or snapshot.get("latest_checkpoint_id", "")
+            or ""
+        )
         resume_last_step_content = ""
         skipped_resume_replay_step = False
 
         decision = None
         route_payload = snapshot.get("initial_route_payload")
-        if resume_value is None:
+        if not is_human_resume and not is_recovery_resume:
             # C7: Dispatcher routing deleted — Coordinator's understand_goal does routing internally.
             # Use minimal placeholder route_payload; actual routing happens in run_coordinator.
             route_payload: RouteDecisionPayload = {
@@ -745,7 +796,7 @@ class TaskService:
                     break
 
         conversation_context = ""
-        if conversation_id and resume_value is None:
+        if conversation_id and not is_human_resume and not is_recovery_resume:
             try:
                 from domain.conversations.context import ConversationContextBuilder
 
@@ -772,6 +823,15 @@ class TaskService:
             request_payload = snapshot.get("request_payload", {})
             if not isinstance(request_payload, dict):
                 request_payload = {}
+            if resume_handle is not None:
+                request_payload = {
+                    **request_payload,
+                    **{
+                        key: value
+                        for key, value in (resume_handle.resume_context or {}).items()
+                        if value is not None
+                    },
+                }
             nested_interrupt_pending = bool(request_payload.get("nested_interrupt_pending"))
             if resume_value is not None and nested_interrupt_pending:
                 replay_replies = [
@@ -804,6 +864,13 @@ class TaskService:
                     "nested_resume_value": None,
                 }
             }
+            if latest_checkpoint_id:
+                config["configurable"]["checkpoint_id"] = latest_checkpoint_id
+            checkpoint_ns = str(
+                getattr(resume_handle, "checkpoint_ns", "") if resume_handle is not None else ""
+            ).strip()
+            if checkpoint_ns:
+                config["configurable"]["checkpoint_ns"] = checkpoint_ns
             ls_config = build_langsmith_run_config(
                 task_id=task_id,
                 user_id=user_id,
@@ -813,7 +880,12 @@ class TaskService:
             if ls_config:
                 config.update(ls_config)
             stream_input: Any
-            if resume_value is not None and nested_interrupt_pending:
+            if resume_handle is not None:
+                if resume_handle.stream_input is not None:
+                    stream_input = resume_handle.stream_input
+                else:
+                    stream_input = None if latest_checkpoint_id else initial_state
+            elif resume_value is not None and nested_interrupt_pending:
                 stream_input = initial_state
             else:
                 stream_input = initial_state if resume_value is None else Command(resume=resume_value)

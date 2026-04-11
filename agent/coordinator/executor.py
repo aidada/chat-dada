@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import logging
 import uuid
@@ -21,20 +20,11 @@ from agent.coordinator.state import (
     build_task_vars_entry,
     inject_upstream_context,
 )
+from agent.platform.emit import safe_emit_progress as _safe_emit
 
 _log = logging.getLogger("chatdada.coordinator.executor")
 
 MAX_DAG_DEPTH = 10
-
-
-# ── 事件发送 ──────────────────────────────────────────────────────────────────
-
-def _safe_emit(event_type: str, payload: dict[str, Any]) -> None:
-    try:
-        writer = get_stream_writer()
-        writer({"event_type": event_type, **payload})
-    except Exception:
-        pass
 
 
 # ── DAG 验证 ──────────────────────────────────────────────────────────────────
@@ -384,7 +374,7 @@ async def execute_tasks_node(state: CoordinatorState) -> dict[str, Any]:
     except Exception as exc:
         exc_type = type(exc).__name__
         if "GraphInterrupt" in exc_type or "Interrupt" in exc_type:
-            # 中断时保存状态，携带完整中断上下文供 resume 使用（PRD §6.4）
+            # 中断时仅保留 resume 所需的会话上下文；DAG 状态由 checkpoint 负责持久化。
             # 找出触发中断的任务（最后一个已记录 invocation_id 的 running 任务）
             interrupted_task = next(
                 (t for t in ready_tasks if t.id in task_invocation_ids and t.status == "running"),
@@ -400,19 +390,6 @@ async def execute_tasks_node(state: CoordinatorState) -> dict[str, Any]:
                     "skill": interrupted_skill,
                     "skill_invocation_id": interrupted_invocation_id,
                     "coordinator_task_id": coordinator_task_id,
-                    # P1: serialised DAG state for resume replay
-                    "_dag_resume_state": {
-                        "task_dag": [dataclasses.asdict(t) for t in task_dag],
-                        "completed_tasks": {k: dataclasses.asdict(v) for k, v in completed.items()},
-                        "failed_tasks":    {k: dataclasses.asdict(v) for k, v in failed.items()},
-                        "skill_runs":      dict(skill_runs),
-                        "task_vars":       {k: dataclasses.asdict(v) for k, v in task_vars.items()},
-                        "pending_tasks": [
-                            t.id for t in task_dag
-                            if t.id not in set(completed.keys()) | set(failed.keys())
-                            and t.id != interrupted_task_id
-                        ],
-                    },
                 },
                 "running_tasks": {t.id: t for t in ready_tasks},
             }

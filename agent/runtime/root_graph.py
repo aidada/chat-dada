@@ -4,6 +4,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langgraph.constants import END, START
+from langgraph.constants import CONFIG_KEY_CHECKPOINTER
+from langgraph.config import get_config
 from langgraph.graph import StateGraph
 
 from agent.platform.interrupts import request_interrupt
@@ -26,7 +28,7 @@ async def normalize_input(state: RootState) -> dict[str, Any]:
 async def run_coordinator(state: RootState) -> dict[str, Any]:
     """Coordinator 统一执行入口 — 替代旧的多分支路由执行模式"""
     from agent.coordinator.agent import build_coordinator_graph
-    from agent.coordinator.state import CoordinatorConfig, CoordinatorState, ExecutionMode
+    from agent.coordinator.state import CoordinatorConfig, CoordinatorState
     from agent.platform.streaming import stream_nested_graph
 
     request_payload = state.get("request_payload") or {}
@@ -50,7 +52,11 @@ async def run_coordinator(state: RootState) -> dict[str, Any]:
     else:
         goal = str(state.get("execution_task") or state.get("task_text") or "")
 
-    coordinator_graph = build_coordinator_graph()
+    graph_config = get_config()
+    configurable = graph_config.get("configurable", {}) if isinstance(graph_config, dict) else {}
+    coordinator_graph = build_coordinator_graph(
+        checkpointer=configurable.get(CONFIG_KEY_CHECKPOINTER),
+    )
 
     # P3: Forward explicit report_profile from caller so skills use it, not the default "".
     report_profile = str(request_payload.get("report_profile") or "")
@@ -73,26 +79,15 @@ async def run_coordinator(state: RootState) -> dict[str, Any]:
         "task_vars": {},
     }
 
-    # P1: Restore serialised DAG state saved by execute_tasks_node on interrupt so the
-    # resumed coordinator continues from where it left off instead of re-running finished tasks.
-    existing_interrupt = state.get("interrupt_state") or {}
-    dag_resume = existing_interrupt.get("_dag_resume_state") or {}
-    if dag_resume:
-        from agent.coordinator.state import Task, TaskVarEntry
-        coordinator_input.update({
-            "execution_mode": ExecutionMode.DAG,
-            "task_dag": [Task(**t) for t in dag_resume.get("task_dag", [])],
-            "completed_tasks": {k: Task(**v) for k, v in dag_resume.get("completed_tasks", {}).items()},
-            "failed_tasks":    {k: Task(**v) for k, v in dag_resume.get("failed_tasks", {}).items()},
-            "skill_runs":      dict(dag_resume.get("skill_runs") or {}),
-            "task_vars":       {k: TaskVarEntry(**v) for k, v in dag_resume.get("task_vars", {}).items()},
-            "pending_tasks":   list(dag_resume.get("pending_tasks") or []),
-        })
-
     result = await stream_nested_graph(
         coordinator_graph,
         coordinator_input,
-        config={"configurable": {"thread_id": state.get("task_id", "")}},
+        config={
+            "configurable": {
+                "thread_id": state.get("task_id", ""),
+                "checkpoint_ns": "coordinator",
+            }
+        },
         extra_payload={
             "nested_graph": "coordinator",
             "trace_id": state.get("task_id", ""),
