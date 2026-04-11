@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import unittest
 from pathlib import Path
@@ -757,6 +758,129 @@ class ResumePathTests(unittest.TestCase):
             snapshot.get("route_name", ""),
         )
         self.assertEqual(execution_path, "ppt")
+
+
+class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_task_service_recovery_uses_session_wake_for_running_tasks(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from agent.runtime.task_execution import TaskService
+        from agent.session.runtime import ResumeHandle
+
+        service = TaskService("postgresql://example", "redis://example")
+        service._session = AsyncMock()
+        service._session.recover_interrupted_tasks.return_value = [
+            "task_queued",
+            "task_waiting",
+            "task_running",
+        ]
+        service._session.wake.return_value = ResumeHandle(
+            task_id="task_running",
+            thread_id="task_running",
+            checkpoint_id="cp-running",
+            resume_context={"clarification_history": [{"question": "q", "answer": "a"}]},
+        )
+        service._store = MagicMock()
+
+        async def fake_get_task(task_id: str):
+            return {
+                "task_queued": {"status": "queued"},
+                "task_waiting": {"status": "waiting_for_user"},
+                "task_running": {"status": "running"},
+            }[task_id]
+
+        service._store.get_task = AsyncMock(side_effect=fake_get_task)
+        service._execute_task = AsyncMock()
+
+        await service._recover_interrupted_tasks()
+        await asyncio.gather(*list(service._background_tasks))
+
+        service._session.wake.assert_awaited_once_with("task_running")
+        service._execute_task.assert_any_await("task_queued")
+        service._execute_task.assert_any_await(
+            "task_running",
+            resume_handle=service._session.wake.return_value,
+        )
+        self.assertEqual(service._execute_task.await_count, 2)
+
+    async def test_execute_task_recovery_resume_uses_checkpoint_without_replaying_initial_state(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from agent.runtime.task_execution import TaskService
+        from agent.session.runtime import ResumeHandle
+
+        class FakeRootGraph:
+            def __init__(self):
+                self.calls: list[tuple[Any, dict[str, Any] | None]] = []
+
+            async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
+                self.calls.append((input_data, config))
+                if False:
+                    yield None
+                return
+
+            async def aget_state(self, config):
+                return SimpleNamespace(
+                    values={
+                        "final_result": "resume ok",
+                        "artifact_refs": [],
+                        "review": {},
+                        "budget": {},
+                    }
+                )
+
+        session_cm = AsyncMock()
+        session = MagicMock()
+        session.commit = AsyncMock()
+        session_cm.__aenter__.return_value = session
+        session_cm.__aexit__.return_value = False
+        usage_service = MagicMock()
+        usage_service.estimate_cost_from_usage.return_value = 0.0
+        usage_service.record_task_usage = AsyncMock()
+
+        service = TaskService("postgresql://example", "redis://example")
+        service._root_graph = FakeRootGraph()
+        service._store = MagicMock()
+        service._store.pool = None
+        service._store.get_task = AsyncMock(
+            return_value={
+                "task_id": "task_running",
+                "task": "恢复任务",
+                "user_id": "user-1",
+                "mode": "auto",
+                "thinking_level": "medium",
+                "file_paths": [],
+                "conversation_id": "",
+                "request_payload": {"execution_path": "general_chat"},
+                "route_name": "general_chat",
+                "route_reason": "placeholder for coordinator routing",
+                "route_confidence": 0.0,
+                "latest_checkpoint_id": "cp-running",
+            }
+        )
+        service._store.get_events_after = AsyncMock(return_value=[])
+        service._store.update_request_payload = AsyncMock()
+        service._store.set_result_text = AsyncMock()
+        service._store.finish_task = AsyncMock()
+        service.record_event = AsyncMock()
+
+        resume_handle = ResumeHandle(
+            task_id="task_running",
+            thread_id="task_running",
+            checkpoint_id="cp-running",
+            resume_context={"clarification_history": [{"question": "q", "answer": "a"}]},
+        )
+
+        with patch("agent.runtime.task_execution.SessionFactory", return_value=session_cm), \
+             patch("agent.runtime.task_execution.QuotaService", return_value=usage_service):
+            await service._execute_task("task_running", resume_handle=resume_handle)
+
+        stream_input, config = service._root_graph.calls[0]
+        self.assertIsNone(stream_input, "recovery resume should restart from checkpoint, not replay initial state")
+        self.assertEqual(config["configurable"]["checkpoint_id"], "cp-running")
+        service._store.finish_task.assert_awaited_once_with("task_running", "succeeded")
+        usage_service.record_task_usage.assert_awaited_once()
 
 
 class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
