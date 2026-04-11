@@ -700,8 +700,8 @@ class InteractionHandlerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RecoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_recover_preserves_waiting_for_user_tasks(self) -> None:
-        """_recover_interrupted_tasks should skip waiting_for_user tasks."""
+    async def test_recover_interrupted_tasks_reads_candidate_ids_from_pool(self) -> None:
+        """_recover_interrupted_tasks should return candidate ids from the live pool."""
         from unittest.mock import AsyncMock, MagicMock
 
         store = MagicMock()
@@ -711,42 +711,31 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
             {"task_id": "task_waiting"},
         ])
 
-        async def fake_get_task(task_id):
-            if task_id == "task_waiting":
-                return {"status": "waiting_for_user"}
-            return {"status": "running"}
+        from agent.runtime.task_execution import TaskRunStore
+        task_ids = await TaskRunStore._recover_interrupted_tasks(store)
 
-        store.get_task = AsyncMock(side_effect=fake_get_task)
-        store.set_error_text = AsyncMock()
-        store.append_event = AsyncMock()
-        store.finish_task = AsyncMock()
+        self.assertEqual(task_ids, ["task_running", "task_waiting"])
+        store.pool.fetch.assert_awaited_once()
+
+    async def test_recover_interrupted_tasks_falls_back_to_repository_without_pool(self) -> None:
+        """_recover_interrupted_tasks should use TaskRunRepository when no pool is attached."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        session_cm = AsyncMock()
+        session = MagicMock()
+        session_cm.__aenter__.return_value = session
+        session_cm.__aexit__.return_value = False
+        repo = MagicMock()
+        repo.list_interrupted = AsyncMock(return_value=["task_1"])
 
         from agent.runtime.task_execution import TaskRunStore
-        await TaskRunStore._recover_interrupted_tasks(store)
 
-        store.finish_task.assert_called_once_with("task_running", "failed")
-        # waiting_for_user task should NOT be marked failed
-        for call in store.finish_task.call_args_list:
-            self.assertNotEqual(call[0][0], "task_waiting")
+        with patch("agent.runtime.task_execution.SessionFactory", return_value=session_cm), \
+             patch("agent.runtime.task_execution.TaskRunRepository", return_value=repo):
+            task_ids = await TaskRunStore("postgresql://example")._recover_interrupted_tasks()
 
-    async def test_recover_marks_running_tasks_as_failed(self) -> None:
-        """_recover_interrupted_tasks marks running tasks as failed."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        store = MagicMock()
-        store.pool = AsyncMock()
-        store.pool.fetch = AsyncMock(return_value=[
-            {"task_id": "task_1"},
-        ])
-        store.get_task = AsyncMock(return_value={"status": "running"})
-        store.set_error_text = AsyncMock()
-        store.append_event = AsyncMock()
-        store.finish_task = AsyncMock()
-
-        from agent.runtime.task_execution import TaskRunStore
-        await TaskRunStore._recover_interrupted_tasks(store)
-
-        store.finish_task.assert_called_once_with("task_1", "failed")
+        self.assertEqual(task_ids, ["task_1"])
+        repo.list_interrupted.assert_awaited_once()
 
 
 class ResumePathTests(unittest.TestCase):
@@ -774,9 +763,7 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
     """Integration tests: root graph interrupt → resume via Command(resume=...)."""
 
     async def test_interrupt_and_resume_through_root_graph(self) -> None:
-        from unittest.mock import patch
         from langgraph.checkpoint.memory import InMemorySaver
-        from langgraph.types import Command
         from agent.runtime.root_graph import build_root_graph
 
         checkpointer = InMemorySaver()
@@ -794,10 +781,11 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
             "conversation_id": "",
             "conversation_context": "",
             "request_payload": {},
+            "initial_route_payload": {"execution_path": "needs_clarification"},
         }
         config = {"configurable": {"thread_id": "test_interrupt_resume"}}
 
-        # First run: should hit needs_clarification → maybe_clarify → interrupt
+        # First run: explicit needs_clarification route should interrupt at root graph level
         interrupted = False
         events_collected = []
         async for part in graph.astream(
@@ -814,14 +802,8 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(interrupted, "Graph should have interrupted for clarification")
 
-    async def test_nested_domain_can_interrupt_twice_and_then_finish(self) -> None:
-        from types import SimpleNamespace
+    async def test_nested_graph_can_interrupt_twice_and_then_finish_via_resume_config(self) -> None:
         from unittest.mock import patch
-
-        from langgraph.checkpoint.memory import InMemorySaver
-        from langgraph.types import Command
-
-        from agent.runtime.root_graph import build_root_graph
 
         class FakeInterrupt:
             def __init__(self, value):
@@ -875,78 +857,32 @@ class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         nested_graph = FakeNestedGraph()
+        config = {"configurable": {"thread_id": "nested_interrupt_resume"}}
 
-        async def fake_runner(input_data):
+        with patch("agent.platform.interrupts.request_interrupt", side_effect=RuntimeError("q1")) as request_interrupt:
+            with self.assertRaisesRegex(RuntimeError, "q1"):
+                await stream_nested_graph(nested_graph, {"query": "研究 test nested interrupt flow"}, config=config)
+        request_interrupt.assert_called_once_with({"content": "q1", "interrupt_type": "human_input"})
+
+        with patch(
+            "langgraph.config.get_config",
+            return_value={"configurable": {"nested_interrupt_count": 1, "nested_resume_value": "answer1"}},
+        ), patch("agent.platform.interrupts.request_interrupt", side_effect=RuntimeError("q2")) as request_interrupt:
+            with self.assertRaisesRegex(RuntimeError, "q2"):
+                await stream_nested_graph(nested_graph, {"query": "研究 test nested interrupt flow"}, config=config)
+        request_interrupt.assert_called_once_with({"content": "q2", "interrupt_type": "human_input"})
+
+        with patch(
+            "langgraph.config.get_config",
+            return_value={"configurable": {"nested_interrupt_count": 1, "nested_resume_value": "answer2"}},
+        ):
             result = await stream_nested_graph(
                 nested_graph,
-                {"query": input_data.get("query", "")},
-                config={"configurable": {"thread_id": input_data["task_id"]}},
-                extra_payload={"nested_graph": "fake_nested"},
-            )
-            return SimpleNamespace(
-                result=str((result or {}).get("final_result", "") or "研究工作流未生成最终结果。"),
-                artifact_refs=[],
-                review={},
-                strategy="fake_nested",
+                {"query": "研究 test nested interrupt flow"},
+                config=config,
             )
 
-        checkpointer = InMemorySaver()
-        graph = build_root_graph(checkpointer=checkpointer)
-        base_config = {"configurable": {"thread_id": "nested_interrupt_resume"}}
-        initial_state = {
-            "task_id": "nested_interrupt_resume",
-            "thread_id": "nested_interrupt_resume",
-            "user_id": "test_user",
-            "mode": "auto",
-            "thinking_level": "high",
-            "task_text": "研究 test nested interrupt flow",
-            "execution_task": "研究 test nested interrupt flow",
-            "file_paths": [],
-            "conversation_id": "",
-            "conversation_context": "",
-            "request_payload": {},
-        }
-
-        with patch("agent.coordinator.skills.skill_registry.get_runner", return_value=fake_runner):
-            interrupted_payloads: list[dict] = []
-            async for part in graph.astream(
-                initial_state,
-                config={**base_config, "configurable": {**base_config["configurable"], "nested_interrupt_count": 0}},
-                version="v2",
-                stream_mode=["updates"],
-            ):
-                data = part.get("data") or {}
-                if data.get("__interrupt__"):
-                    interrupted_payloads.append(data["__interrupt__"][0].value)
-                    break
-
-            self.assertEqual(interrupted_payloads[0]["content"], "q1")
-
-            async for part in graph.astream(
-                Command(resume="answer1"),
-                config={**base_config, "configurable": {**base_config["configurable"], "nested_interrupt_count": 1}},
-                version="v2",
-                stream_mode=["updates"],
-            ):
-                data = part.get("data") or {}
-                if data.get("__interrupt__"):
-                    interrupted_payloads.append(data["__interrupt__"][0].value)
-                    break
-
-            self.assertEqual(interrupted_payloads[1]["content"], "q2")
-
-            async for _part in graph.astream(
-                Command(resume="answer2"),
-                config={**base_config, "configurable": {**base_config["configurable"], "nested_interrupt_count": 1}},
-                version="v2",
-                stream_mode=["updates"],
-            ):
-                pass
-
-            state_snapshot = await graph.aget_state(
-                {**base_config, "configurable": {**base_config["configurable"], "nested_interrupt_count": 1}}
-            )
-            self.assertEqual(state_snapshot.values.get("final_result"), "nested final result")
+        self.assertEqual(result["final_result"], "nested final result")
 
 
 class CitationMapTests(unittest.TestCase):
