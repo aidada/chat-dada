@@ -12,8 +12,13 @@ Brain 只通过 ToolGateway 调用工具，不关心具体执行环境。
 from agent.hands.protocol import ToolCall, ToolContext, ToolExecutor, ToolResult
 from agent.hands.gateway import ToolGateway
 from agent.hands.local_executor import LocalToolExecutor
+from agent.hands.desktop_manager import DesktopHandsManager, DesktopConnection
+from agent.hands.desktop_executor import DesktopToolExecutor
 
 __all__ = [
+    "DesktopConnection",
+    "DesktopHandsManager",
+    "DesktopToolExecutor",
     "LocalToolExecutor",
     "ToolCall",
     "ToolContext",

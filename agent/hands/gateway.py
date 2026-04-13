@@ -1,0 +1,140 @@
+"""ToolGateway — tool-call 事件的唯一编排入口。
+
+职责：
+- 路由 tool call 到正确的 executor (local / remote desktop)
+- 作为 tool-call 业务事件的唯一权威写入点
+- 为 deepagents 域提供兼容 tool adapter
+
+设计约束：
+- Remote executor 和 /tool_result 回调只负责 transport，不写业务事件
+- ToolGateway 写 started/finished/failed 事件，避免重复
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, TYPE_CHECKING
+
+from agent.hands.protocol import ToolCall, ToolContext, ToolExecutor, ToolResult
+
+if TYPE_CHECKING:
+    from agent.session.runtime import SessionRuntime
+    from agent.hands.desktop_manager import DesktopHandsManager
+
+log = logging.getLogger("chatdada.hands.gateway")
+
+
+class ToolGateway:
+    """统一路由与唯一 tool-call 事件权威点。"""
+
+    def __init__(
+        self,
+        local: ToolExecutor,
+        session: "SessionRuntime",
+        *,
+        remote: ToolExecutor | None = None,
+        desktop_manager: "DesktopHandsManager | None" = None,
+        desktop_executor: ToolExecutor | None = None,
+    ) -> None:
+        self._local = local
+        self._remote = remote
+        self._session = session
+        self._routing: dict[str, str] = {}  # tool_name → "local" | "remote"
+        self._desktop_manager = desktop_manager
+        self._desktop_executor = desktop_executor
+
+    def set_route(self, tool_name: str, target: str) -> None:
+        """Configure routing for a specific tool (local / remote)."""
+        self._routing[tool_name] = target
+
+    async def execute(self, call: ToolCall, ctx: ToolContext) -> ToolResult:
+        """Execute a tool call through the gateway.
+
+        1. Route to correct executor
+        2. Emit tool.started 事件（canonical，入 DB）
+        3. Execute
+        4. Emit tool.completed 或 tool.failed 事件（canonical，入 DB）
+        5. Return result
+        """
+        import uuid
+        from agent.session.protocol import EventType
+
+        # Desktop routing: if user has an active desktop connection with this tool
+        target = self._routing.get(call.tool_name, "local")
+        executor = self._local  # default
+
+        if (
+            self._desktop_manager is not None
+            and self._desktop_executor is not None
+        ):
+            conn = self._desktop_manager.get_connection(ctx.user_id)
+            if conn is not None and conn.has_tool(call.tool_name):
+                executor = self._desktop_executor
+                target = "desktop"
+
+        if target != "desktop" and self._routing.get(call.tool_name) == "remote" and self._remote is not None:
+            executor = self._remote
+            target = "remote"
+
+        await executor.prepare(call, ctx)
+
+        # 每次工具调用生成唯一 ID，前端通过 toolCallId 关联 started/completed/failed
+        tool_call_id = str(uuid.uuid4())
+
+        await self._session.emit_event(
+            call.task_id,
+            EventType.TOOL_STARTED,
+            {
+                "toolCallId": tool_call_id,
+                "name":       call.tool_name,
+                "args":       call.params or {},
+                "target":     target,
+            },
+        )
+
+        result = await executor.execute(call, ctx)
+
+        if result.success:
+            await self._session.emit_event(
+                call.task_id,
+                EventType.TOOL_COMPLETED,
+                {
+                    "toolCallId":        tool_call_id,
+                    "name":              call.tool_name,
+                    "output":            result.output,
+                    "execution_time_ms": result.execution_time_ms,
+                },
+            )
+        else:
+            await self._session.emit_event(
+                call.task_id,
+                EventType.TOOL_FAILED,
+                {
+                    "toolCallId": tool_call_id,
+                    "name":       call.tool_name,
+                    "error":      result.error or "tool execution failed",
+                },
+            )
+
+        return result
+
+    def bind_deepagents_tools(
+        self, domain: str, task_id: str, ctx: ToolContext
+    ) -> list[Any]:
+        """生成 deepagents-compatible tool objects。
+
+        内部仍走 gateway.execute() 路径，确保事件记录一致。
+        过渡期实现：包装现有工具函数为 gateway-aware adapters。
+        """
+        # 过渡期：返回现有域工具，后续迁移到纯 gateway 调用
+        if domain == "patent":
+            from agent.domains.patent.tools import get_patent_tools
+            return get_patent_tools()
+        elif domain == "zero_report":
+            from agent.domains.zero_report.tools import get_zero_report_tools
+            return get_zero_report_tools()
+        elif domain == "ppt":
+            from agent.domains.ppt.tools import get_ppt_tools
+            return get_ppt_tools()
+        else:
+            return []
