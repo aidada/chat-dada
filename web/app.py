@@ -15,7 +15,7 @@ from web.routers.files import router as file_router
 from web.routers.quotas import router as quota_router
 from web.routers.system import router as system_router
 from web.routers.tasks import router as task_router
-from web.runtime import FRONTEND_ASSETS_DIR, OUTPUTS_DIR, task_service
+from web import runtime as web_runtime
 from core.langsmith_config import verify_langsmith_connection
 from core.logger import setup_logging
 
@@ -25,7 +25,7 @@ log = logging.getLogger("chatdada.web.app")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    await task_service.connect()
+    await web_runtime.task_service.connect()
     ls_status = verify_langsmith_connection()
     if ls_status.get("ok"):
         log.info(
@@ -36,7 +36,7 @@ async def lifespan(_app: FastAPI):
     else:
         log.warning("LangSmith tracing unavailable: %s", ls_status.get("reason"))
     yield
-    await task_service.close()
+    await web_runtime.task_service.close()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -59,5 +59,28 @@ app.include_router(quota_router)
 app.include_router(task_router)
 app.include_router(conversation_router)
 app.include_router(system_router)
-app.mount("/assets", StaticFiles(directory=str(FRONTEND_ASSETS_DIR), check_dir=False), name="frontend-assets")
-app.mount("/download", StaticFiles(directory=str(OUTPUTS_DIR)), name="download-files")
+
+# Desktop Hands WebSocket
+from agent.hands.desktop_manager import DesktopHandsManager
+from agent.hands.desktop_executor import DesktopToolExecutor
+from web.routers.desktop_hands import create_desktop_hands_router
+
+_desktop_manager = DesktopHandsManager()
+_desktop_executor = DesktopToolExecutor(_desktop_manager)
+
+async def _ws_auth(token: str) -> dict | None:
+    from infra.db.session import SessionFactory
+    from domain.auth.services import AuthService
+    async with SessionFactory() as session:
+        auth_service = AuthService(session)
+        user, _ = await auth_service.get_user_by_session_token(token)
+    return {"id": str(user.id), "email": user.email} if user else None
+
+app.include_router(create_desktop_hands_router(
+    manager=_desktop_manager,
+    executor=_desktop_executor,
+    auth_fn=_ws_auth,
+))
+
+app.mount("/assets", StaticFiles(directory=str(web_runtime.FRONTEND_ASSETS_DIR), check_dir=False), name="frontend-assets")
+app.mount("/download", StaticFiles(directory=str(web_runtime.OUTPUTS_DIR)), name="download-files")
