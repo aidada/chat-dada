@@ -63,7 +63,7 @@ class ConversationRepository:
             .join(TaskRun, TaskRun.task_id == TaskEvent.task_id)
             .where(
                 TaskRun.conversation_id == conversation_id,
-                TaskEvent.event_type.in_(("user", "result", "error")),
+                TaskEvent.event_type.in_(("interaction.answer", "lifecycle.completed", "lifecycle.failed")),
                 TaskEvent.seq > after_seq,
             )
             .order_by(TaskEvent.created_at.asc(), TaskEvent.seq.asc())
@@ -74,7 +74,11 @@ class ConversationRepository:
                 "task_id": row.task_id,
                 "seq": int(row.seq),
                 "event_type": row.event_type,
-                "content": str((row.payload or {}).get("content", "")),
+                "content": str(
+                    (row.payload or {}).get("content", "")
+                    or (row.payload or {}).get("message", "")
+                    or (row.payload or {}).get("output", "")
+                ),
                 "created_at": row.created_at.isoformat(),
             }
             for row in rows
@@ -143,7 +147,7 @@ class ConversationRepository:
                 select(TaskEvent.task_id, TaskEvent.seq, TaskEvent.payload)
                 .where(
                     TaskEvent.task_id.in_(task_ids),
-                    TaskEvent.event_type == "result",
+                    TaskEvent.event_type == "lifecycle.completed",
                 )
                 .order_by(TaskEvent.task_id.asc(), TaskEvent.seq.desc())
             )
@@ -155,7 +159,9 @@ class ConversationRepository:
             if task_id in latest_results:
                 continue
             payload = dict(row.payload or {})
-            latest_results[task_id] = str(payload.get("content", "") or "")
+            latest_results[task_id] = str(
+                payload.get("content", "") or payload.get("output", "") or ""
+            )
 
         return [
             {

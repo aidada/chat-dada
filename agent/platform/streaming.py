@@ -77,18 +77,23 @@ def _extract_message_text(message: Any) -> str:
 
 
 def _normalize_custom_part(part: dict[str, Any], *, checkpoint_id: str = "") -> list[dict[str, Any]]:
+    from agent.session.protocol import OLD_TO_NEW_TYPE_MAP
+
     data = part.get("data")
     if isinstance(data, dict):
         payload = {str(key): _jsonable(value) for key, value in data.items()}
-        event_type = str(payload.pop("event_type", payload.get("type") or "custom"))
+        raw_type = str(payload.pop("event_type", payload.get("type") or "custom"))
         payload.pop("type", None)
     else:
         payload = {"content": str(data)}
-        event_type = "custom"
+        raw_type = "custom"
 
-    if event_type == "file":
+    # 通过映射表将旧类型名自动转换为新的 category.action 格式
+    event_type = OLD_TO_NEW_TYPE_MAP.get(raw_type, raw_type)
+
+    if event_type == "artifact.created":
         payload.setdefault("content", str(payload.get("name") or payload.get("url") or ""))
-    elif "content" not in payload and event_type not in {"task", "node", "checkpoint"}:
+    elif "content" not in payload and event_type not in {"progress.step", "progress.node", "progress.checkpoint"}:
         payload["content"] = str(data)
 
     base = _base_part_payload(
@@ -115,7 +120,7 @@ def _normalize_update_part(part: dict[str, Any], *, checkpoint_id: str = "") -> 
         payload = dict(value if isinstance(value, dict) else {"content": str(value)})
         payload.setdefault("content", str(payload.get("content", "")))
         payload["interrupt_type"] = str(payload.get("interrupt_type", "human_input"))
-        payload["event_type"] = "question"
+        payload["event_type"] = "interaction.question"
         payload.update(base)
         events.append(payload)
 
@@ -124,7 +129,7 @@ def _normalize_update_part(part: dict[str, Any], *, checkpoint_id: str = "") -> 
         if node_name in _UPDATE_INTERNAL_KEYS:
             continue
         payload = {
-            "event_type": "node",
+            "event_type": "progress.node",
             "node_name": str(node_name),
             "status": "updated",
             "content": f"Node updated: {node_name}",
@@ -187,8 +192,9 @@ def _normalize_message_part(part: dict[str, Any], *, checkpoint_id: str = "") ->
         graph_node = str(raw_metadata.get("langgraph_node", "") or "")
 
     payload = {
-        "event_type": "token",
-        "content": content,
+        "event_type": "content.delta",
+        "text": content,          # spec 要求 payload.text（取代旧的 content 字段）
+        "content": content,       # 保留 content 供内部兼容
         "message_metadata": raw_metadata,
     }
     payload.update(_base_part_payload(part, checkpoint_id=checkpoint_id, graph_node=graph_node or None))
@@ -219,7 +225,7 @@ def _normalize_task_part(part: dict[str, Any], *, checkpoint_id: str = "") -> li
         phase = "finish"
 
     payload = {
-        "event_type": "task",
+        "event_type": "progress.step",  # langgraph task 进度 → 折叠为 progress.step
         "phase": phase,
         "status": status,
         "content": content,
@@ -243,7 +249,7 @@ def _normalize_checkpoint_part(part: dict[str, Any], *, checkpoint_id: str = "")
     data = dict(part.get("data") or {})
     checkpoint_value = extract_checkpoint_id(part) or checkpoint_id
     payload = {
-        "event_type": "checkpoint",
+        "event_type": "progress.checkpoint",
         "status": "saved",
         "content": f"Checkpoint saved: {checkpoint_value or 'unknown'}",
         "checkpoint_id": checkpoint_value,
@@ -311,7 +317,7 @@ def translate_stream_part(
             )
         )
         payload["type"] = event_type
-        if event_type == "file":
+        if event_type == "artifact.created":
             payload.setdefault("content", str(payload.get("name") or payload.get("url") or ""))
         translated.append((event_type, payload))
     return translated

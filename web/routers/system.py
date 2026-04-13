@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
+
+from web.deps import get_admin_user
 from pydantic import BaseModel
 
 from core.langsmith_config import is_langsmith_enabled, set_langsmith_enabled, verify_langsmith_connection
 from core.logger import is_verbose, monitor, set_log_level, set_verbose
+from agent.brain.defaults import PROVIDERS
+from agent.brain.registry import ModelSpec, registry
 
 router = APIRouter(tags=["system"])
 
@@ -19,6 +23,19 @@ class VerboseRequest(BaseModel):
 
 class LogLevelRequest(BaseModel):
     level: str
+
+
+class ModelUpdateRequest(BaseModel):
+    model: str | None = None
+    provider: str | None = None
+
+
+def _serialize_model_config(spec: ModelSpec) -> dict[str, str]:
+    return {
+        "model": spec.model,
+        "provider": spec.provider,
+        "client_type": spec.client_type,
+    }
 
 
 @router.get("/api/traces")
@@ -53,3 +70,34 @@ async def get_verbose():
 async def change_log_level(req: LogLevelRequest):
     set_log_level(req.level)
     return {"level": req.level}
+
+
+@router.get("/api/admin/models")
+async def list_models(_admin=Depends(get_admin_user)):
+    return {
+        role: _serialize_model_config(spec)
+        for role, spec in registry.snapshot().items()
+    }
+
+
+@router.put("/api/admin/models/{role}")
+async def update_model(role: str, req: ModelUpdateRequest, _admin=Depends(get_admin_user)):
+    if req.provider is not None and req.provider not in PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{req.provider}'")
+
+    try:
+        registry.update(role, model=req.model, provider=req.provider)
+        spec = registry.get(role)
+    except KeyError as exc:
+        message = str(exc)
+        if "Unknown role" in message:
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise HTTPException(status_code=400, detail=message) from exc
+
+    return {"role": role, **_serialize_model_config(spec)}
+
+
+@router.post("/api/admin/models/reset")
+async def reset_models(_admin=Depends(get_admin_user)):
+    registry.reset()
+    return {"status": "ok", "message": "All models reset to defaults"}

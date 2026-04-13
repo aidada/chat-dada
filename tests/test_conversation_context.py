@@ -79,8 +79,7 @@ class FormatRoundsRawTest(unittest.TestCase):
 
 class BuildRawTest(unittest.IsolatedAsyncioTestCase):
     def _make_builder(self):
-        pool = MagicMock()
-        return ConversationContextBuilder(pool)
+        return ConversationContextBuilder()
 
     def test_build_raw_formats_correctly(self):
         builder = self._make_builder()
@@ -108,56 +107,47 @@ class BuildRawTest(unittest.IsolatedAsyncioTestCase):
 
 class BuildContextIntegrationTest(unittest.IsolatedAsyncioTestCase):
     async def test_empty_conversation_id(self):
-        pool = MagicMock()
-        builder = ConversationContextBuilder(pool)
+        builder = ConversationContextBuilder()
         ctx = await builder.build("", "hello")
         self.assertEqual(ctx.text, "")
         self.assertEqual(ctx.strategy, "none")
 
-    async def test_no_completed_rounds(self):
-        pool = AsyncMock()
-        pool.fetch = AsyncMock(return_value=[])
-        builder = ConversationContextBuilder(pool)
+    @patch("domain.conversations.context._get_conversation_rounds", new_callable=AsyncMock)
+    async def test_no_completed_rounds(self, mock_rounds):
+        builder = ConversationContextBuilder()
+        mock_rounds.return_value = []
         ctx = await builder.build("conv1", "hello")
         self.assertEqual(ctx.round_count, 0)
         self.assertEqual(ctx.strategy, "none")
 
-    async def test_raw_strategy_for_few_rounds(self):
+    @patch("domain.conversations.context._get_conversation_rounds", new_callable=AsyncMock)
+    async def test_raw_strategy_for_few_rounds(self, mock_rounds):
         """≤5 rounds should use raw strategy."""
-        mock_rows = [
-            {"task_id": f"t{i}", "task_text": f"问题{i}", "result_content": f"回答{i}"}
+        mock_rounds.return_value = [
+            _Round(task_id=f"t{i}", user_query=f"问题{i}", assistant_reply=f"回答{i}")
             for i in range(3)
         ]
-        pool = AsyncMock()
-        pool.fetch = AsyncMock(return_value=mock_rows)
-        builder = ConversationContextBuilder(pool)
+        builder = ConversationContextBuilder()
         ctx = await builder.build("conv1", "新问题")
         self.assertEqual(ctx.strategy, "raw")
         self.assertEqual(ctx.round_count, 3)
         self.assertIn("问题0", ctx.text)
         self.assertIn("回答2", ctx.text)
 
-    @patch("domain.conversations.context._generate_summary")
-    async def test_summary_strategy_for_many_rounds(self, mock_summary):
+    @patch("domain.conversations.context._get_conversation_rounds", new_callable=AsyncMock)
+    async def test_summary_strategy_for_many_rounds(self, mock_rounds):
         """6-20 rounds should use summary strategy."""
-        mock_summary.return_value = "这是一段摘要"
-        mock_rows = [
-            {"task_id": f"t{i}", "task_text": f"问题{i}", "result_content": f"回答{i}"}
+        mock_rounds.return_value = [
+            _Round(task_id=f"t{i}", user_query=f"问题{i}", assistant_reply=f"回答{i}")
             for i in range(8)
         ]
-        pool = AsyncMock()
-        pool.fetch = AsyncMock(return_value=mock_rows)
-        pool.fetchrow = AsyncMock(return_value={
-            "context_summary": "",
-            "summary_through_seq": 0,
-        })
-        pool.execute = AsyncMock()
-        builder = ConversationContextBuilder(pool)
-        ctx = await builder.build("conv1", "新问题")
-        self.assertEqual(ctx.strategy, "summary")
-        self.assertEqual(ctx.round_count, 8)
-        self.assertIn("[对话历史摘要]", ctx.text)
-        self.assertIn("[最近对话]", ctx.text)
+        builder = ConversationContextBuilder()
+        with patch.object(builder, "_get_or_update_summary", AsyncMock(return_value="这是一段摘要")):
+            ctx = await builder.build("conv1", "新问题")
+            self.assertEqual(ctx.strategy, "summary")
+            self.assertEqual(ctx.round_count, 8)
+            self.assertIn("[对话历史摘要]", ctx.text)
+            self.assertIn("[最近对话]", ctx.text)
 
 
 class ConversationContextDataclassTest(unittest.TestCase):

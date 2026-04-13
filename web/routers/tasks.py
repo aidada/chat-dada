@@ -141,7 +141,11 @@ async def get_task_provenance(
     supporting_events = [
         event
         for event in events
-        if event["type"] in {"file", "result", "question", "user_reply", "error"}
+        if event["type"] in {
+            "artifact.created", "lifecycle.completed",
+            "interaction.question", "interaction.answer",
+            "lifecycle.failed",
+        }
     ]
     return {
         "task_id": task_id,
@@ -162,7 +166,7 @@ async def get_task_trace(
         raise HTTPException(status_code=404, detail="任务不存在")
     ensure_owner_or_404(resource_user_id=str(snapshot.get("user_id", "")), current_user=current_user)
     events = await task_service.get_events_after(task_id, 0)
-    monitoring = [event for event in events if event["type"] == "monitoring"]
+    monitoring = [event for event in events if event["type"] == "system.monitoring"]
     if not monitoring:
         return {
             "task_id": task_id,
@@ -172,7 +176,7 @@ async def get_task_trace(
             "blocked_modules": list((snapshot.get("review") or {}).get("blocked_modules", []) or []),
             "last_evaluation_diff": dict((snapshot.get("review") or {}).get("last_evaluation_diff", {}) or {}),
         }
-    trace = dict(monitoring[-1]["content"] or {})
+    trace = dict(monitoring[-1].get("payload", {}) or {})
     trace.update(
         {
             "revision_round": int((snapshot.get("review") or {}).get("revision_round", 0) or 0),

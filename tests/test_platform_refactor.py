@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage
 
 from agent.domains.patent.agent import run_patent_domain
 from agent.domains.research.orchestrated import run_research_domain_orchestrated
@@ -39,8 +44,8 @@ class StreamingAdapterTests(unittest.TestCase):
         )
         self.assertEqual(len(events), 1)
         event_type, payload = events[0]
-        self.assertEqual(event_type, "file")
-        self.assertEqual(payload["type"], "file")
+        self.assertEqual(event_type, "artifact.created")
+        self.assertEqual(payload["type"], "artifact.created")
         self.assertEqual(payload["name"], "a.txt")
         self.assertEqual(payload["url"], "/download/a.txt")
         self.assertEqual(payload["thread_id"], "task_1")
@@ -50,6 +55,29 @@ class StreamingAdapterTests(unittest.TestCase):
         self.assertEqual(payload["trace_metadata"], {"task_id": "task_1"})
         self.assertEqual(payload["stream_part_type"], "custom")
         self.assertEqual(payload["graph_path"], [])
+
+    def test_strategy_custom_event_translates_to_progress_brief(self) -> None:
+        events = translate_stream_part(
+            {
+                "type": "custom",
+                "data": {
+                    "event_type": "strategy",
+                    "strategy": "sequential",
+                    "text": "Strategy selected: sequential",
+                    "content": "Strategy selected: sequential",
+                },
+            },
+            thread_id="task_strategy",
+            domain="ppt",
+            checkpoint_id="ckpt_strategy",
+            trace_metadata={"task_id": "task_strategy"},
+        )
+        self.assertEqual(len(events), 1)
+        event_type, payload = events[0]
+        self.assertEqual(event_type, "progress.brief")
+        self.assertEqual(payload["type"], "progress.brief")
+        self.assertEqual(payload["strategy"], "sequential")
+        self.assertEqual(payload["text"], "Strategy selected: sequential")
 
 
 class InteractionTests(unittest.IsolatedAsyncioTestCase):
@@ -73,7 +101,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             checkpoint_id="ckpt_2",
             trace_metadata={"task_id": "task_2"},
         )
-        self.assertEqual(events[0][0], "question")
+        self.assertEqual(events[0][0], "interaction.question")
         self.assertEqual(events[0][1]["content"], "need answer")
         self.assertEqual(events[0][1]["interrupt_type"], "human_input")
 
@@ -87,7 +115,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(events), 1)
         event_type, payload = events[0]
-        self.assertEqual(event_type, "node")
+        self.assertEqual(event_type, "progress.node")
         self.assertEqual(payload["node_name"], "run_patent")
         self.assertEqual(payload["status"], "updated")
         self.assertEqual(payload["update"], {"status": "ok"})
@@ -105,7 +133,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             trace_metadata={"task_id": "task_3"},
         )
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0][0], "token")
+        self.assertEqual(events[0][0], "content.delta")
         self.assertEqual(events[0][1]["content"], "hello")
         self.assertEqual(events[0][1]["message_metadata"]["langgraph_node"], "writer")
         self.assertEqual(events[0][1]["graph_node"], "writer")
@@ -119,7 +147,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             trace_metadata={"task_id": "task_4"},
         )
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0][0], "token")
+        self.assertEqual(events[0][0], "content.delta")
         self.assertEqual(events[0][1]["content"], "world")
 
     def test_messages_empty_content_produces_no_events(self) -> None:
@@ -151,7 +179,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(events), 1)
         event_type, payload = events[0]
-        self.assertEqual(event_type, "task")
+        self.assertEqual(event_type, "progress.step")
         self.assertEqual(payload["phase"], "start")
         self.assertEqual(payload["status"], "started")
         self.assertEqual(payload["langgraph_task_id"], "lg_task_1")
@@ -176,7 +204,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(events), 1)
         event_type, payload = events[0]
-        self.assertEqual(event_type, "task")
+        self.assertEqual(event_type, "progress.step")
         self.assertEqual(payload["phase"], "finish")
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["result"], {"worker_results": [{"status": "ok"}]})
@@ -199,7 +227,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(events), 1)
         event_type, payload = events[0]
-        self.assertEqual(event_type, "checkpoint")
+        self.assertEqual(event_type, "progress.checkpoint")
         self.assertEqual(payload["checkpoint_id"], "cp_999")
         self.assertEqual(payload["status"], "saved")
         self.assertEqual(payload["next_nodes"], ["persist_summary"])
@@ -237,7 +265,10 @@ class NestedGraphStreamingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result, {"messages": []})
-        self.assertEqual([payload["event_type"] for payload in collected], ["task", "token", "checkpoint"])
+        self.assertEqual(
+            [payload["event_type"] for payload in collected],
+            ["progress.step", "content.delta", "progress.checkpoint"],
+        )
         self.assertEqual(collected[0]["nested_graph"], "demo_nested")
         self.assertEqual(collected[1]["content"], "hello")
         self.assertEqual(collected[2]["checkpoint_id"], "cp_nested")
@@ -526,6 +557,56 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(ref["name"] == "final_report.md" for ref in result.artifact_refs))
 
 
+class PptDomainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ppt_sequential_workflow_accepts_custom_base_chat_model(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from agent.brain.registry import registry
+        from agent.domains.ppt.workflow import exec_sequential
+
+        try:
+            registry.update("orchestrator", model="MiniMax-M2.7-highspeed", provider="minimax")
+            with (
+                patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key"}, clear=False),
+                patch(
+                    "agent.domains.ppt.workflow.stream_nested_graph",
+                    new=AsyncMock(return_value={"messages": [AIMessage(content="ppt final")]}),
+                ) as mocked_stream,
+                patch("agent.domains.ppt.workflow.get_ppt_tools", return_value=[]),
+                patch("agent.domains.ppt.workflow.PPT_SUBAGENTS", []),
+                patch("agent.domains.ppt.workflow._load_officecli_skill", return_value=""),
+            ):
+                result = await exec_sequential({"goal": "介绍一下你自己", "intermediate_results": []})
+        finally:
+            registry.reset()
+
+        mocked_stream.assert_awaited_once()
+        self.assertEqual(
+            result,
+            {"intermediate_results": [{"strategy": "sequential", "output": "ppt final"}]},
+        )
+
+    async def test_ppt_review_pass_does_not_emit_review_stream_event(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from agent.domains.ppt.workflow import evaluate_node
+
+        collected: list[dict[str, object]] = []
+        fake_review = SimpleNamespace(passed=True, issues=[])
+
+        with (
+            patch("langgraph.config.get_stream_writer", return_value=collected.append),
+            patch("agent.domains.ppt.workflow.ReviewGate.evaluate", new=AsyncMock(return_value=fake_review)),
+        ):
+            result = await evaluate_node(
+                {"intermediate_results": [{"strategy": "sequential", "output": "ppt body"}]}
+            )
+
+        self.assertEqual(result["final_result"], "ppt body")
+        self.assertEqual([payload.get("event_type") for payload in collected], ["progress.step"])
+        self.assertEqual(collected[0]["content"], "PPT review passed")
+
+
 class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
     async def test_patent_domain_produces_structured_artifacts(self) -> None:
         task_id = "patent_test_basic"
@@ -553,18 +634,25 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.budget["action"], "allow")
 
     async def test_deepagents_patent_builder_uses_subagents(self) -> None:
-        with (
-            patch("deepagents.create_deep_agent") as mocked,
-            patch("core.models.build_chat_model", return_value=object()),
-        ):
-            from agent.domains.patent.agent import build_deepagents_patent_agent
+        from agent.brain.registry import registry
 
-            mocked.return_value = object()
-            result = await build_deepagents_patent_agent()
+        try:
+            registry.update("patent_domain", model="MiniMax-M2.7", provider="minimax")
+            with (
+                patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key"}, clear=False),
+                patch("deepagents.create_deep_agent") as mocked,
+            ):
+                from agent.domains.patent.agent import build_deepagents_patent_agent
+
+                mocked.return_value = object()
+                result = await build_deepagents_patent_agent()
+        finally:
+            registry.reset()
 
         self.assertIsNotNone(result)
         self.assertTrue(mocked.called)
         call_kwargs = mocked.call_args[1]
+        self.assertIsInstance(call_kwargs["model"], BaseChatModel)
         self.assertEqual(len(call_kwargs["subagents"]), 5)
         names = {s["name"] for s in call_kwargs["subagents"]}
         self.assertIn("technical_disclosure_analyst", names)
@@ -634,18 +722,37 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.budget["action"], "allow")
 
     async def test_deepagents_zero_report_builder_uses_subagents(self) -> None:
-        with (
-            patch("deepagents.create_deep_agent") as mocked,
-            patch("core.models.build_chat_model", return_value=object()),
-        ):
-            from agent.domains.zero_report.agent import build_deepagents_zero_report_agent
+        class _FakeGeminiLLM:
+            def __init__(self, **kwargs) -> None:
+                self.client = SimpleNamespace()
 
-            mocked.return_value = object()
-            result = await build_deepagents_zero_report_agent()
+        from agent.brain.registry import registry
+
+        try:
+            registry.update("zero_report_domain", model="gemini-3.1-pro-preview", provider="google_proxy")
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CO_API_KEY": "test-key",
+                        "YESCODE_GEMINI_BASE_URL": "https://co.yes.vg/gemini/v1beta",
+                    },
+                    clear=False,
+                ),
+                patch("langchain_google_genai.ChatGoogleGenerativeAI", new=_FakeGeminiLLM),
+                patch("deepagents.create_deep_agent") as mocked,
+            ):
+                from agent.domains.zero_report.agent import build_deepagents_zero_report_agent
+
+                mocked.return_value = object()
+                result = await build_deepagents_zero_report_agent()
+        finally:
+            registry.reset()
 
         self.assertIsNotNone(result)
         self.assertTrue(mocked.called)
         call_kwargs = mocked.call_args[1]
+        self.assertIsInstance(call_kwargs["model"], BaseChatModel)
         self.assertEqual(len(call_kwargs["subagents"]), 5)
         names = {s["name"] for s in call_kwargs["subagents"]}
         self.assertIn("incident_structurer", names)
@@ -701,42 +808,20 @@ class InteractionHandlerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RecoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_recover_interrupted_tasks_reads_candidate_ids_from_pool(self) -> None:
-        """_recover_interrupted_tasks should return candidate ids from the live pool."""
+    async def test_session_runtime_recover_interrupted_tasks_delegates_to_store(self) -> None:
         from unittest.mock import AsyncMock, MagicMock
 
-        store = MagicMock()
-        store.pool = AsyncMock()
-        store.pool.fetch = AsyncMock(return_value=[
-            {"task_id": "task_running"},
-            {"task_id": "task_waiting"},
-        ])
+        from agent.session.runtime import SessionRuntime
 
-        from agent.runtime.task_execution import TaskRunStore
-        task_ids = await TaskRunStore._recover_interrupted_tasks(store)
+        redis = AsyncMock()
+        store = MagicMock()
+        store.list_interrupted_task_ids = AsyncMock(return_value=["task_running", "task_waiting"])
+
+        runtime = SessionRuntime(redis, store)
+        task_ids = await runtime.recover_interrupted_tasks()
 
         self.assertEqual(task_ids, ["task_running", "task_waiting"])
-        store.pool.fetch.assert_awaited_once()
-
-    async def test_recover_interrupted_tasks_falls_back_to_repository_without_pool(self) -> None:
-        """_recover_interrupted_tasks should use TaskRunRepository when no pool is attached."""
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        session_cm = AsyncMock()
-        session = MagicMock()
-        session_cm.__aenter__.return_value = session
-        session_cm.__aexit__.return_value = False
-        repo = MagicMock()
-        repo.list_interrupted = AsyncMock(return_value=["task_1"])
-
-        from agent.runtime.task_execution import TaskRunStore
-
-        with patch("agent.runtime.task_execution.SessionFactory", return_value=session_cm), \
-             patch("agent.runtime.task_execution.TaskRunRepository", return_value=repo):
-            task_ids = await TaskRunStore("postgresql://example")._recover_interrupted_tasks()
-
-        self.assertEqual(task_ids, ["task_1"])
-        repo.list_interrupted.assert_awaited_once()
+        store.list_interrupted_task_ids.assert_awaited_once()
 
 
 class ResumePathTests(unittest.TestCase):
@@ -767,8 +852,12 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
         from agent.runtime.task_execution import TaskService
         from agent.session.runtime import ResumeHandle
 
-        service = TaskService("postgresql://example", "redis://example")
-        service._session = AsyncMock()
+        service = TaskService(
+            session=AsyncMock(),
+            redis=AsyncMock(),
+            checkpointer_factory=lambda: object(),
+            conversation_context_builder_factory=MagicMock,
+        )
         service._session.recover_interrupted_tasks.return_value = [
             "task_queued",
             "task_waiting",
@@ -780,7 +869,6 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
             checkpoint_id="cp-running",
             resume_context={"clarification_history": [{"question": "q", "answer": "a"}]},
         )
-        service._store = MagicMock()
 
         async def fake_get_task(task_id: str):
             return {
@@ -789,7 +877,7 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 "task_running": {"status": "running"},
             }[task_id]
 
-        service._store.get_task = AsyncMock(side_effect=fake_get_task)
+        service._session.get_task = AsyncMock(side_effect=fake_get_task)
         service._execute_task = AsyncMock()
 
         await service._recover_interrupted_tasks()
@@ -839,11 +927,14 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
         usage_service.estimate_cost_from_usage.return_value = 0.0
         usage_service.record_task_usage = AsyncMock()
 
-        service = TaskService("postgresql://example", "redis://example")
+        service = TaskService(
+            session=AsyncMock(),
+            redis=AsyncMock(),
+            checkpointer_factory=lambda: object(),
+            conversation_context_builder_factory=MagicMock,
+        )
         service._root_graph = FakeRootGraph()
-        service._store = MagicMock()
-        service._store.pool = None
-        service._store.get_task = AsyncMock(
+        service._session.get_task = AsyncMock(
             return_value={
                 "task_id": "task_running",
                 "task": "恢复任务",
@@ -859,10 +950,11 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 "latest_checkpoint_id": "cp-running",
             }
         )
-        service._store.get_events_after = AsyncMock(return_value=[])
-        service._store.update_request_payload = AsyncMock()
-        service._store.set_result_text = AsyncMock()
-        service._store.finish_task = AsyncMock()
+        service._session.get_events_after = AsyncMock(return_value=[])
+        service._session.get_clarification_history = AsyncMock(return_value=[{"question": "q", "answer": "a"}])
+        service._session.update_projection = AsyncMock()
+        service._session.set_result_text = AsyncMock()
+        service._session.finish_task = AsyncMock()
         service.record_event = AsyncMock()
 
         resume_handle = ResumeHandle(
@@ -879,7 +971,7 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
         stream_input, config = service._root_graph.calls[0]
         self.assertIsNone(stream_input, "recovery resume should restart from checkpoint, not replay initial state")
         self.assertEqual(config["configurable"]["checkpoint_id"], "cp-running")
-        service._store.finish_task.assert_awaited_once_with("task_running", "succeeded")
+        service._session.finish_task.assert_awaited_once_with("task_running", "succeeded")
         usage_service.record_task_usage.assert_awaited_once()
 
 

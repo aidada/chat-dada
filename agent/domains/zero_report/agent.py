@@ -26,21 +26,10 @@ from agent.domains.zero_report.schemas import (
     ZeroReportDraft,
 )
 from agent.domains.zero_report.tools import browser_collect_zero_report_context, get_zero_report_tools
+from agent.platform.emit import safe_emit_progress_with_content
 from agent.platform.streaming import stream_nested_graph
 
 _log = logging.getLogger("chatdada.zero_report")
-
-
-def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
-    try:
-        from langgraph.config import get_stream_writer
-
-        writer = get_stream_writer()
-        payload = dict(content) if isinstance(content, dict) else {"content": content}
-        payload.setdefault("event_type", event_type)
-        writer(payload)
-    except Exception:
-        pass
 
 
 ZERO_REPORT_DATA_ROOT = Path("data/zero_report")
@@ -224,17 +213,17 @@ async def run_zero_report_domain(input_data: dict[str, Any]) -> ZeroReportDomain
     task_id = str(input_data.get("task_id", "") or "zero_report_preview")
     use_deepagents = bool(input_data.get("use_deepagents", True))
 
-    _safe_emit("step", f"📋 Zero report domain started: '{query[:60]}'")
+    safe_emit_progress_with_content("step", f"📋 Zero report domain started: '{query[:60]}'")
 
     strategy = "heuristic"
     final_text = ""
 
     if use_deepagents:
         strategy = "deepagents_harness"
-        _safe_emit("step", "🤖 Building deepagents zero-report agent (5 subagents)...")
+        safe_emit_progress_with_content("step", "🤖 Building deepagents zero-report agent (5 subagents)...")
         try:
             agent = await build_deepagents_zero_report_agent()
-            _safe_emit("step", "🚀 Executing deepagents zero-report pipeline...")
+            safe_emit_progress_with_content("step", "🚀 Executing deepagents zero-report pipeline...")
             response = await stream_nested_graph(
                 agent,
                 {"messages": [HumanMessage(content=f"请对以下事件进行归零分析，输出时间线、根因树、整改矩阵和归零报告草稿：\n\n{query}")]},
@@ -252,11 +241,11 @@ async def run_zero_report_domain(input_data: dict[str, Any]) -> ZeroReportDomain
                         break
         except Exception as exc:
             _log.warning("Deepagents zero-report agent failed, falling back to heuristic: %s", exc)
-            _safe_emit("step", "⚠️ Deepagents failed, using heuristic fallback")
+            safe_emit_progress_with_content("step", "⚠️ Deepagents failed, using heuristic fallback")
 
     if not final_text:
         strategy = "heuristic_fallback" if use_deepagents else "heuristic"
-        _safe_emit("step", "🔧 Running heuristic zero-report pipeline...")
+        safe_emit_progress_with_content("step", "🔧 Running heuristic zero-report pipeline...")
         final_text = await _run_heuristic_zero_report(query, task_id, input_data)
 
     # Build structured artifacts from heuristic builders (always, for review gate)
@@ -284,7 +273,7 @@ async def run_zero_report_domain(input_data: dict[str, Any]) -> ZeroReportDomain
             summary=f"{item.action} (due: {item.due_date})",
         ))
 
-    _safe_emit("step", "📝 Persisting artifacts...")
+    safe_emit_progress_with_content("step", "📝 Persisting artifacts...")
     artifact_refs = _persist_artifacts(
         task_id=task_id,
         facts=facts,
@@ -310,7 +299,7 @@ async def run_zero_report_domain(input_data: dict[str, Any]) -> ZeroReportDomain
         cit_path.write_text(json.dumps(citations.to_dicts(), ensure_ascii=False, indent=2), encoding="utf-8")
         artifact_refs.append({"type": "file", "name": "citations.json", "path": str(cit_path)})
 
-    _safe_emit("step", f"✅ Zero report complete (strategy={strategy}), running review gate...")
+    safe_emit_progress_with_content("step", f"✅ Zero report complete (strategy={strategy}), running review gate...")
     review = await ZeroReportReviewGate().evaluate(
         {
             "timeline": timeline.model_dump(),

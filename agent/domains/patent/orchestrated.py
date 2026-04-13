@@ -149,5 +149,5 @@ async def run_patent_domain_orchestrated(
             "passed": last_eval.get("passed", False),
             "issues": last_eval.get("issues", []),
         },
-        budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
+        budget={"action": "allow", "reason": f"orchestrated({' → '.join(strategies_used)})"},
     )

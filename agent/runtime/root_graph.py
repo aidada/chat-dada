@@ -128,16 +128,14 @@ async def persist_summary(state: RootState) -> dict[str, Any]:
     if not final_result:
         return {}
     try:
-        from domain.conversations.context import ConversationContextBuilder
         from langgraph.config import get_configurable
 
         configurable = get_configurable()
-        pool = configurable.get("pool") if configurable else None
-        if pool is None:
+        conversation_service = configurable.get("conversation_service") if configurable else None
+        if conversation_service is None:
             return {}
-        builder = ConversationContextBuilder(pool)
         summary_text = f"用户: {task_text[:200]}\n助手: {final_result[:500]}"
-        await builder.store.update_conversation_summary(
+        await conversation_service.update_summary(
             conversation_id,
             summary_text,
             0,

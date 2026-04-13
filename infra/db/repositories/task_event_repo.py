@@ -58,7 +58,7 @@ class TaskEventRepository:
             select(TaskEvent)
             .where(
                 TaskEvent.task_id == task_id,
-                TaskEvent.event_type.in_(("result", "error")),
+                TaskEvent.event_type.in_(("lifecycle.completed", "lifecycle.failed")),
                 TaskEvent.embedding.is_(None),
             )
             .order_by(TaskEvent.seq.asc())

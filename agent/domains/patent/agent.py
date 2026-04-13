@@ -26,21 +26,10 @@ from agent.domains.patent.schemas import (
     TechnicalDisclosure,
 )
 from agent.domains.patent.tools import browser_verify_patent_page, get_patent_tools
+from agent.platform.emit import safe_emit_progress_with_content
 from agent.platform.streaming import stream_nested_graph
 
 _log = logging.getLogger("chatdada.patent")
-
-
-def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
-    try:
-        from langgraph.config import get_stream_writer
-
-        writer = get_stream_writer()
-        payload = dict(content) if isinstance(content, dict) else {"content": content}
-        payload.setdefault("event_type", event_type)
-        writer(payload)
-    except Exception:
-        pass
 
 
 PATENT_DATA_ROOT = Path("data/patent")
@@ -245,17 +234,17 @@ async def run_patent_domain(input_data: dict[str, Any]) -> PatentDomainResult:
     browser_enabled = bool(input_data.get("browser_enabled", False))
     use_deepagents = bool(input_data.get("use_deepagents", True))
 
-    _safe_emit("step", f"📋 Patent domain started: '{query[:60]}'")
+    safe_emit_progress_with_content("step", f"📋 Patent domain started: '{query[:60]}'")
 
     strategy = "heuristic"
     final_text = ""
 
     if use_deepagents:
         strategy = "deepagents_harness"
-        _safe_emit("step", "🤖 Building deepagents patent agent (5 subagents)...")
+        safe_emit_progress_with_content("step", "🤖 Building deepagents patent agent (5 subagents)...")
         try:
             agent = await build_deepagents_patent_agent()
-            _safe_emit("step", "🚀 Executing deepagents patent pipeline...")
+            safe_emit_progress_with_content("step", "🚀 Executing deepagents patent pipeline...")
             response = await stream_nested_graph(
                 agent,
                 {"messages": [HumanMessage(content=f"请根据以下技术信息生成完整的专利草案（技术交底、权利要求树、说明书、prior-art 矩阵）：\n\n{query}")]},
@@ -273,11 +262,11 @@ async def run_patent_domain(input_data: dict[str, Any]) -> PatentDomainResult:
                         break
         except Exception as exc:
             _log.warning("Deepagents patent agent failed, falling back to heuristic: %s", exc)
-            _safe_emit("step", "⚠️ Deepagents failed, using heuristic fallback")
+            safe_emit_progress_with_content("step", "⚠️ Deepagents failed, using heuristic fallback")
 
     if not final_text:
         strategy = "heuristic_fallback" if use_deepagents else "heuristic"
-        _safe_emit("step", "🔧 Running heuristic patent pipeline...")
+        safe_emit_progress_with_content("step", "🔧 Running heuristic patent pipeline...")
         final_text = await _run_heuristic_patent(query, task_id, browser_enabled, input_data)
 
     # Build structured artifacts from heuristic builders (always, for review gate)
@@ -302,7 +291,7 @@ async def run_patent_domain(input_data: dict[str, Any]) -> PatentDomainResult:
     if citations.all():
         final_text = final_text.rstrip() + "\n\n" + citations.render_markdown_references()
 
-    _safe_emit("step", "📝 Persisting artifacts...")
+    safe_emit_progress_with_content("step", "📝 Persisting artifacts...")
     artifact_refs = _persist_artifacts(
         task_id=task_id,
         disclosure=disclosure,
@@ -328,7 +317,7 @@ async def run_patent_domain(input_data: dict[str, Any]) -> PatentDomainResult:
         cit_path.write_text(json.dumps(citations.to_dicts(), ensure_ascii=False, indent=2), encoding="utf-8")
         artifact_refs.append({"type": "file", "name": "citations.json", "path": str(cit_path)})
 
-    _safe_emit("step", f"✅ Patent complete (strategy={strategy}), running review gate...")
+    safe_emit_progress_with_content("step", f"✅ Patent complete (strategy={strategy}), running review gate...")
     review = await PatentReviewGate().evaluate(
         {
             "key_terms": disclosure.key_terms,

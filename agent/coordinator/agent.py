@@ -4,8 +4,6 @@ import json
 import logging
 import uuid
 from typing import Any
-
-from langgraph.config import get_stream_writer
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 
@@ -15,16 +13,31 @@ from agent.coordinator.state import (
     ExecutionMode,
     SkillContext,
 )
+from agent.platform.emit import safe_emit_progress
 
 _log = logging.getLogger("chatdada.coordinator.agent")
 
 
-def _safe_emit(event_type: str, payload: dict[str, Any]) -> None:
-    try:
-        writer = get_stream_writer()
-        writer({"event_type": event_type, **payload})
-    except Exception:
-        pass
+def _normalize_model_hints(model_hints: Any) -> dict[str, dict[str, Any]] | None:
+    if not isinstance(model_hints, dict) or not model_hints:
+        return None
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for role_name, hint in model_hints.items():
+        if not isinstance(role_name, str) or not isinstance(hint, dict):
+            continue
+
+        role_hint: dict[str, Any] = {}
+        model = hint.get("model")
+        provider = hint.get("provider")
+        if model is not None:
+            role_hint["model"] = str(model)
+        if provider is not None:
+            role_hint["provider"] = str(provider)
+        if role_hint:
+            normalized[role_name] = role_hint
+
+    return normalized or None
 
 
 async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
@@ -37,6 +50,7 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
             "trace_id": state.get("trace_id") or str(uuid.uuid4()),
             "config": state.get("config") or CoordinatorConfig(),
             "available_skills": skill_registry.list_skills(),
+            "model_hints": state.get("model_hints"),
         }
 
     from agent.coordinator.prompts import build_understand_goal_prompt
@@ -47,7 +61,7 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
     trace_id = state.get("trace_id") or str(uuid.uuid4())
     goal = state.get("original_goal", "")
 
-    _safe_emit("step", {"content": "理解目标...", "node": "understand_goal", "trace_id": trace_id})
+    safe_emit_progress("progress.step", {"content": "理解目标...", "node": "understand_goal", "trace_id": trace_id})
 
     skill_summary = skill_registry.skill_summary_for_llm()
     messages = build_understand_goal_prompt(goal, skill_summary)
@@ -91,6 +105,7 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
             "review": {},
             "budget": {},
             "strategy_trace": [],
+            "model_hints": _normalize_model_hints(parsed.get("model_hints")),
         }
 
         if execution_mode == ExecutionMode.SINGLE_SKILL:
@@ -100,7 +115,7 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
                 skill_input["query"] = goal
             result["skill_input"] = skill_input
 
-        _safe_emit("step", {
+        safe_emit_progress("progress.step", {
             "content": f"执行模式：{execution_mode.value}",
             "node": "understand_goal",
             "trace_id": trace_id,
@@ -121,6 +136,7 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
             "review": {},
             "budget": {},
             "strategy_trace": [],
+            "model_hints": None,
         }
 
 
@@ -134,7 +150,7 @@ async def direct_answer_node(state: CoordinatorState) -> dict[str, Any]:
     conversation_context = state.get("conversation_context") or ""
     trace_id = state.get("trace_id", "")
 
-    _safe_emit("step", {"content": "生成回答...", "node": "direct_answer", "trace_id": trace_id})
+    safe_emit_progress("progress.step", {"content": "生成回答...", "node": "direct_answer", "trace_id": trace_id})
 
     messages = build_direct_answer_prompt(goal, conversation_context)
 
@@ -147,21 +163,13 @@ async def direct_answer_node(state: CoordinatorState) -> dict[str, Any]:
             else:
                 lc_messages.append(HumanMessage(content=msg["content"]))
 
-        # 流式输出
-        writer = None
-        try:
-            writer = get_stream_writer()
-        except Exception:
-            pass
-
         full_text = ""
         try:
             async for chunk in llm.astream(lc_messages):
                 delta = response_text(chunk)
                 if delta:
                     full_text += delta
-                    if writer:
-                        writer({"event_type": "token", "content": delta, "node": "direct_answer"})
+                    safe_emit_progress("content.delta", {"text": delta, "content": delta, "node": "direct_answer", "trace_id": trace_id})
         except Exception:
             response = await llm.ainvoke(lc_messages)
             full_text = response_text(response)
@@ -195,7 +203,7 @@ async def execute_single_skill_node(state: CoordinatorState) -> dict[str, Any]:
     if not skill_input.get("query"):
         skill_input["query"] = goal
 
-    _safe_emit("step", {
+    safe_emit_progress("progress.step", {
         "content": f"调用技能：{selected_skill}",
         "node": "execute_single_skill",
         "trace_id": trace_id,
@@ -215,6 +223,7 @@ async def execute_single_skill_node(state: CoordinatorState) -> dict[str, Any]:
 
     skill_invocation_id = f"single_{uuid.uuid4().hex[:8]}"
     coordinator_task_id = trace_id or str(uuid.uuid4())
+    model_hints = _normalize_model_hints(state.get("model_hints"))
 
     context = SkillContext(
         coordinator_task_id=coordinator_task_id,
@@ -230,7 +239,19 @@ async def execute_single_skill_node(state: CoordinatorState) -> dict[str, Any]:
     # it never returns SkillResult(status="interrupted"). Any interrupt propagates
     # upward via the exception path, so an "interrupted" status check here is dead
     # code and has been removed (PRD §6.4 Bug 2).
-    result = await run_skill_via_adapter(runner, skill_input, context)
+    if model_hints:
+        from agent.brain.context import clear_task_model_override, set_task_model_override
+
+        override_token = set_task_model_override(model_hints)
+    else:
+        clear_task_model_override = None
+        override_token = None
+
+    try:
+        result = await run_skill_via_adapter(runner, skill_input, context)
+    finally:
+        if clear_task_model_override is not None:
+            clear_task_model_override(override_token)
 
     if result.status in ("error", "timeout"):
         error_msg = result.error or f"技能 {selected_skill} 执行失败（{result.status}）"
@@ -264,8 +285,13 @@ def route_after_understand_goal(state: CoordinatorState) -> str:
         return "dag"
 
 
-def build_coordinator_graph():
-    """构建 Coordinator LangGraph StateGraph"""
+def build_coordinator_graph(checkpointer=None):
+    """构建 Coordinator LangGraph StateGraph。
+
+    Args:
+        checkpointer: 外部注入的持久化 checkpointer。
+                      如果为 None，回退到 MemorySaver（仅用于测试）。
+    """
     from agent.coordinator.executor import (
         assign_skills_node,
         check_dependencies_node,
@@ -316,9 +342,11 @@ def build_coordinator_graph():
     )
     graph.add_edge("synthesize", END)
 
-    from langgraph.checkpoint.memory import MemorySaver
+    if checkpointer is None:
+        from langgraph.checkpoint.memory import MemorySaver
+        checkpointer = MemorySaver()
 
-    return graph.compile(checkpointer=MemorySaver(), name="coordinator_graph")
+    return graph.compile(checkpointer=checkpointer, name="coordinator_graph")
 
 
 __all__ = [

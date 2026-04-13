@@ -39,23 +39,12 @@ from agent.domains.research.utils import (
     normalize_plan,
 )
 from agent.domains.research.worker import coordinate_modules
+from agent.platform.emit import safe_emit_progress_with_content as _safe_emit
 
 log = logging.getLogger("chatdada.research.workflow")
 
 WORKFLOW_LLM_NODE_MAX_ATTEMPTS = 3
 CHECKPOINT_C_PROMPT = "模块评审已通过。若还要继续微调，请说明；如无修改可忽略，系统将输出最终稿。"
-
-
-def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
-    """向流式前端发事件；脱离图运行时静默失败。"""
-    try:
-        from langgraph.config import get_stream_writer
-
-        payload = dict(content) if isinstance(content, dict) else {"content": content}
-        payload.setdefault("event_type", event_type)
-        get_stream_writer()(payload)
-    except Exception:
-        pass
 
 
 def _task_download_url(task_id: str, relative_path: str) -> str:

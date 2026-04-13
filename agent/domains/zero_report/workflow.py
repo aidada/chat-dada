@@ -128,14 +128,7 @@ class ZeroReportWorkflowState(TypedDict, total=False):
 
 # ── Helper functions ───────────────────────────────────────────────────────────
 
-def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
-    try:
-        from langgraph.config import get_stream_writer
-        payload = dict(content) if isinstance(content, dict) else {"content": content}
-        payload.setdefault("event_type", event_type)
-        get_stream_writer()(payload)
-    except Exception:
-        pass
+from agent.platform.emit import safe_emit_progress_with_content as _safe_emit
 
 
 def _extract_last_ai_text(response: Any) -> str:
@@ -319,17 +312,16 @@ async def select_strategy_node(state: ZeroReportWorkflowState) -> dict[str, Any]
 
     _log.info("Zero-report strategy selected: %s", strategy)
 
-    try:
-        from langgraph.config import get_stream_writer
-        get_stream_writer()(
-            {
-                "event_type": "strategy",
-                "strategy": strategy,
-                "content": f"Strategy selected: {strategy}",
-            }
-        )
-    except Exception:
-        pass
+    from agent.platform.emit import safe_emit_progress
+
+    safe_emit_progress(
+        "progress.brief",
+        {
+            "strategy": strategy,
+            "text": f"Strategy selected: {strategy}",
+            "content": f"Strategy selected: {strategy}",
+        },
+    )
 
     return {
         "selected_strategy": strategy,
@@ -401,14 +393,6 @@ async def evaluate_node(state: ZeroReportWorkflowState) -> dict[str, Any]:
 
     if review.passed:
         _safe_emit("step", "Zero-report review passed")
-        _safe_emit(
-            "review",
-            {
-                "status": "passed",
-                "issues": [],
-                "content": "Review passed",
-            },
-        )
         return {
             "evaluations": [evaluation],
             "final_result": output,
@@ -419,14 +403,6 @@ async def evaluate_node(state: ZeroReportWorkflowState) -> dict[str, Any]:
     _safe_emit(
         "step",
         f"Zero-report review failed ({issue_count} issues), preparing iterative refinement",
-    )
-    _safe_emit(
-        "review",
-        {
-            "status": "failed",
-            "issues": evaluation["issues"],
-            "content": f"Review failed with {issue_count} issue(s)",
-        },
     )
     return {
         "evaluations": [evaluation],

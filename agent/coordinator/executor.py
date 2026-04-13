@@ -6,8 +6,6 @@ import logging
 import uuid
 from typing import Any
 
-from langgraph.config import get_stream_writer
-
 from agent.coordinator.state import (
     CoordinatorConfig,
     CoordinatorState,
@@ -193,7 +191,7 @@ async def decompose_tasks_node(state: CoordinatorState) -> dict[str, Any]:
     skill_summary = skill_registry.skill_summary_for_llm()
     trace_id = state.get("trace_id", "")
 
-    _safe_emit("step", {"content": "分解任务为 DAG...", "node": "decompose_tasks", "trace_id": trace_id})
+    _safe_emit("progress.step", {"content": "分解任务为 DAG...", "node": "decompose_tasks", "trace_id": trace_id})
 
     messages = build_decompose_tasks_prompt(goal, skill_summary)
     result = await _call_llm_json(messages, description="decompose_tasks")
@@ -241,7 +239,7 @@ async def decompose_tasks_node(state: CoordinatorState) -> dict[str, Any]:
             for task in tasks:
                 task.depends_on = []
 
-    _safe_emit("task_dag", {
+    _safe_emit("progress.dag", {
         "tasks": [{"id": t.id, "title": t.title, "assigned_skill": t.assigned_skill} for t in tasks],
         "status": "generated",
         "trace_id": trace_id,
@@ -334,7 +332,8 @@ async def execute_tasks_node(state: CoordinatorState) -> dict[str, Any]:
         task.status = "running"
         task.start_time = __import__("time").monotonic()
 
-        _safe_emit("task_start", {
+        _safe_emit("progress.step", {
+            "content": f"开始执行: {task.title or task.id}",
             "task_id": task.id,
             "skill": task.assigned_skill,
             "trace_id": trace_id,
@@ -358,7 +357,8 @@ async def execute_tasks_node(state: CoordinatorState) -> dict[str, Any]:
 
         task.end_time = __import__("time").monotonic()
 
-        _safe_emit("task_complete", {
+        _safe_emit("progress.step", {
+            "content": f"完成: {task.title or task.id}（{result.status}）",
             "task_id": task.id,
             "status": result.status,
             "trace_id": trace_id,
@@ -460,7 +460,7 @@ async def check_dependencies_node(state: CoordinatorState) -> dict[str, Any]:
     # 检查总失败数
     total_failures = len(failed)
     if total_failures >= config.max_total_failures:
-        _safe_emit("error", {"type": "max_total_failures", "count": total_failures})
+        _safe_emit("lifecycle.failed", {"type": "max_total_failures", "count": total_failures})
         # 取消所有 pending 任务
         for task in task_dag:
             if task.status == "pending":
@@ -505,7 +505,7 @@ async def synthesize_node(state: CoordinatorState) -> dict[str, Any]:
     completed = state.get("completed_tasks") or {}
     trace_id = state.get("trace_id", "")
 
-    _safe_emit("step", {"content": "汇总执行结果...", "node": "synthesize", "trace_id": trace_id})
+    _safe_emit("progress.step", {"content": "汇总执行结果...", "node": "synthesize", "trace_id": trace_id})
 
     if not completed:
         failed = state.get("failed_tasks") or {}
@@ -515,7 +515,7 @@ async def synthesize_node(state: CoordinatorState) -> dict[str, Any]:
                 err = t.error or "unknown error"
                 failed_summaries.append(f"{t.title}（{t.id}）: {err}")
             error_detail = "; ".join(failed_summaries)
-            _safe_emit("error", {"type": "all_tasks_failed", "failed_tasks": list(failed.keys())})
+            _safe_emit("lifecycle.failed", {"type": "all_tasks_failed", "failed_tasks": list(failed.keys())})
             return {
                 "final_result": f"任务执行失败：{error_detail}",
                 "artifact_refs": [],
@@ -602,7 +602,7 @@ async def synthesize_node(state: CoordinatorState) -> dict[str, Any]:
 async def handle_failure_node(state: CoordinatorState) -> dict[str, Any]:
     """处理失败任务（由 check_dependencies 委托）"""
     failed = state.get("failed_tasks") or {}
-    _safe_emit("error", {"type": "dag_failure", "failed_tasks": list(failed.keys())})
+    _safe_emit("lifecycle.failed", {"type": "dag_failure", "failed_tasks": list(failed.keys())})
     return {
         "final_result": f"任务执行失败：{', '.join(failed.keys())}",
         "artifact_refs": [],

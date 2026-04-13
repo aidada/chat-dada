@@ -144,6 +144,27 @@ END $$;
 
 CREATE INDEX IF NOT EXISTS idx_task_runs_conversation ON task_runs (conversation_id);
 
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='task_runs' AND column_name='artifact_refs') THEN
+    ALTER TABLE task_runs ADD COLUMN artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='task_runs' AND column_name='latest_checkpoint_id') THEN
+    ALTER TABLE task_runs ADD COLUMN latest_checkpoint_id TEXT NOT NULL DEFAULT '';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='task_runs' AND column_name='nested_interrupt_pending') THEN
+    ALTER TABLE task_runs ADD COLUMN nested_interrupt_pending BOOLEAN NOT NULL DEFAULT FALSE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='task_runs' AND column_name='review') THEN
+    ALTER TABLE task_runs ADD COLUMN review JSONB;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='task_runs' AND column_name='budget') THEN
+    ALTER TABLE task_runs ADD COLUMN budget JSONB;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='task_runs' AND column_name='cancel_state') THEN
+    ALTER TABLE task_runs ADD COLUMN cancel_state TEXT;
+  END IF;
+END $$;
+
 -- Conversation context summary cache
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='conversations' AND column_name='context_summary') THEN

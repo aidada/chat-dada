@@ -3,17 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import uuid
 from collections.abc import Callable as AbcCallable
-from datetime import UTC, datetime
-from pathlib import Path
+from datetime import UTC
 from typing import Any, Awaitable
 
-import asyncpg
 import redis.asyncio as aioredis
 from langgraph.types import Command
 
+from agent.session.protocol import EventType
+from agent.session.runtime import SessionRuntime, is_transient_progress_type
 from agent.platform.state import RouteDecisionPayload
 from agent.runtime.interaction import (
     reset_preloaded_user_replies,
@@ -26,10 +24,7 @@ from core.langsmith_config import build_langsmith_run_config
 from core.logger import monitor, new_trace_id
 from core.models import set_thinking_level
 from domain.billing.services import QuotaExceededError, QuotaService
-from infra.db.repositories.conversation_repo import ConversationRepository
 from infra.db.repositories.quota_repo import UsageEventRepository, UserQuotaRepository
-from infra.db.repositories.task_event_repo import TaskEventRepository
-from infra.db.repositories.task_repo import TaskRunRepository
 from infra.db.session import SessionFactory
 from agent.platform.streaming import extract_checkpoint_id, translate_stream_part
 
@@ -39,7 +34,6 @@ TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 HEARTBEAT_INTERVAL_SECONDS = 10
 
 
-
 def compose_task_text(task: str, file_paths: list[str]) -> str:
     if not file_paths:
         return task
@@ -47,346 +41,38 @@ def compose_task_text(task: str, file_paths: list[str]) -> str:
     return f"{task}\n\n[用户上传了以下文件，请在任务中使用这些文件]:\n{file_list}"
 
 
-_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-
-
-def _build_attachments(request_payload_raw) -> list[dict[str, Any]]:
-    try:
-        payload = json.loads(request_payload_raw) if isinstance(request_payload_raw, str) else (request_payload_raw or {})
-    except (json.JSONDecodeError, TypeError):
-        return []
-    file_paths = payload.get("file_paths") or []
-    attachments = []
-    for fp in file_paths:
-        name = Path(fp).name
-        is_image = Path(fp).suffix.lower() in _IMAGE_EXTENSIONS
-        attachments.append({"name": name, "url": f"/uploads/{name}", "is_image": is_image})
-    return attachments
-
-
 def task_is_terminal(status: str) -> bool:
     return status in TERMINAL_STATUSES
 
 
 def parse_step_payload(step_info: str) -> tuple[str, dict[str, Any]]:
+    """解析 step 回调 payload，返回 (event_type, payload) 元组。
+
+    event_type 统一使用新的 category.action 格式（通过 OLD_TO_NEW_TYPE_MAP 自动转换）。
+    """
+    from agent.session.protocol import OLD_TO_NEW_TYPE_MAP
+
     try:
         parsed = json.loads(step_info)
     except (json.JSONDecodeError, TypeError):
-        return "step", {"content": str(step_info)}
+        return "progress.step", {"content": str(step_info)}
 
     if isinstance(parsed, dict) and isinstance(parsed.get("type"), str):
         payload = dict(parsed)
-        event_type = str(payload.pop("type"))
-        if event_type == "file":
+        raw_type = str(payload.pop("type"))
+        # 旧类型名（如 "file"、"step"）自动映射到新格式
+        event_type = OLD_TO_NEW_TYPE_MAP.get(raw_type, raw_type)
+        if event_type == "artifact.created":
             payload.setdefault("content", payload.get("name") or payload.get("url") or "")
         else:
             payload.setdefault("content", str(payload.get("content", "")))
         return event_type, payload
 
-    return "step", {"content": str(step_info)}
+    return "progress.step", {"content": str(step_info)}
 
 
 def _merge_nested_interrupt_pending(current_pending: bool, payload: dict[str, Any]) -> bool:
     return current_pending or bool(payload.get("nested_graph"))
-
-
-class TaskRunStore:
-    def __init__(self, database_url: str) -> None:
-        self._database_url = database_url
-        self.pool: asyncpg.Pool | None = None
-
-    async def connect(self) -> None:
-        self.pool = await asyncpg.create_pool(self._database_url, min_size=2, max_size=10)
-
-    async def close(self) -> None:
-        if self.pool:
-            await self.pool.close()
-            self.pool = None
-
-    async def _recover_interrupted_tasks(self) -> list[str]:
-        if not isinstance(self, TaskRunStore) and getattr(self, "pool", None) is not None:
-            rows = await self.pool.fetch(
-                """
-                SELECT task_id
-                FROM task_runs
-                WHERE status IN ('queued', 'running', 'waiting_for_user')
-                ORDER BY created_at ASC
-                """
-            )
-            task_ids = [str(row["task_id"]) for row in rows]
-        else:
-            async with SessionFactory() as session:
-                repo = TaskRunRepository(session)
-                task_ids = await repo.list_interrupted()
-        return task_ids
-
-    async def create_task(
-        self,
-        *,
-        user_id: str,
-        task_text: str,
-        mode: str,
-        thinking_level: str,
-        request_payload: dict[str, Any],
-        conversation_id: str = "",
-    ) -> dict[str, Any]:
-        task_id = f"task_{uuid.uuid4().hex[:12]}"
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.create(
-                task_id=task_id,
-                user_id=user_id,
-                task_text=task_text,
-                mode=mode,
-                thinking_level=thinking_level,
-                request_payload=request_payload,
-                conversation_id=conversation_id,
-            )
-            if conversation_id:
-                await repo.touch_conversation(conversation_id)
-            await session.commit()
-
-        return await self.get_task(task_id) or {
-            "task_id": task_id,
-            "status": "queued",
-            "task": task_text,
-            "mode": mode,
-            "thinking_level": thinking_level,
-        }
-
-    async def mark_started(self, task_id: str) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.mark_started(task_id)
-            await session.commit()
-
-    async def set_waiting_for_user(self, task_id: str, question_payload: dict[str, Any]) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.set_waiting_for_user(task_id, question_payload)
-            await session.commit()
-
-    async def resume_task(self, task_id: str) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.resume_task(task_id)
-            await session.commit()
-
-    async def update_request_payload(self, task_id: str, patch: dict[str, Any]) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.update_request_payload(task_id, patch)
-            await session.commit()
-
-    async def set_route_info(
-        self,
-        task_id: str,
-        *,
-        route_name: str,
-        route_reason: str,
-        route_confidence: float,
-    ) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.set_route_info(
-                task_id,
-                route_name=route_name,
-                route_reason=route_reason,
-                route_confidence=route_confidence,
-            )
-            await session.commit()
-
-    async def set_result_text(self, task_id: str, result_text: str) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.set_result_text(task_id, result_text)
-            await session.commit()
-
-    async def set_error_text(self, task_id: str, error_text: str) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.set_error_text(task_id, error_text)
-            await session.commit()
-
-    async def finish_task(self, task_id: str, status: str) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.finish(task_id, status)
-            await session.commit()
-
-    async def cancel_task(self, task_id: str, *, error_text: str) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.cancel(task_id, error_text=error_text)
-            await session.commit()
-
-    async def append_event(
-        self, task_id: str, event_type: str, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        async with SessionFactory() as session:
-            repo = TaskEventRepository(session)
-            row = await repo.append(task_id=task_id, event_type=event_type, payload=payload)
-            await session.commit()
-
-        event: dict[str, Any] = {
-            "task_id": task_id,
-            "seq": row.seq,
-            "type": event_type,
-            "created_at": row.created_at.isoformat(),
-        }
-        event.update(payload)
-        return event
-
-    async def get_task(self, task_id: str) -> dict[str, Any] | None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            row = await repo.get(task_id)
-            if row is None:
-                return None
-            last_seq = await repo.get_last_seq(task_id)
-
-        payload = dict(row.request_payload or {})
-        pending_question = dict(row.pending_question) if row.pending_question else None
-
-        def _ts(v: datetime | None) -> str | None:
-            return v.isoformat() if v is not None else None
-
-        return {
-            "task_id": row.task_id,
-            "user_id": row.user_id,
-            "status": row.status,
-            "task": row.task_text,
-            "mode": row.mode,
-            "thinking_level": row.thinking_level,
-            "request_payload": payload,
-            "route_name": row.route_name,
-            "route_reason": row.route_reason,
-            "route_confidence": row.route_confidence,
-            "file_paths": payload.get("file_paths", []),
-            "pending_question": pending_question,
-            "result": row.result_text,
-            "error": row.error_text,
-            "thread_id": payload.get("thread_id", row.task_id),
-            "domain": row.route_name or payload.get("domain", ""),
-            "artifact_refs": payload.get("artifact_refs", []),
-            "interrupt_state": payload.get("interrupt_state"),
-            "latest_checkpoint_id": payload.get("latest_checkpoint_id", ""),
-            "review": payload.get("review"),
-            "budget": payload.get("budget"),
-            "created_at": _ts(row.created_at),
-            "started_at": _ts(row.started_at),
-            "finished_at": _ts(row.finished_at),
-            "updated_at": _ts(row.updated_at),
-            "conversation_id": row.conversation_id or "",
-            "last_seq": last_seq,
-        }
-
-    async def get_events_after(self, task_id: str, after_seq: int) -> list[dict[str, Any]]:
-        async with SessionFactory() as session:
-            repo = TaskEventRepository(session)
-            rows = await repo.list_after(task_id=task_id, after_seq=after_seq)
-        events: list[dict[str, Any]] = []
-        for row in rows:
-            payload = dict(row.payload or {})
-            event: dict[str, Any] = {
-                "task_id": row.task_id,
-                "seq": int(row.seq),
-                "type": row.event_type,
-                "created_at": row.created_at.isoformat(),
-            }
-            event.update(payload)
-            events.append(event)
-        return events
-
-    async def create_conversation(
-        self, *, conversation_id: str, user_id: str, title: str = "新对话"
-    ) -> dict[str, Any]:
-        async with SessionFactory() as session:
-            repo = ConversationRepository(session)
-            row = await repo.create(conversation_id=conversation_id, user_id=user_id, title=title)
-            await session.commit()
-        return {
-            "id": row.id,
-            "user_id": row.user_id,
-            "title": row.title,
-            "pinned": row.pinned,
-            "created_at": row.created_at.isoformat(),
-            "updated_at": row.updated_at.isoformat(),
-        }
-
-    async def list_conversations(self, user_id: str) -> list[dict[str, Any]]:
-        async with SessionFactory() as session:
-            repo = ConversationRepository(session)
-            return await repo.list_for_user(user_id)
-
-    async def update_conversation(
-        self, conversation_id: str, **fields: Any
-    ) -> dict[str, Any] | None:
-        async with SessionFactory() as session:
-            repo = ConversationRepository(session)
-            row = await repo.get(conversation_id)
-            if row is None:
-                return None
-            row = await repo.update(row, **fields)
-            await session.commit()
-        return {
-            "id": row.id,
-            "user_id": row.user_id,
-            "title": row.title,
-            "pinned": row.pinned,
-            "created_at": row.created_at.isoformat(),
-            "updated_at": row.updated_at.isoformat(),
-        }
-
-    async def get_conversation(self, conversation_id: str) -> dict[str, Any] | None:
-        async with SessionFactory() as session:
-            repo = ConversationRepository(session)
-            row = await repo.get(conversation_id)
-        if row is None:
-            return None
-        return {
-            "id": row.id,
-            "user_id": row.user_id,
-            "title": row.title,
-            "pinned": row.pinned,
-            "created_at": row.created_at.isoformat(),
-            "updated_at": row.updated_at.isoformat(),
-        }
-
-    async def delete_conversation(self, conversation_id: str) -> bool:
-        async with SessionFactory() as session:
-            repo = ConversationRepository(session)
-            row = await repo.get(conversation_id)
-            if row is None:
-                return False
-            await repo.delete(row)
-            await session.commit()
-            return True
-
-    async def get_conversation_entries(self, conversation_id: str) -> list[dict[str, Any]]:
-        async with SessionFactory() as session:
-            repo = ConversationRepository(session)
-            return await repo.get_entries(conversation_id)
-
-    async def get_conversation_summary(self, conversation_id: str) -> tuple[str, int]:
-        async with SessionFactory() as session:
-            repo = ConversationRepository(session)
-            return await repo.get_summary(conversation_id)
-
-    async def update_conversation_summary(
-        self, conversation_id: str, summary: str, through_seq: int
-    ) -> None:
-        async with SessionFactory() as session:
-            repo = ConversationRepository(session)
-            await repo.update_summary(conversation_id, summary, through_seq)
-            await session.commit()
-
-    async def get_conversation_primary_events(
-        self, conversation_id: str, after_seq: int = 0
-    ) -> list[dict[str, Any]]:
-        async with SessionFactory() as session:
-            repo = ConversationRepository(session)
-            return await repo.get_primary_events(conversation_id, after_seq)
 
 
 class TaskService:
@@ -401,14 +87,20 @@ class TaskService:
 
     def __init__(
         self,
-        database_url: str,
-        redis_url: str,
+        *,
+        session: SessionRuntime,
+        redis: aioredis.Redis,
+        checkpointer_factory: AbcCallable[[], Any],
+        conversation_context_builder_factory: AbcCallable[[], Any],
+        embedding_service: Any | None = None,
+        conversation_service: Any | None = None,
     ) -> None:
-        self._store = TaskRunStore(database_url)
-        self._database_url = database_url
-        self._redis_url = redis_url
-        self._redis: aioredis.Redis | None = None
-        self._session: Any | None = None  # SessionRuntime
+        self._session = session
+        self._redis = redis
+        self._checkpointer_factory = checkpointer_factory
+        self._conversation_context_builder_factory = conversation_context_builder_factory
+        self._embedding_service = embedding_service
+        self._conversation_service = conversation_service
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._runner_tasks: dict[str, asyncio.Task[Any]] = {}
         self._checkpointer_cm: Any | None = None
@@ -416,25 +108,18 @@ class TaskService:
         self._root_graph: Any | None = None
 
     async def _open_checkpointer(self) -> Any:
-        try:
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-        except ImportError:
-            from langgraph.checkpoint.memory import InMemorySaver
-
-            log.warning("langgraph-checkpoint-postgres not installed; falling back to InMemorySaver")
-            return InMemorySaver()
-
-        self._checkpointer_cm = AsyncPostgresSaver.from_conn_string(self._database_url)
-        checkpointer = await self._checkpointer_cm.__aenter__()
-        await checkpointer.setup()
+        candidate = self._checkpointer_factory()
+        if hasattr(candidate, "__aenter__") and hasattr(candidate, "__aexit__"):
+            self._checkpointer_cm = candidate
+            checkpointer = await candidate.__aenter__()
+        else:
+            checkpointer = await candidate if asyncio.iscoroutine(candidate) else candidate
+        if hasattr(checkpointer, "setup"):
+            await checkpointer.setup()
         return checkpointer
 
     async def connect(self) -> None:
-        await self._store.connect()
-        self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
-        from agent.session.runtime import SessionRuntime
-
-        self._session = SessionRuntime(self._redis)
+        await self._session.setup()
         self._checkpointer = await self._open_checkpointer()
         self._root_graph = build_root_graph(checkpointer=self._checkpointer)
         await self._recover_interrupted_tasks()
@@ -443,9 +128,11 @@ class TaskService:
         for task in list(self._runner_tasks.values()):
             task.cancel()
         self._runner_tasks.clear()
-        await self._store.close()
         if self._redis:
-            await self._redis.aclose()
+            try:
+                await self._redis.aclose()
+            except Exception:
+                pass
             self._redis = None
         if self._checkpointer_cm is not None:
             await self._checkpointer_cm.__aexit__(None, None, None)
@@ -454,13 +141,13 @@ class TaskService:
             self._root_graph = None
 
     @property
-    def store(self) -> TaskRunStore:
-        return self._store
-
-    @property
-    def session(self) -> Any:
+    def session(self) -> SessionRuntime:
         """SessionRuntime instance — the durable state boundary."""
         return self._session
+
+    @property
+    def redis(self) -> aioredis.Redis:
+        return self._redis
 
     def _track_runner(self, task_id: str, task: asyncio.Task[Any]) -> None:
         self._runner_tasks[task_id] = task
@@ -486,7 +173,7 @@ class TaskService:
             len(task_ids),
         )
         for task_id in task_ids:
-            snapshot = await self._store.get_task(task_id) or {}
+            snapshot = await self._session.get_task(task_id) or {}
             if snapshot.get("status") == "queued":
                 background = asyncio.create_task(
                     self._execute_task(task_id),
@@ -511,23 +198,23 @@ class TaskService:
             self._track_runner(task_id, background)
 
     async def _finalize_cancelled(self, task_id: str, message: str = "任务已取消") -> dict[str, Any] | None:
-        snapshot = await self._store.get_task(task_id)
+        snapshot = await self._session.get_task(task_id)
         if snapshot is None:
             return None
         if snapshot.get("status") == "cancelled":
             return snapshot
 
-        await self._store.update_request_payload(
+        await self._session.update_projection(
             task_id,
-            {"interrupt_state": None, "pending_question": None},
+            projection_patch={"pending_question": None, "cancel_state": None},
         )
         await self.record_event(
             task_id,
-            "task",
-            {"phase": "finish", "status": "cancelled", "content": message},
+            EventType.LIFECYCLE_CANCELLED.value,
+            {"message": message},
         )
-        await self._store.cancel_task(task_id, error_text=message)
-        return await self._store.get_task(task_id)
+        await self._session.cancel_task(task_id, error_text=message)
+        return await self._session.get_task(task_id)
 
     async def submit_task(
         self,
@@ -565,7 +252,7 @@ class TaskService:
                 for item in quota_snapshots
             ],
         }
-        snapshot = await self._store.create_task(
+        snapshot = await self._session.create_task(
             user_id=user_id,
             task_text=task_text,
             mode=mode,
@@ -581,10 +268,10 @@ class TaskService:
         return snapshot
 
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
-        return await self._store.get_task(task_id)
+        return await self._session.get_task(task_id)
 
     async def get_events_after(self, task_id: str, after_seq: int) -> list[dict[str, Any]]:
-        return await self._store.get_events_after(task_id, after_seq)
+        return await self._session.get_events_after(task_id, after_seq)
 
     async def subscribe(self, task_id: str) -> aioredis.client.PubSub:
         pubsub = self._redis.pubsub()
@@ -595,26 +282,19 @@ class TaskService:
         await pubsub.unsubscribe(f"task:{task_id}:events")
         await pubsub.aclose()
 
-    async def _publish(self, task_id: str, event: dict[str, Any]) -> None:
-        await self._redis.publish(
-            f"task:{task_id}:events", json.dumps(event, ensure_ascii=False)
-        )
-
     async def record_event(
         self, task_id: str, event_type: str, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Delegate to SessionRuntime — the canonical event write path."""
-        if self._session is not None:
-            return await self._session.emit_event(task_id, event_type, payload)
-        # Fallback for startup before session init
-        event = await self._store.append_event(task_id, event_type, payload)
-        await self._publish(task_id, event)
-        return event
+    ) -> dict[str, Any] | None:
+        """Route canonical events to history and progress events to stream only."""
+        if is_transient_progress_type(event_type):
+            await self._session.emit_progress(task_id, event_type, payload)
+            return None
+        return await self._session.emit_event(task_id, event_type, payload)
 
     async def request_user_input(
         self, task_id: str, question_payload: dict[str, Any]
     ) -> str:
-        snapshot = await self._store.get_task(task_id)
+        snapshot = await self._session.get_task(task_id)
         if snapshot is None:
             raise RuntimeError("任务不存在，无法请求用户补充。")
 
@@ -628,16 +308,12 @@ class TaskService:
             "placeholder": str(question_payload.get("placeholder", "") or "").strip(),
         }
 
-        await self._store.set_waiting_for_user(task_id, payload)
-        await self._store.update_request_payload(
-            task_id,
-            {"interrupt_state": payload, "pending_question": payload},
-        )
-        await self.record_event(task_id, "question", payload)
+        await self._session.set_waiting_for_user(task_id, payload)
+        await self.record_event(task_id, EventType.INTERACTION_QUESTION.value, payload)
         raise RuntimeError("request_user_input is now graph-interrupt driven and should not be awaited directly")
 
     async def reply_to_task(self, task_id: str, answer: str) -> dict[str, Any]:
-        snapshot = await self._store.get_task(task_id)
+        snapshot = await self._session.get_task(task_id)
         if snapshot is None:
             raise KeyError(task_id)
 
@@ -648,52 +324,45 @@ class TaskService:
         if snapshot["status"] != "waiting_for_user":
             raise RuntimeError("任务当前不在等待用户回复。")
 
-        request_payload = snapshot.get("request_payload", {})
-        if not isinstance(request_payload, dict):
-            request_payload = {}
-        clarification_history = list(request_payload.get("clarification_history", []) or [])
-        pending_question = snapshot.get("pending_question") or {}
-        if isinstance(pending_question, dict):
-            clarification_history.append(
-                {
-                    "question": str(pending_question.get("content", "") or "").strip(),
-                    "context": str(pending_question.get("context", "") or "").strip(),
-                    "answer": answer_text,
-                    "checkpoint_id": str(pending_question.get("checkpoint_id", "") or "").strip(),
-                    "graph_node": str(pending_question.get("graph_node", "") or "").strip(),
-                    "nested_graph": str(pending_question.get("nested_graph", "") or "").strip(),
-                }
-            )
-
-        await self._store.resume_task(task_id)
-        await self.record_event(task_id, "user_reply", {"content": answer_text})
-        await self._store.update_request_payload(
-            task_id,
-            {
-                "interrupt_state": None,
-                "pending_question": None,
-                "clarification_history": clarification_history,
-            },
-        )
+        await self._session.resume_task(task_id)
+        await self.record_event(task_id, EventType.INTERACTION_ANSWER.value, {"content": answer_text})
         background = asyncio.create_task(
             self._execute_task(task_id, resume_value=answer_text),
             name=f"task-resume-{task_id}",
         )
         self._track_runner(task_id, background)
-        return await self._store.get_task(task_id) or snapshot
+        return await self._session.get_task(task_id) or snapshot
 
     async def cancel_running_task(self, task_id: str) -> dict[str, Any]:
-        snapshot = await self._store.get_task(task_id)
+        snapshot = await self._session.get_task(task_id)
         if snapshot is None:
             raise KeyError(task_id)
         if task_is_terminal(snapshot["status"]):
             raise RuntimeError("任务已经结束，无法取消。")
 
-        # Signal cancellation via Session
-        if self._session is not None:
-            await self._session.request_cancel(task_id)
+        await self.record_event(
+            task_id,
+            EventType.LIFECYCLE_CANCELLED.value,
+            {"content": "已请求取消任务"},
+        )
+        await self._session.update_projection(
+            task_id,
+            projection_patch={"cancel_state": "requested"},
+        )
+        await self._session.request_cancel(task_id)
 
         runner = self._runner_tasks.get(task_id)
+        if runner is None:
+            updated = await self._session.update_projection(
+                task_id,
+                projection_patch={"cancel_state": "cancelling"},
+            )
+            return updated or snapshot
+
+        await self._session.update_projection(
+            task_id,
+            projection_patch={"cancel_state": "cancelling"},
+        )
         if runner is not None:
             runner.cancel()
             try:
@@ -703,6 +372,9 @@ class TaskService:
             except Exception:
                 log.warning("Runner raised while cancelling task %s", task_id, exc_info=True)
 
+        latest = await self._session.get_task(task_id)
+        if latest and latest.get("status") == "cancelled":
+            return latest
         cancelled = await self._finalize_cancelled(task_id)
         return cancelled or snapshot
 
@@ -713,7 +385,7 @@ class TaskService:
         resume_value: str | None = None,
         resume_handle: Any | None = None,
     ) -> None:
-        snapshot = await self._store.get_task(task_id)
+        snapshot = await self._session.get_task(task_id)
         if snapshot is None:
             return
         if resume_value is not None and resume_handle is not None:
@@ -750,29 +422,33 @@ class TaskService:
                 "execution_path": "general_chat",
             }
             public_route_name = route_payload["route_name"]
-            await self._store.set_route_info(
+            await self._session.set_route_info(
                 task_id,
                 route_name=public_route_name,
                 route_reason=route_payload["reason"],
                 route_confidence=route_payload["confidence"],
             )
-            await self._store.mark_started(task_id)
-            await self._store.update_request_payload(
+            await self._session.mark_started(task_id)
+            await self._session.update_projection(
                 task_id,
-                {
-                    "thread_id": task_id,
-                    "domain": route_payload["execution_path"],
-                    "execution_path": route_payload["execution_path"],
+                projection_patch={
                     "latest_checkpoint_id": "",
-                    "interrupt_state": None,
                     "artifact_refs": [],
                     "nested_interrupt_pending": False,
+                    "pending_question": None,
+                    "review": None,
+                    "budget": None,
+                    "cancel_state": None,
+                },
+                request_payload_patch={
+                    "domain": route_payload["execution_path"],
+                    "execution_path": route_payload["execution_path"],
                 },
             )
-            await self.record_event(task_id, "start", {"content": f"开始执行: {execution_task}"})
+            await self.record_event(task_id, EventType.LIFECYCLE_STARTED.value, {"content": f"开始执行: {execution_task}"})
             await self.record_event(
                 task_id,
-                "step",
+                EventType.PROGRESS_STEP.value,
                 {"content": f"🧭 Route: {public_route_name} ({route_payload['reason']})", "thread_id": task_id},
             )
             log.info("Task received user=%s task=%s", user_id, task_text[:80])
@@ -789,18 +465,18 @@ class TaskService:
                     snapshot.get("route_name", ""),
                 ),
             }
-            existing_events = await self._store.get_events_after(task_id, 0)
+            existing_events = await self._session.get_events_after(task_id, 0)
             for event in reversed(existing_events):
-                if event["type"] == "step":
-                    resume_last_step_content = str(event.get("content", "") or "")
+                if event["type"] == "progress.step":
+                    # 新 envelope 格式：内容在 payload 中
+                    payload = event.get("payload") or {}
+                    resume_last_step_content = str(payload.get("content", "") or "")
                     break
 
         conversation_context = ""
         if conversation_id and not is_human_resume and not is_recovery_resume:
             try:
-                from domain.conversations.context import ConversationContextBuilder
-
-                ctx = await ConversationContextBuilder(self._store.pool).build(
+                ctx = await self._conversation_context_builder_factory().build(
                     conversation_id, task_text
                 )
                 conversation_context = ctx.text
@@ -823,6 +499,12 @@ class TaskService:
             request_payload = snapshot.get("request_payload", {})
             if not isinstance(request_payload, dict):
                 request_payload = {}
+            clarification_history = await self._session.get_clarification_history(task_id)
+            if clarification_history:
+                request_payload = {
+                    **request_payload,
+                    "clarification_history": clarification_history,
+                }
             if resume_handle is not None:
                 request_payload = {
                     **request_payload,
@@ -832,11 +514,17 @@ class TaskService:
                         if value is not None
                     },
                 }
-            nested_interrupt_pending = bool(request_payload.get("nested_interrupt_pending"))
+            nested_interrupt_pending = bool(
+                request_payload.get(
+                    "nested_interrupt_pending",
+                    snapshot.get("nested_interrupt_pending", False),
+                )
+            )
+            request_payload["nested_interrupt_pending"] = nested_interrupt_pending
             if resume_value is not None and nested_interrupt_pending:
                 replay_replies = [
                     str(item.get("answer", "") or "")
-                    for item in list(request_payload.get("clarification_history", []) or [])
+                    for item in clarification_history
                     if isinstance(item, dict)
                     and str(item.get("nested_graph", "") or "").strip()
                     and str(item.get("answer", "") or "").strip()
@@ -862,6 +550,8 @@ class TaskService:
                     "thread_id": task_id,
                     "nested_interrupt_count": 0,
                     "nested_resume_value": None,
+                    "session": self._session,
+                    "conversation_service": self._conversation_service,
                 }
             }
             if latest_checkpoint_id:
@@ -901,9 +591,9 @@ class TaskService:
                 checkpoint_id = extract_checkpoint_id(part)
                 if checkpoint_id:
                     latest_checkpoint_id = checkpoint_id
-                    await self._store.update_request_payload(
+                    await self._session.update_projection(
                         task_id,
-                        {"latest_checkpoint_id": checkpoint_id},
+                        projection_patch={"latest_checkpoint_id": checkpoint_id},
                     )
                 for event_type, payload in translate_stream_part(
                     part,
@@ -917,7 +607,7 @@ class TaskService:
                         "mode": mode,
                     },
                 ):
-                    if event_type == "question":
+                    if event_type == "interaction.question":
                         if (
                             interrupted
                             and not payload.get("nested_graph")
@@ -929,20 +619,16 @@ class TaskService:
                             nested_interrupt_pending,
                             payload,
                         )
-                        await self._store.set_waiting_for_user(task_id, payload)
-                        await self._store.update_request_payload(
+                        await self._session.set_waiting_for_user(
                             task_id,
-                            {
-                                "interrupt_state": payload,
-                                "pending_question": payload,
-                                "latest_checkpoint_id": latest_checkpoint_id,
-                                "nested_interrupt_pending": nested_interrupt_pending,
-                            },
+                            payload,
+                            latest_checkpoint_id=latest_checkpoint_id,
+                            nested_interrupt_pending=nested_interrupt_pending,
                         )
                         current_pending_question = payload
                     if (
                         resume_value is not None
-                        and event_type == "step"
+                        and event_type == "progress.step"
                         and not skipped_resume_replay_step
                         and str(payload.get("content", "") or "") == resume_last_step_content
                     ):
@@ -950,7 +636,7 @@ class TaskService:
                         continue
                     if (
                         resume_value is not None
-                        and event_type == "node"
+                        and event_type == "progress.node"
                         and str(payload.get("node_name", "") or "") in {"run_research", "run_patent", "run_zero_report", "run_ppt"}
                     ):
                         update = payload.get("update") if isinstance(payload.get("update"), dict) else {}
@@ -968,7 +654,7 @@ class TaskService:
             if interrupted:
                 summary = monitor.get_summary(trace_id)
                 summary.update({"interrupted": True, "waiting_for_user": True})
-                await self.record_event(task_id, "monitoring", {"content": summary})
+                await self.record_event(task_id, EventType.SYSTEM_MONITORING.value, {"content": summary})
                 monitor.finalize(trace_id)
                 return
 
@@ -979,33 +665,32 @@ class TaskService:
             review = final_values.get("review") or {}
             budget = final_values.get("budget") or {}
             research_strategy = str(final_values.get("research_strategy", "") or "")
-            await self._store.set_result_text(task_id, result)
-            payload_patch: dict[str, Any] = {
-                "artifact_refs": artifact_refs,
-                "interrupt_state": None,
-                "pending_question": None,
-                "latest_checkpoint_id": latest_checkpoint_id,
-                "nested_interrupt_pending": False,
-            }
-            if review:
-                payload_patch["review"] = review
-            if budget:
-                payload_patch["budget"] = budget
-            if research_strategy:
-                payload_patch["research_strategy"] = research_strategy
-            await self._store.update_request_payload(task_id, payload_patch)
+            await self._session.set_result_text(task_id, result)
+            await self._session.update_projection(
+                task_id,
+                projection_patch={
+                    "artifact_refs": artifact_refs,
+                    "pending_question": None,
+                    "latest_checkpoint_id": latest_checkpoint_id,
+                    "nested_interrupt_pending": False,
+                    "review": review or None,
+                    "budget": budget or None,
+                    "cancel_state": None,
+                },
+                request_payload_patch={
+                    "research_strategy": research_strategy,
+                }
+                if research_strategy
+                else None,
+            )
             event_payload: dict[str, Any] = {
                 "content": result,
                 "artifact_refs": artifact_refs,
                 "thread_id": task_id,
             }
-            if review:
-                event_payload["review"] = review
-            if budget:
-                event_payload["budget"] = budget
             if research_strategy:
                 event_payload["research_strategy"] = research_strategy
-            await self.record_event(task_id, "result", event_payload)
+            await self.record_event(task_id, EventType.LIFECYCLE_COMPLETED.value, event_payload)
         except asyncio.CancelledError:
             log.info("Task cancelled: %s", task_id)
             await self._finalize_cancelled(task_id)
@@ -1025,10 +710,10 @@ class TaskService:
                 error_code = "provider_monthly_limit_exceeded"
                 user_message = "服务端上游模型本月额度已用完，请稍后再试。"
             log.error("Task failed: %s", exc)
-            await self._store.set_error_text(task_id, error_text)
+            await self._session.set_error_text(task_id, error_text)
             await self.record_event(
                 task_id,
-                "error",
+                EventType.LIFECYCLE_FAILED.value,
                 {
                     "content": user_message,
                     "error_code": error_code,
@@ -1036,8 +721,8 @@ class TaskService:
                 },
             )
             summary = monitor.get_summary(trace_id)
-            await self.record_event(task_id, "monitoring", {"content": summary})
-            await self._store.finish_task(task_id, "failed")
+            await self.record_event(task_id, EventType.SYSTEM_MONITORING.value, {"content": summary})
+            await self._session.finish_task(task_id, "failed")
             monitor.finalize(trace_id)
             return
         finally:
@@ -1045,7 +730,7 @@ class TaskService:
             reset_task_interaction_handler(interaction_token)
 
         summary = monitor.get_summary(trace_id)
-        await self.record_event(task_id, "monitoring", {"content": summary})
+        await self.record_event(task_id, EventType.SYSTEM_MONITORING.value, {"content": summary})
         async with SessionFactory() as session:
             usage_service = QuotaService(UserQuotaRepository(session), UsageEventRepository(session))
             llm_usage = list(summary.get("llm_usage", []) or [])
@@ -1063,15 +748,13 @@ class TaskService:
                 cost_usd=estimated_cost_usd,
             )
             await session.commit()
-        await self._store.finish_task(task_id, "succeeded")
+        await self._session.finish_task(task_id, "succeeded")
         monitor.finalize(trace_id)
 
-        if conversation_id and self._store.pool:
+        if conversation_id and self._embedding_service is not None:
             try:
-                from domain.conversations.context import generate_embeddings_async
-
                 bg = asyncio.create_task(
-                    generate_embeddings_async(self._store.pool, task_id),
+                    self._embedding_service.generate_embeddings(task_id),
                     name=f"embed-{task_id}",
                 )
                 self._background_tasks.add(bg)
@@ -1081,16 +764,24 @@ class TaskService:
 
 
 def format_sse(event: dict[str, Any]) -> str:
-    return (
-        f"id: {event['seq']}\n"
-        f"event: {event['type']}\n"
-        f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-    )
+    """将事件格式化为 SSE 帧。
+
+    SSE 帧格式（符合 Layer 0 spec）：
+        id: {seq}          ← 仅 canonical 事件（有 seq 字段）
+        event: {type}      ← 事件类型（category.action 格式）
+        data: {json}       ← 完整 JSON envelope（type+taskId+timestamp+seq?+payload）
+    """
+    lines = []
+    # canonical 事件带 seq，transient 事件无 seq — 通过 seq 是否存在来判断
+    if event.get("seq") is not None:
+        lines.append(f"id: {event['seq']}")
+    lines.append(f"event: {event['type']}")
+    lines.append(f"data: {json.dumps(event, ensure_ascii=False)}")
+    return "\n".join(lines) + "\n\n"
 
 
 __all__ = [
     "HEARTBEAT_INTERVAL_SECONDS",
-    "TaskRunStore",
     "TaskService",
     "compose_task_text",
     "format_sse",

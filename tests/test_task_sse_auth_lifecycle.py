@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 
-from web.web import runtime as web_runtime
+from web import runtime as web_runtime
 
 
 class _FakeRequest:
@@ -32,7 +33,7 @@ class _FakeTaskService:
     def __init__(self) -> None:
         self.pubsub = _FakePubSub()
         self.unsubscribed = False
-        self.store = type("Store", (), {"pool": None})()
+        self.redis = SimpleNamespace(connection_pool=None)
 
     async def subscribe(self, task_id: str):
         return self.pubsub

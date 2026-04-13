@@ -8,11 +8,7 @@
 5. 维护 projection (task_runs)
 6. 管理 clarification_history 派生
 
-设计原则：
-- task_events 是 canonical history（真相源）
-- task_runs 是 projection（派生视图）
-- checkpoint 是恢复优化资产
-- Redis PubSub / SSE 是投递通道
+协议事件类型由 agent.session.protocol 统一定义（Layer 1 后端实现）。
 """
 
 from __future__ import annotations
@@ -21,76 +17,36 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
 from typing import Any
 
 import redis.asyncio as aioredis
 
-from infra.db.repositories.task_event_repo import TaskEventRepository
-from infra.db.repositories.task_repo import TaskRunRepository
-from infra.db.session import SessionFactory
+from agent.session.protocol import (
+    CANONICAL_EVENT_TYPES,
+    TRANSIENT_EVENT_TYPES,
+    EventType,
+    is_transient,
+)
+from domain.tasks.session_store import SessionStore, TaskProjectionRecord
 
 log = logging.getLogger("chatdada.session")
 
+# 向后兼容别名 — 旧代码直接导入这些符号仍可工作
+is_transient_progress_type = is_transient
 
-# ── Event Types ──────────────────────────────────────────────────────────────
-
-
-class EventType(str, Enum):
-    """Canonical event types that enter task_events (the truth source)."""
-
-    # Task lifecycle
-    TASK_CREATED = "task_created"
-    TASK_STARTED = "start"
-    TASK_COMPLETED = "result"
-    TASK_FAILED = "error"
-    TASK_CANCEL_REQUESTED = "cancel_requested"
-
-    # Routing & planning
-    STEP = "step"
-    TASK = "task"
-    NODE = "node"
-    PLAN = "plan"
-    BRIEF = "brief"
-
-    # Skill lifecycle
-    SKILL_STARTED = "skill_started"
-    SKILL_FINISHED = "skill_finished"
-    SKILL_FAILED = "skill_failed"
-
-    # Tool lifecycle
-    TOOL_CALL_STARTED = "tool_call_started"
-    TOOL_CALL_FINISHED = "tool_call_finished"
-    TOOL_CALL_FAILED = "tool_call_failed"
-
-    # Human-in-the-loop
-    QUESTION = "question"
-    USER_REPLY = "user_reply"
-
-    # Artifacts & checkpoints
-    FILE = "file"
-    CHECKPOINT = "checkpoint"
-    CHECKPOINT_SAVED = "checkpoint_saved"
-    STAGE_ARTIFACTS = "stage_artifacts"
-
-    # Observability
-    MONITORING = "monitoring"
-    REVIEW = "review"
-
-
-# Well-known transient progress types (never enter DB, no canonical seq)
-TRANSIENT_PROGRESS_TYPES = frozenset({
-    "token",
-    "streaming_content",
-    "thinking",
-    "dag_progress",
-    "result_delta",
-    "monitoring_live",
-    "custom",
-})
-
-
-# ── Resume Handle ────────────────────────────────────────────────────────────
+RUNTIME_REQUEST_PAYLOAD_KEYS = frozenset(
+    {
+        "artifact_refs",
+        "budget",
+        "cancel_state",
+        "clarification_history",
+        "interrupt_state",
+        "latest_checkpoint_id",
+        "nested_interrupt_pending",
+        "pending_question",
+        "review",
+    }
+)
 
 
 @dataclass
@@ -105,26 +61,15 @@ class ResumeHandle:
     resume_context: dict[str, Any] = field(default_factory=dict)
 
 
-# ── SessionRuntime ───────────────────────────────────────────────────────────
-
-
 class SessionRuntime:
-    """独立 Session 层组件 — 系统唯一的 durable state boundary。
+    """独立 Session 层组件 — 系统唯一的 durable state boundary。"""
 
-    Brain/Harness 通过以下接口与 Session 通信：
-    - emit_event()         追加 canonical 事件
-    - emit_progress()      发送 transient 进度
-    - get_events()         按顺序读取历史
-    - get_projection()     返回面向查询/UI 的派生视图
-    - wake()               恢复被中断的任务
-    - record_transition()  状态变更 helper
-    - request_cancel()     请求取消任务
-    """
-
-    def __init__(self, redis: aioredis.Redis) -> None:
+    def __init__(self, redis: aioredis.Redis, store: SessionStore) -> None:
         self._redis = redis
+        self._store = store
 
-    # ── Canonical Events (DB + Redis PubSub) ─────────────────────────────
+    async def setup(self) -> None:
+        await self._store.setup()
 
     async def emit_event(
         self,
@@ -132,29 +77,26 @@ class SessionRuntime:
         event_type: str | EventType,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """业务事件：入 DB (canonical history) + Redis PubSub。
+        """发送 canonical 事件：入 DB + Redis PubSub，携带单调递增 seq。
 
-        参与 /replay、after_seq、Last-Event-ID 恢复。
+        envelope 格式（符合 Layer 0 spec）：
+            { type, taskId, timestamp, seq, payload: {...} }
         """
         et = event_type.value if isinstance(event_type, EventType) else str(event_type)
+        if et not in CANONICAL_EVENT_TYPES:
+            raise ValueError(f"{et!r} 不是 canonical 事件类型")
 
-        async with SessionFactory() as session:
-            repo = TaskEventRepository(session)
-            row = await repo.append(task_id=task_id, event_type=et, payload=payload)
-            await session.commit()
-
+        row = await self._store.append_event(task_id=task_id, event_type=et, payload=payload)
         event: dict[str, Any] = {
-            "task_id": task_id,
-            "seq": row.seq,
-            "type": et,
-            "created_at": row.created_at.isoformat(),
+            "type":        et,
+            "taskId":      task_id,
+            "timestamp":   row.created_at.isoformat(),
+            "seq":         row.seq,
+            "stream_kind": "canonical",
+            "payload":     dict(row.payload or {}),
         }
-        event.update(payload)
-
         await self._publish(task_id, event)
         return event
-
-    # ── Transient Progress (Redis PubSub only, no DB) ────────────────────
 
     async def emit_progress(
         self,
@@ -162,21 +104,19 @@ class SessionRuntime:
         event_type: str,
         payload: dict[str, Any],
     ) -> None:
-        """进度提示：仅走 Redis PubSub，不入 DB。
+        """发送 transient 进度事件：仅 Redis PubSub，不入 DB，无 seq。
 
-        不分配 canonical seq，不推进 task.last_seq，
-        不参与 /replay 或断线重连恢复。
-
-        用于 token, dag_progress, thinking 等高频临时事件。
+        envelope 格式（符合 Layer 0 spec）：
+            { type, taskId, timestamp, payload: {...} }
         """
         event: dict[str, Any] = {
-            "task_id": task_id,
-            "type": event_type,
-            **payload,
+            "type":        str(event_type),
+            "taskId":      task_id,
+            "timestamp":   datetime.now(UTC).isoformat(),
+            "stream_kind": "transient",
+            "payload":     payload,
         }
         await self._publish(task_id, event)
-
-    # ── History Read ─────────────────────────────────────────────────────
 
     async def get_events(
         self,
@@ -184,71 +124,30 @@ class SessionRuntime:
         *,
         after_seq: int = 0,
     ) -> list[dict[str, Any]]:
-        """按 seq 顺序读取 canonical 事件历史。"""
-        async with SessionFactory() as session:
-            repo = TaskEventRepository(session)
-            rows = await repo.list_after(task_id=task_id, after_seq=after_seq)
-
-        events: list[dict[str, Any]] = []
-        for row in rows:
-            ev: dict[str, Any] = {
-                "task_id": row.task_id,
-                "seq": int(row.seq),
-                "type": row.event_type,
-                "created_at": row.created_at.isoformat(),
+        """从 DB 读取历史 canonical 事件，以新 envelope 格式返回。"""
+        rows = await self._store.list_events_after(task_id=task_id, after_seq=after_seq)
+        return [
+            {
+                "type":      row.event_type,
+                "taskId":    row.task_id,
+                "timestamp": row.created_at.isoformat(),
+                "seq":       int(row.seq),
+                "payload":   dict(row.payload or {}),
             }
-            ev.update(dict(row.payload or {}))
-            events.append(ev)
-        return events
-
-    # ── Projection ───────────────────────────────────────────────────────
+            for row in rows
+        ]
 
     async def get_projection(self, task_id: str) -> dict[str, Any] | None:
-        """返回面向查询/UI 的 task_runs 派生视图。"""
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            row = await repo.get(task_id)
-            if row is None:
-                return None
-            last_seq = await repo.get_last_seq(task_id)
+        projection = await self._store.get_projection(task_id)
+        if projection is None:
+            return None
+        return self._projection_to_dict(projection)
 
-        payload = dict(row.request_payload or {})
-        pending_question = dict(row.pending_question) if row.pending_question else None
+    async def get_task(self, task_id: str) -> dict[str, Any] | None:
+        return await self.get_projection(task_id)
 
-        def _ts(v: datetime | None) -> str | None:
-            return v.isoformat() if v is not None else None
-
-        return {
-            "task_id": row.task_id,
-            "user_id": row.user_id,
-            "status": row.status,
-            "task": row.task_text,
-            "mode": row.mode,
-            "thinking_level": row.thinking_level,
-            "request_payload": payload,
-            "route_name": row.route_name,
-            "route_reason": row.route_reason,
-            "route_confidence": row.route_confidence,
-            "file_paths": payload.get("file_paths", []),
-            "pending_question": pending_question,
-            "result": row.result_text,
-            "error": row.error_text,
-            "thread_id": payload.get("thread_id", row.task_id),
-            "domain": row.route_name or payload.get("domain", ""),
-            "artifact_refs": payload.get("artifact_refs", []),
-            "interrupt_state": payload.get("interrupt_state"),
-            "latest_checkpoint_id": payload.get("latest_checkpoint_id", ""),
-            "review": payload.get("review"),
-            "budget": payload.get("budget"),
-            "created_at": _ts(row.created_at),
-            "started_at": _ts(row.started_at),
-            "finished_at": _ts(row.finished_at),
-            "updated_at": _ts(row.updated_at),
-            "conversation_id": row.conversation_id or "",
-            "last_seq": last_seq,
-        }
-
-    # ── State Transitions (helper: emit event + refresh projection) ──────
+    async def get_events_after(self, task_id: str, after_seq: int) -> list[dict[str, Any]]:
+        return await self.get_events(task_id, after_seq=after_seq)
 
     async def record_transition(
         self,
@@ -257,61 +156,85 @@ class SessionRuntime:
         *,
         reason: str = "",
         error_text: str | None = None,
+        cancel_state: str | None = None,
     ) -> None:
-        """Helper: emit canonical status event, then update projection."""
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            row = await repo.get(task_id)
-            if row is None:
-                return
-            now = datetime.now(UTC)
-            row.status = new_status
-            row.updated_at = now
-            if new_status == "running":
-                row.started_at = row.started_at or now
-                row.pending_question = None
-            elif new_status in ("succeeded", "failed", "cancelled"):
-                row.finished_at = row.finished_at or now
-                if error_text:
-                    row.error_text = error_text
-            elif new_status == "waiting_for_user":
-                pass  # pending_question set separately
-            await session.commit()
+        now = datetime.now(UTC)
+        patch: dict[str, Any] = {
+            "status": new_status,
+            "cancel_state": cancel_state,
+        }
+        if new_status == "running":
+            patch["started_at"] = now
+            patch["pending_question"] = None
+        elif new_status in ("succeeded", "failed", "cancelled"):
+            patch["finished_at"] = now
+            patch["pending_question"] = None
+        if error_text is not None:
+            patch["error_text"] = error_text
+        await self._store.update_projection(task_id, projection_patch=patch)
+        if reason:
+            log.info("task transition: %s -> %s (%s)", task_id, new_status, reason)
 
     async def set_waiting_for_user(
-        self, task_id: str, question_payload: dict[str, Any]
+        self,
+        task_id: str,
+        question_payload: dict[str, Any],
+        *,
+        latest_checkpoint_id: str = "",
+        nested_interrupt_pending: bool = False,
     ) -> None:
-        """Mark task as waiting_for_user with pending question."""
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.set_waiting_for_user(task_id, question_payload)
-            await session.commit()
+        await self._store.update_projection(
+            task_id,
+            projection_patch={
+                "status": "waiting_for_user",
+                "pending_question": question_payload,
+                "latest_checkpoint_id": latest_checkpoint_id,
+                "nested_interrupt_pending": nested_interrupt_pending,
+                "cancel_state": None,
+            },
+            clear_request_payload_keys=RUNTIME_REQUEST_PAYLOAD_KEYS,
+        )
 
     async def resume_task(self, task_id: str) -> None:
-        """Resume task from waiting_for_user status."""
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.resume_task(task_id)
-            await session.commit()
+        await self._store.update_projection(
+            task_id,
+            projection_patch={
+                "status": "running",
+                "pending_question": None,
+                "cancel_state": None,
+            },
+            clear_request_payload_keys=("interrupt_state", "pending_question"),
+        )
 
-    async def update_projection(self, task_id: str, patch: dict[str, Any]) -> None:
-        """Patch task_runs request_payload (projection fields)."""
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.update_request_payload(task_id, patch)
-            await session.commit()
+    async def update_projection(
+        self,
+        task_id: str,
+        *,
+        projection_patch: dict[str, Any] | None = None,
+        request_payload_patch: dict[str, Any] | None = None,
+        clear_request_payload_keys: tuple[str, ...] = (),
+    ) -> dict[str, Any] | None:
+        projection = await self._store.update_projection(
+            task_id,
+            projection_patch=projection_patch,
+            request_payload_patch=request_payload_patch,
+            clear_request_payload_keys=clear_request_payload_keys,
+        )
+        if projection is None:
+            return None
+        return self._projection_to_dict(projection)
 
     async def set_result_text(self, task_id: str, result_text: str) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.set_result_text(task_id, result_text)
-            await session.commit()
+        await self._store.update_projection(
+            task_id,
+            projection_patch={"result_text": result_text, "error_text": None},
+        )
 
     async def set_error_text(self, task_id: str, error_text: str) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.set_error_text(task_id, error_text)
-            await session.commit()
+        await self._store.update_projection(
+            task_id,
+            projection_patch={"error_text": error_text},
+        )
 
     async def set_route_info(
         self,
@@ -321,15 +244,56 @@ class SessionRuntime:
         route_reason: str,
         route_confidence: float,
     ) -> None:
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.set_route_info(
-                task_id,
-                route_name=route_name,
-                route_reason=route_reason,
-                route_confidence=route_confidence,
-            )
-            await session.commit()
+        await self._store.update_projection(
+            task_id,
+            projection_patch={
+                "route_name": route_name,
+                "route_reason": route_reason,
+                "route_confidence": route_confidence,
+            },
+        )
+
+    async def mark_started(self, task_id: str) -> None:
+        await self.record_transition(task_id, "running")
+
+    async def finish_task(self, task_id: str, status: str) -> None:
+        await self._store.update_projection(
+            task_id,
+            projection_patch={
+                "status": status,
+                "finished_at": datetime.now(UTC),
+                "pending_question": None,
+                "cancel_state": None if status in ("succeeded", "failed", "cancelled") else None,
+            },
+        )
+
+    async def cancel_task(self, task_id: str, *, error_text: str) -> None:
+        await self._store.update_projection(
+            task_id,
+            projection_patch={
+                "status": "cancelled",
+                "error_text": error_text,
+                "pending_question": None,
+                "finished_at": datetime.now(UTC),
+                "cancel_state": None,
+            },
+            clear_request_payload_keys=("interrupt_state", "pending_question"),
+        )
+
+    async def update_request_payload(self, task_id: str, patch: dict[str, Any]) -> None:
+        projection_patch, request_payload_patch = self._split_payload_patch(dict(patch or {}))
+        clear_runtime_keys = tuple(
+            key for key in RUNTIME_REQUEST_PAYLOAD_KEYS if key in request_payload_patch
+        )
+        if clear_runtime_keys:
+            for key in clear_runtime_keys:
+                request_payload_patch.pop(key, None)
+        await self._store.update_projection(
+            task_id,
+            projection_patch=projection_patch,
+            request_payload_patch=request_payload_patch or None,
+            clear_request_payload_keys=clear_runtime_keys,
+        )
 
     async def create_task(
         self,
@@ -341,47 +305,26 @@ class SessionRuntime:
         request_payload: dict[str, Any],
         conversation_id: str = "",
     ) -> dict[str, Any]:
-        import uuid
-
-        task_id = f"task_{uuid.uuid4().hex[:12]}"
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            await repo.create(
-                task_id=task_id,
-                user_id=user_id,
-                task_text=task_text,
-                mode=mode,
-                thinking_level=thinking_level,
-                request_payload=request_payload,
-                conversation_id=conversation_id,
-            )
-            if conversation_id:
-                await repo.touch_conversation(conversation_id)
-            await session.commit()
-
-        return await self.get_projection(task_id) or {
-            "task_id": task_id,
-            "status": "queued",
-            "task": task_text,
-            "mode": mode,
-            "thinking_level": thinking_level,
-        }
-
-    # ── Wake / Recovery ──────────────────────────────────────────────────
+        projection = await self._store.create_task(
+            user_id=user_id,
+            task_text=task_text,
+            mode=mode,
+            thinking_level=thinking_level,
+            request_payload={
+                key: value
+                for key, value in dict(request_payload or {}).items()
+                if key not in RUNTIME_REQUEST_PAYLOAD_KEYS
+            },
+            conversation_id=conversation_id,
+        )
+        return self._projection_to_dict(projection)
 
     async def wake(self, task_id: str) -> ResumeHandle:
-        """在 harness 崩溃、服务重启后恢复执行。
-
-        返回 ResumeHandle，由 Brain/Harness 消费。
-        Brain 不对 checkpoint 存储结构做假设。
-        """
         projection = await self.get_projection(task_id)
         if projection is None:
             raise ValueError(f"Task {task_id} not found")
 
-        request_payload = projection.get("request_payload", {})
         clarification_history = await self.get_clarification_history(task_id)
-
         return ResumeHandle(
             task_id=task_id,
             thread_id=task_id,
@@ -390,49 +333,117 @@ class SessionRuntime:
             resume_context={
                 "clarification_history": clarification_history,
                 "pending_question": projection.get("pending_question"),
-                "nested_interrupt_pending": request_payload.get("nested_interrupt_pending", False),
+                "nested_interrupt_pending": bool(projection.get("nested_interrupt_pending")),
             },
         )
 
     async def recover_interrupted_tasks(self) -> list[str]:
-        """List task_ids that were interrupted (for process restart recovery)."""
-        async with SessionFactory() as session:
-            repo = TaskRunRepository(session)
-            return await repo.list_interrupted()
-
-    # ── Cancel ───────────────────────────────────────────────────────────
+        return await self._store.list_interrupted_task_ids()
 
     async def request_cancel(self, task_id: str) -> None:
-        """Signal that a cancellation has been requested.
-
-        Currently writes a Redis key; future: cooperative cancel via session events.
-        """
         await self._redis.set(f"cancel:{task_id}", "1", ex=3600)
 
     async def is_cancel_requested(self, task_id: str) -> bool:
-        val = await self._redis.get(f"cancel:{task_id}")
-        return val is not None
+        return await self._redis.get(f"cancel:{task_id}") is not None
 
-    # ── Clarification History (derived from events) ──────────────────────
+    async def get_clarification_history(self, task_id: str) -> list[dict[str, Any]]:
+        events = await self.get_events(task_id, after_seq=0)
+        history: list[dict[str, Any]] = []
+        for event in events:
+            # 从新格式 envelope 中取 payload
+            payload = event.get("payload") or {}
+            if event["type"] == EventType.INTERACTION_QUESTION.value:
+                history.append(
+                    {
+                        "question": str(payload.get("content", "") or "").strip(),
+                        "context": str(payload.get("context", "") or "").strip(),
+                        "answer": "",
+                        "checkpoint_id": str(payload.get("checkpoint_id", "") or "").strip(),
+                        "graph_node": str(payload.get("graph_node", "") or "").strip(),
+                        "nested_graph": str(payload.get("nested_graph", "") or "").strip(),
+                    }
+                )
+                continue
+            if event["type"] != EventType.INTERACTION_ANSWER.value:
+                continue
+            answer = str(payload.get("content", "") or "").strip()
+            if history and not history[-1].get("answer"):
+                history[-1]["answer"] = answer
+            else:
+                history.append(
+                    {
+                        "question": "",
+                        "context": "",
+                        "answer": answer,
+                        "checkpoint_id": "",
+                        "graph_node": "",
+                        "nested_graph": "",
+                    }
+                )
 
-    async def get_clarification_history(
-        self, task_id: str
-    ) -> list[dict[str, Any]]:
-        """从 task_events 中按 seq 重建结构化 clarification_history。
+        if history:
+            return history
 
-        兼容现有 harness / research resume 格式：
-        [{"question": ..., "context": ..., "answer": ..., "checkpoint_id": ..., ...}, ...]
-
-        过渡期：同时从 request_payload 回退读取。
-        """
-        # 过渡期：从 projection 的 request_payload 读取
-        projection = await self.get_projection(task_id)
+        projection = await self._store.get_projection(task_id)
         if projection is None:
             return []
-        rp = projection.get("request_payload", {})
-        return list(rp.get("clarification_history", []) or [])
+        return list((projection.request_payload or {}).get("clarification_history", []) or [])
 
-    # ── Internal ─────────────────────────────────────────────────────────
+    def _projection_to_dict(self, projection: TaskProjectionRecord) -> dict[str, Any]:
+        def _ts(value: datetime | None) -> str | None:
+            return value.isoformat() if value is not None else None
+
+        request_payload = dict(projection.request_payload or {})
+        return {
+            "task_id": projection.task_id,
+            "user_id": projection.user_id,
+            "status": projection.status,
+            "task": projection.task_text,
+            "mode": projection.mode,
+            "thinking_level": projection.thinking_level,
+            "request_payload": request_payload,
+            "route_name": projection.route_name,
+            "route_reason": projection.route_reason,
+            "route_confidence": projection.route_confidence,
+            "file_paths": list(request_payload.get("file_paths", []) or []),
+            "pending_question": dict(projection.pending_question) if projection.pending_question else None,
+            "result": projection.result_text,
+            "error": projection.error_text,
+            "thread_id": projection.task_id,
+            "domain": projection.route_name or str(request_payload.get("domain", "") or ""),
+            "artifact_refs": list(projection.artifact_refs or []),
+            "latest_checkpoint_id": projection.latest_checkpoint_id,
+            "nested_interrupt_pending": bool(projection.nested_interrupt_pending),
+            "review": dict(projection.review) if projection.review else None,
+            "budget": dict(projection.budget) if projection.budget else None,
+            "cancel_state": projection.cancel_state,
+            "created_at": _ts(projection.created_at),
+            "started_at": _ts(projection.started_at),
+            "finished_at": _ts(projection.finished_at),
+            "updated_at": _ts(projection.updated_at),
+            "conversation_id": projection.conversation_id or "",
+            "last_seq": int(projection.last_seq or 0),
+        }
+
+    def _split_payload_patch(
+        self,
+        patch: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        projection_patch: dict[str, Any] = {}
+        request_payload_patch = dict(patch)
+        for key in (
+            "artifact_refs",
+            "budget",
+            "cancel_state",
+            "latest_checkpoint_id",
+            "nested_interrupt_pending",
+            "pending_question",
+            "review",
+        ):
+            if key in request_payload_patch:
+                projection_patch[key] = request_payload_patch.pop(key)
+        request_payload_patch.pop("interrupt_state", None)
+        return projection_patch, request_payload_patch
 
     async def _publish(self, task_id: str, event: dict[str, Any]) -> None:
         await self._redis.publish(

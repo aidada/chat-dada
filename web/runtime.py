@@ -7,15 +7,20 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import redis.asyncio as aioredis
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
+from agent.session.runtime import SessionRuntime
 from agent.runtime.task_execution import (
     HEARTBEAT_INTERVAL_SECONDS,
     TaskService,
     format_sse,
     task_is_terminal,
 )
+from domain.conversations.context import ConversationContextBuilder
+from domain.conversations.services import ConversationEmbeddingService, ConversationService
+from infra.db.session_store import PostgresSessionStore
 from web.config import settings
 from infra.db.session import engine as app_db_engine
 
@@ -33,7 +38,35 @@ FRONTEND_DIST_DIR = Path(
 ).resolve()
 FRONTEND_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
 
-task_service = TaskService(settings.database_url, settings.redis_url)
+
+def _build_checkpointer_factory(database_url: str):
+    def factory():
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        except ImportError:
+            from langgraph.checkpoint.memory import InMemorySaver
+
+            log.warning("langgraph-checkpoint-postgres not installed; falling back to InMemorySaver")
+            return InMemorySaver()
+        return AsyncPostgresSaver.from_conn_string(database_url)
+
+    return factory
+
+
+def build_task_service(database_url: str, redis_url: str) -> TaskService:
+    redis = aioredis.from_url(redis_url, decode_responses=True)
+    session = SessionRuntime(redis, PostgresSessionStore())
+    return TaskService(
+        session=session,
+        redis=redis,
+        checkpointer_factory=_build_checkpointer_factory(database_url),
+        conversation_context_builder_factory=ConversationContextBuilder,
+        embedding_service=ConversationEmbeddingService(),
+        conversation_service=ConversationService(),
+    )
+
+
+task_service = build_task_service(settings.database_url, settings.redis_url)
 _active_sse_connections = 0
 _task_sse_connections: dict[str, int] = {}
 
@@ -120,14 +153,14 @@ async def event_stream_response(
         return None
 
     def _stream_meta() -> dict[str, Any]:
-        redis_pool = getattr(task_service.store, "pool", None)
+        redis_pool = getattr(task_service.redis, "connection_pool", None)
         redis_in_use = None
         if redis_pool is not None:
-            get_size = getattr(redis_pool, "get_size", None)
-            get_idle_size = getattr(redis_pool, "get_idle_size", None)
-            if callable(get_size) and callable(get_idle_size):
+            created = getattr(redis_pool, "_created_connections", None)
+            available = getattr(redis_pool, "_available_connections", None)
+            if isinstance(created, int) and isinstance(available, list):
                 try:
-                    redis_in_use = int(get_size() - get_idle_size())
+                    redis_in_use = int(created - len(available))
                 except Exception:
                     redis_in_use = None
         return {
@@ -175,10 +208,11 @@ async def event_stream_response(
                     event = json.loads(message["data"])
                 except (json.JSONDecodeError, TypeError):
                     continue
-                seq = int(event.get("seq", 0))
-                if seq <= last_sent:
-                    continue
-                last_sent = seq
+                if event.get("stream_kind", "canonical") == "canonical":
+                    seq = int(event.get("seq", 0))
+                    if seq <= last_sent:
+                        continue
+                    last_sent = seq
                 yield format_sse(_event_with_meta(event))
                 current = await task_service.get_task(task_id)
                 if current and task_is_terminal(current["status"]):

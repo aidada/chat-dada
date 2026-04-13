@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-import asyncpg
+from sqlalchemy import text
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.models import get_llm, response_text
@@ -74,33 +74,8 @@ def _needs_retrieval(message: str) -> bool:
     return any(marker in msg_lower for marker in REFERENTIAL_MARKERS)
 
 
-async def _get_conversation_rounds(pool: asyncpg.Pool, conversation_id: str) -> list[_Round]:
-    rows = await pool.fetch(
-        """
-        SELECT t.task_id, t.task_text,
-               (SELECT e.payload->>'content'
-                FROM task_events e
-                WHERE e.task_id = t.task_id AND e.event_type = 'result'
-                ORDER BY e.seq DESC LIMIT 1) AS result_content
-        FROM task_runs t
-        WHERE t.conversation_id = $1
-          AND t.status IN ('succeeded', 'failed', 'running', 'queued')
-        ORDER BY t.created_at ASC
-        """,
-        conversation_id,
-    )
-    return [
-        _Round(
-            task_id=row["task_id"],
-            user_query=row["task_text"] or "",
-            assistant_reply=row["result_content"] or "",
-        )
-        for row in rows
-    ]
-
-
-async def _get_conversation_rounds_via_repo(conversation_id: str) -> list[_Round]:
-    async with SessionFactory() as session:
+async def _get_conversation_rounds(session_factory, conversation_id: str) -> list[_Round]:
+    async with session_factory() as session:
         repo = ConversationRepository(session)
         rows = await repo.get_rounds(conversation_id)
     return [
@@ -163,29 +138,36 @@ async def _embed_text(text: str) -> list[float] | None:
 
 
 async def _retrieve_relevant(
-    pool: asyncpg.Pool,
+    session_factory,
     conversation_id: str,
     query_embedding: list[float],
     exclude_task_ids: set[str],
     top_k: int = RETRIEVAL_TOP_K,
 ) -> list[dict[str, str]]:
     embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
-    rows = await pool.fetch(
-        """
-        SELECT t.task_text, e.event_type, e.payload->>'content' AS content,
-               e.embedding <=> $1::vector AS distance
-        FROM task_events e
-        JOIN task_runs t ON t.task_id = e.task_id
-        WHERE t.conversation_id = $2
-          AND e.embedding IS NOT NULL
-          AND e.event_type IN ('result', 'error')
-        ORDER BY e.embedding <=> $1::vector
-        LIMIT $3
-        """,
-        embedding_str,
-        conversation_id,
-        top_k + len(exclude_task_ids),
-    )
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT t.task_text, e.event_type, e.payload->>'content' AS content,
+                           e.embedding <=> CAST(:embedding AS vector) AS distance
+                    FROM task_events e
+                    JOIN task_runs t ON t.task_id = e.task_id
+                    WHERE t.conversation_id = :conversation_id
+                      AND e.embedding IS NOT NULL
+                      AND e.event_type IN ('lifecycle.completed', 'lifecycle.failed')
+                    ORDER BY e.embedding <=> CAST(:embedding AS vector)
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "embedding": embedding_str,
+                    "conversation_id": conversation_id,
+                    "limit": top_k + len(exclude_task_ids),
+                },
+            )
+        ).mappings().all()
     results: list[dict[str, str]] = []
     for row in rows:
         if len(results) >= top_k:
@@ -201,17 +183,14 @@ async def _retrieve_relevant(
 
 
 class ConversationContextBuilder:
-    def __init__(self, pool: asyncpg.Pool) -> None:
-        self._pool = pool
+    def __init__(self, session_factory=SessionFactory) -> None:
+        self._session_factory = session_factory
 
     async def build(self, conversation_id: str, current_message: str) -> ConversationContext:
         if not conversation_id:
             return ConversationContext()
 
-        if isinstance(self._pool, asyncpg.Pool):
-            rounds = await _get_conversation_rounds_via_repo(conversation_id)
-        else:
-            rounds = await _get_conversation_rounds(self._pool, conversation_id)
+        rounds = await _get_conversation_rounds(self._session_factory, conversation_id)
         completed = [r for r in rounds if r.assistant_reply]
         round_count = len(completed)
 
@@ -259,17 +238,9 @@ class ConversationContextBuilder:
         return ConversationContext(text=text, round_count=len(rounds), strategy="summary+retrieval")
 
     async def _get_or_update_summary(self, conversation_id: str, rounds_to_summarize: list[_Round]) -> str:
-        if isinstance(self._pool, asyncpg.Pool):
-            async with SessionFactory() as session:
-                repo = ConversationRepository(session)
-                existing_summary, through_seq = await repo.get_summary(conversation_id)
-        else:
-            row = await self._pool.fetchrow(
-                "SELECT context_summary, summary_through_seq FROM conversations WHERE id = $1",
-                conversation_id,
-            )
-            existing_summary = (row["context_summary"] or "") if row else ""
-            through_seq = (row["summary_through_seq"] or 0) if row else 0
+        async with self._session_factory() as session:
+            repo = ConversationRepository(session)
+            existing_summary, through_seq = await repo.get_summary(conversation_id)
 
         if not rounds_to_summarize:
             return existing_summary
@@ -291,22 +262,10 @@ class ConversationContextBuilder:
 
         new_through_seq = total_older * 3
         try:
-            if isinstance(self._pool, asyncpg.Pool):
-                async with SessionFactory() as session:
-                    repo = ConversationRepository(session)
-                    await repo.update_summary(conversation_id, summary, new_through_seq)
-                    await session.commit()
-            else:
-                await self._pool.execute(
-                    """
-                    UPDATE conversations
-                    SET context_summary = $1, summary_through_seq = $2, updated_at = now()
-                    WHERE id = $3
-                    """,
-                    summary,
-                    new_through_seq,
-                    conversation_id,
-                )
+            async with self._session_factory() as session:
+                repo = ConversationRepository(session)
+                await repo.update_summary(conversation_id, summary, new_through_seq)
+                await session.commit()
         except Exception as exc:
             log.warning("Failed to cache summary: %s", exc)
 
@@ -322,7 +281,12 @@ class ConversationContextBuilder:
             embedding = await _embed_text(query)
             if embedding is None:
                 return []
-            return await _retrieve_relevant(self._pool, conversation_id, embedding, exclude_task_ids)
+            return await _retrieve_relevant(
+                self._session_factory,
+                conversation_id,
+                embedding,
+                exclude_task_ids,
+            )
         except Exception as exc:
             log.warning("Vector retrieval failed: %s", exc)
             return []
@@ -338,78 +302,34 @@ class ConversationContextBuilder:
         return text[: max_chars - 1] + "…"
 
 
-async def generate_embeddings_async(pool: asyncpg.Pool, task_id: str) -> None:
+async def generate_embeddings_async(session_factory, task_id: str) -> None:
     try:
-        if isinstance(pool, asyncpg.Pool):
-            async with SessionFactory() as session:
-                event_repo = TaskEventRepository(session)
-                task_repo = TaskRunRepository(session)
-                rows = await event_repo.list_pending_embeddings(task_id=task_id)
-                user_query = await task_repo.get_task_text(task_id)
-                if not rows:
-                    return
-
-                for row in rows:
-                    payload = dict(row.payload or {})
-                    content = str(payload.get("content", "") or "")
-                    if not content.strip():
-                        continue
-
-                    text_to_embed = content
-                    if row.event_type == "result" and user_query:
-                        text_to_embed = f"问题: {user_query[:200]}\n回答: {content[:600]}"
-
-                    embedding = await _embed_text(text_to_embed[:2000])
-                    if embedding is None:
-                        continue
-                    await event_repo.set_embedding(task_id=row.task_id, seq=row.seq, embedding=embedding)
-
-                await session.commit()
-                log.info("Generated embeddings for task %s (%d events)", task_id, len(rows))
+        async with session_factory() as session:
+            event_repo = TaskEventRepository(session)
+            task_repo = TaskRunRepository(session)
+            rows = await event_repo.list_pending_embeddings(task_id=task_id)
+            user_query = await task_repo.get_task_text(task_id)
+            if not rows:
                 return
 
-        rows = await pool.fetch(
-            """
-            SELECT task_id, seq, event_type, payload->>'content' AS content
-            FROM task_events
-            WHERE task_id = $1
-              AND event_type IN ('result', 'error')
-              AND embedding IS NULL
-            ORDER BY seq ASC
-            """,
-            task_id,
-        )
-        if not rows:
+            for row in rows:
+                payload = dict(row.payload or {})
+                content = str(payload.get("content", "") or "")
+                if not content.strip():
+                    continue
+
+                text_to_embed = content
+                if row.event_type == "lifecycle.completed" and user_query:
+                    text_to_embed = f"问题: {user_query[:200]}\n回答: {content[:600]}"
+
+                embedding = await _embed_text(text_to_embed[:2000])
+                if embedding is None:
+                    continue
+                await event_repo.set_embedding(task_id=row.task_id, seq=row.seq, embedding=embedding)
+
+            await session.commit()
+            log.info("Generated embeddings for task %s (%d events)", task_id, len(rows))
             return
-
-        task_row = await pool.fetchrow(
-            "SELECT task_text FROM task_runs WHERE task_id = $1", task_id
-        )
-        user_query = (task_row["task_text"] or "") if task_row else ""
-
-        for row in rows:
-            content = row["content"] or ""
-            if not content.strip():
-                continue
-            text_to_embed = content
-            if row["event_type"] == "result" and user_query:
-                text_to_embed = f"问题: {user_query[:200]}\n回答: {content[:600]}"
-            embedding = await _embed_text(text_to_embed[:2000])
-            if embedding is None:
-                continue
-            embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
-            await pool.execute(
-                """
-                UPDATE task_events
-                SET embedding = $1::vector
-                WHERE task_id = $2 AND seq = $3
-                """,
-                embedding_str,
-                row["task_id"],
-                row["seq"],
-            )
-
-        log.info("Generated embeddings for task %s (%d events)", task_id, len(rows))
     except Exception as exc:
         log.warning("Embedding generation failed for task %s: %s", task_id, exc)
 

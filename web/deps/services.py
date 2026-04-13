@@ -12,4 +12,4 @@ async def get_task_execution_service() -> TaskExecutionService:
 
 
 async def get_conversation_service() -> ConversationService:
-    return ConversationService(web_runtime.task_service.store)
+    return ConversationService()

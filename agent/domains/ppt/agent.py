@@ -15,6 +15,8 @@ from core.logger import log_async
 # Re-export for backward compatibility
 from agent.domains.ppt.orchestrated import PptDomainResult
 
+from agent.platform.emit import safe_emit_progress
+
 _log = logging.getLogger("chatdada.ppt")
 
 PPT_KEYWORDS = (
@@ -28,18 +30,6 @@ PPT_KEYWORDS = (
     "presentation",
     "deck",
 )
-
-
-def _safe_emit(event_type: str, content: str) -> None:
-    """Emit a progress event via LangGraph stream writer, silently no-op outside a graph."""
-    try:
-        from langgraph.config import get_stream_writer
-
-        writer = get_stream_writer()
-        writer({"event_type": event_type, "content": content})
-    except Exception:
-        pass
-
 
 @log_async("ppt", "run_ppt_domain")
 async def run_ppt_domain(input_data: dict[str, Any]) -> PptDomainResult:

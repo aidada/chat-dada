@@ -46,14 +46,7 @@ _graph = build_ppt_workflow_graph()
 
 # ── Helper functions ─────────────────────────────────────────────────────────
 
-def _safe_emit(event_type: str, content: str | dict[str, Any]) -> None:
-    try:
-        from langgraph.config import get_stream_writer
-        payload = dict(content) if isinstance(content, dict) else {"content": content}
-        payload.setdefault("event_type", event_type)
-        get_stream_writer()(payload)
-    except Exception:
-        pass
+from agent.platform.emit import safe_emit_progress_with_content as _safe_emit
 
 
 def _extract_result_json(text: str) -> dict | None:

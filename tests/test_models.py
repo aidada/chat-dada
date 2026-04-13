@@ -5,8 +5,11 @@ import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+from typing import Any
 
 from browser_use.llm.messages import SystemMessage as BrowserSystemMessage
+from deepagents._models import resolve_model
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import tool
 from pydantic import BaseModel
@@ -18,10 +21,12 @@ from core.models import (
     GeminiOpenAIAdapter,
     MiniMaxOpenAIAdapter,
     _build_client,
+    build_chat_model,
     get_browser_use_llm,
     get_llm,
 )
 from core.logger import _find_usage_payload
+from agent.brain.registry import registry
 
 
 class _DummyResponse:
@@ -163,6 +168,26 @@ class GeminiOpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"thoughtSignature": "sig"', joined)
         self.assertIn('"text": "An HTTP request works by sending a request and receiving a response."', joined)
 
+    async def test_adapter_is_base_chat_model_compatible_with_resolve_model(self) -> None:
+        class _FakeGeminiLLM:
+            def __init__(self, **kwargs) -> None:
+                self.client = SimpleNamespace()
+
+            def bind_tools(self, *args, **kwargs):
+                return self
+
+        with patch("langchain_google_genai.ChatGoogleGenerativeAI", new=_FakeGeminiLLM):
+            adapter = GeminiOpenAIAdapter(
+                "gemini-3.1-pro-preview",
+                "test-key",
+                base_url="https://co.yes.vg/gemini/v1beta",
+            )
+            bound = adapter.bind_tools([])
+
+        self.assertIsInstance(adapter, BaseChatModel)
+        self.assertIs(resolve_model(adapter), adapter)
+        self.assertIsInstance(bound, BaseChatModel)
+
 
 class MiniMaxOpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
     def _patch_minimax_clients(self, parsed_payload: dict[str, Any]):
@@ -203,7 +228,11 @@ class MiniMaxOpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.chat = SimpleNamespace(completions=_FakeSyncCompletions())
                 holders["sync_client"] = self
 
-        return holders, patch("core.models.AsyncOpenAI", new=_FakeAsyncOpenAI), patch("core.models.OpenAI", new=_FakeOpenAI)
+        return (
+            holders,
+            patch("agent.brain.providers.minimax.AsyncOpenAI", new=_FakeAsyncOpenAI),
+            patch("agent.brain.providers.minimax.OpenAI", new=_FakeOpenAI),
+        )
 
     async def test_adapter_restores_usage_and_reasoning_details(self) -> None:
         parsed_payload = {
@@ -363,8 +392,38 @@ class MiniMaxOpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tools", payload)
         self.assertEqual(payload["tools"][0]["function"]["name"], "search")
 
+    async def test_adapter_is_base_chat_model_compatible_with_resolve_model(self) -> None:
+        parsed_payload = {
+            "id": "cmpl-001",
+            "model": "MiniMax-M2.7",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "choices": [
+                {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}
+            ],
+        }
+
+        holders, async_patch, sync_patch = self._patch_minimax_clients(parsed_payload)
+        with async_patch, sync_patch:
+            adapter = MiniMaxOpenAIAdapter(
+                "MiniMax-M2.7",
+                "test-key",
+                base_url="https://api.minimaxi.com/v1",
+            )
+            bound = adapter.bind_tools([])
+
+        self.assertIsInstance(adapter, BaseChatModel)
+        self.assertIs(resolve_model(adapter), adapter)
+        self.assertIsInstance(bound, BaseChatModel)
+        self.assertIs(holders["async_client"], adapter._async_client)
+
 
 class ModelDefaultsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        registry.reset()
+
+    def tearDown(self) -> None:
+        registry.reset()
+
     def test_build_client_ignores_thinking_level_for_minimax_openai(self) -> None:
         async_captured: dict[str, object] = {}
         sync_captured: dict[str, object] = {}
@@ -379,8 +438,8 @@ class ModelDefaultsTests(unittest.TestCase):
                 sync_captured.update(kwargs)
                 self.chat = SimpleNamespace(completions=SimpleNamespace(create=None))
 
-        with patch("core.models.AsyncOpenAI", new=_FakeAsyncOpenAI):
-            with patch("core.models.OpenAI", new=_FakeOpenAI):
+        with patch("agent.brain.providers.minimax.AsyncOpenAI", new=_FakeAsyncOpenAI):
+            with patch("agent.brain.providers.minimax.OpenAI", new=_FakeOpenAI):
                 client = _build_client(
                     "minimax_openai",
                     "MiniMax-M2.7",
@@ -400,7 +459,8 @@ class ModelDefaultsTests(unittest.TestCase):
 
     def test_get_llm_applies_default_timeout_and_retries(self) -> None:
         with patch.dict(os.environ, {"CO_API_KEY": "test-key"}, clear=False):
-            with patch("core.models._build_client", return_value=object()) as build_client:
+            registry.update("search", model="gpt-5.4", provider="proxy")
+            with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
                 with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
                     client, role, model = get_llm("search")
 
@@ -413,17 +473,16 @@ class ModelDefaultsTests(unittest.TestCase):
     def test_get_llm_builds_google_proxy_via_adapter_without_default_medium_thinking(self) -> None:
         with patch.dict(
             os.environ,
-            {"CO_API_KEY": "test-key"},
+            {
+                "CO_API_KEY": "test-key",
+                "YESCODE_GEMINI_BASE_URL": "https://co.yes.vg/gemini",
+            },
             clear=False,
         ):
-            with patch.dict(
-                "core.models.MODEL_CONFIGS",
-                {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
-                clear=False,
-            ):
-                with patch("core.models._build_client", return_value=object()) as build_client:
-                    with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
-                        client, role, model = get_llm("search")
+            registry.update("search", model="gemini-3.1-pro-preview", provider="google_proxy")
+            with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
+                with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                    client, role, model = get_llm("search")
 
         self.assertEqual(role, "search")
         self.assertEqual(model, "gemini-3.1-pro-preview")
@@ -433,20 +492,39 @@ class ModelDefaultsTests(unittest.TestCase):
         self.assertEqual(kwargs["base_url"], "https://co.yes.vg/gemini")
         self.assertEqual(kwargs["thinking_level"], "low")
 
+    def test_core_models_model_configs_patch_dict_remains_compatible(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CO_API_KEY": "test-key",
+                "YESCODE_GEMINI_BASE_URL": "https://co.yes.vg/gemini",
+            },
+            clear=False,
+        ):
+            with patch.dict(
+                "core.models.MODEL_CONFIGS",
+                {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
+                clear=False,
+            ):
+                with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
+                    with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                        client, role, model = get_llm("search")
+
+        self.assertEqual(role, "search")
+        self.assertEqual(model, "gemini-3.1-pro-preview")
+        self.assertIs(client, build_client.return_value)
+        self.assertEqual(build_client.call_args.args, ("gemini_openai_adapter", "gemini-3.1-pro-preview", "test-key"))
+
     def test_get_llm_builds_minimax_provider_via_openai_compatible_client(self) -> None:
         with patch.dict(
             os.environ,
             {"MINIMAX_API_KEY": "test-key"},
             clear=False,
         ):
-            with patch.dict(
-                "core.models.MODEL_CONFIGS",
-                {"search": {"model": "MiniMax-M2.7", "provider": "minimax"}},
-                clear=False,
-            ):
-                with patch("core.models._build_client", return_value=object()) as build_client:
-                    with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
-                        client, role, model = get_llm("search")
+            registry.update("search", model="MiniMax-M2.7", provider="minimax")
+            with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
+                with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                    client, role, model = get_llm("search")
 
         self.assertEqual(role, "search")
         self.assertEqual(model, "MiniMax-M2.7")
@@ -467,14 +545,10 @@ class ModelDefaultsTests(unittest.TestCase):
             },
             clear=False,
         ):
-            with patch.dict(
-                "core.models.MODEL_CONFIGS",
-                {"search": {"model": "MiniMax-M2.7-highspeed", "provider": "minimax"}},
-                clear=False,
-            ):
-                with patch("core.models._build_client", return_value=object()) as build_client:
-                    with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
-                        get_llm("search", thinking_level="high")
+            registry.update("search", model="MiniMax-M2.7-highspeed", provider="minimax")
+            with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
+                with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                    get_llm("search", thinking_level="high")
 
         kwargs = build_client.call_args.kwargs
         self.assertEqual(kwargs["base_url"], "https://api.minimaxi.com/v1")
@@ -488,23 +562,47 @@ class ModelDefaultsTests(unittest.TestCase):
             {"MINIMAX_API_KEY": "test-key"},
             clear=False,
         ):
-            with patch.dict(
-                "core.models.MODEL_CONFIGS",
-                {"search": {"model": "MiniMax-M2.7", "provider": "minimax"}},
-                clear=False,
-            ):
-                with patch("core.models._build_client", return_value=object()) as build_client:
-                    with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
-                        get_llm(
-                            "search",
-                            temperature=0,
-                            extra_body={"custom_flag": True},
-                        )
+            registry.update("search", model="MiniMax-M2.7", provider="minimax")
+            with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
+                with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                    get_llm(
+                        "search",
+                        temperature=0,
+                        extra_body={"custom_flag": True},
+                    )
 
         kwargs = build_client.call_args.kwargs
         self.assertEqual(kwargs["temperature"], 1.0)
         self.assertEqual(kwargs["extra_body"], {"reasoning_split": True, "custom_flag": True})
         self.assertEqual(kwargs["disable_streaming"], "tool_calling")
+
+    def test_build_chat_model_returns_base_chat_model_for_minimax_provider(self) -> None:
+        with patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key"}, clear=False):
+            registry.update("search", model="MiniMax-M2.7", provider="minimax")
+            client = build_chat_model("search")
+
+        self.assertIsInstance(client, BaseChatModel)
+        self.assertIs(resolve_model(client), client)
+
+    def test_build_chat_model_returns_base_chat_model_for_google_proxy_provider(self) -> None:
+        class _FakeGeminiLLM:
+            def __init__(self, **kwargs) -> None:
+                self.client = SimpleNamespace()
+
+        with patch.dict(
+            os.environ,
+            {
+                "CO_API_KEY": "test-key",
+                "YESCODE_GEMINI_BASE_URL": "https://co.yes.vg/gemini/v1beta",
+            },
+            clear=False,
+        ):
+            registry.update("search", model="gemini-3.1-pro-preview", provider="google_proxy")
+            with patch("langchain_google_genai.ChatGoogleGenerativeAI", new=_FakeGeminiLLM):
+                client = build_chat_model("search")
+
+        self.assertIsInstance(client, BaseChatModel)
+        self.assertIs(resolve_model(client), client)
 
     def test_get_llm_preserves_supported_google_proxy_thinking_level(self) -> None:
         with patch.dict(
@@ -512,14 +610,10 @@ class ModelDefaultsTests(unittest.TestCase):
             {"CO_API_KEY": "test-key"},
             clear=False,
         ):
-            with patch.dict(
-                "core.models.MODEL_CONFIGS",
-                {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
-                clear=False,
-            ):
-                with patch("core.models._build_client", return_value=object()) as build_client:
-                    with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
-                        get_llm("search", thinking_level="high")
+            registry.update("search", model="gemini-3.1-pro-preview", provider="google_proxy")
+            with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
+                with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                    get_llm("search", thinking_level="high")
 
         kwargs = build_client.call_args.kwargs
         self.assertEqual(kwargs["thinking_level"], "high")
@@ -533,14 +627,10 @@ class ModelDefaultsTests(unittest.TestCase):
             },
             clear=False,
         ):
-            with patch.dict(
-                "core.models.MODEL_CONFIGS",
-                {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
-                clear=False,
-            ):
-                with patch("core.models._build_client", return_value=object()) as build_client:
-                    with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
-                        get_llm("search", thinking_level="high")
+            registry.update("search", model="gemini-3.1-pro-preview", provider="google_proxy")
+            with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
+                with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                    get_llm("search", thinking_level="high")
 
         kwargs = build_client.call_args.kwargs
         self.assertEqual(kwargs["base_url"], "https://co.yes.vg/gemini")
@@ -556,7 +646,8 @@ class ModelDefaultsTests(unittest.TestCase):
                 raise AssertionError("structured output should not be used in this test")
 
         fake_llm = _FakeLLM()
-        with patch("core.models.get_llm", return_value=fake_llm) as mocked_get_llm:
+        registry.update("search", model="gpt-5.4", provider="proxy")
+        with patch("agent.brain.factory.get_llm", return_value=fake_llm) as mocked_get_llm:
             adapter = get_browser_use_llm("search")
             result = self._run_async(adapter.ainvoke([BrowserSystemMessage(content="hello")], session_id="abc"))
 
@@ -577,14 +668,10 @@ class ModelDefaultsTests(unittest.TestCase):
                 return self
 
         fake_llm = _FakeLLM()
-        with patch.dict(
-            "core.models.MODEL_CONFIGS",
-            {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
-            clear=False,
-        ):
-            with patch("core.models.get_llm", return_value=fake_llm) as mocked_get_llm:
-                adapter = get_browser_use_llm("search")
-                result = self._run_async(adapter.ainvoke([BrowserSystemMessage(content="hello")], session_id="abc"))
+        registry.update("search", model="gemini-3.1-pro-preview", provider="google_proxy")
+        with patch("agent.brain.factory.get_llm", return_value=fake_llm) as mocked_get_llm:
+            adapter = get_browser_use_llm("search")
+            result = self._run_async(adapter.ainvoke([BrowserSystemMessage(content="hello")], session_id="abc"))
 
         mocked_get_llm.assert_called_once_with("search")
         self.assertEqual(adapter.provider, "google")
@@ -615,6 +702,7 @@ class ModelDefaultsTests(unittest.TestCase):
             raise AssertionError("chat.completions.create should not be used")
 
         with patch.dict(os.environ, {"CO_API_KEY": "test-key"}, clear=False):
+            registry.update("search", model="gpt-5.4", provider="proxy")
             adapter = get_browser_use_llm("search")
 
         raw_llm = adapter._llm._llm
@@ -647,16 +735,12 @@ class ModelDefaultsTests(unittest.TestCase):
                 return _FakeStructuredLLM()
 
         fake_llm = _FakeLLM()
-        with patch.dict(
-            "core.models.MODEL_CONFIGS",
-            {"search": {"model": "gemini-3.1-pro-preview", "provider": "google_proxy"}},
-            clear=False,
-        ):
-            with patch("core.models.get_llm", return_value=fake_llm):
-                adapter = get_browser_use_llm("search")
-                result = self._run_async(
-                    adapter.ainvoke([BrowserSystemMessage(content="hello")], output_format=_StructuredOut)
-                )
+        registry.update("search", model="gemini-3.1-pro-preview", provider="google_proxy")
+        with patch("agent.brain.factory.get_llm", return_value=fake_llm):
+            adapter = get_browser_use_llm("search")
+            result = self._run_async(
+                adapter.ainvoke([BrowserSystemMessage(content="hello")], output_format=_StructuredOut)
+            )
 
         self.assertEqual(adapter.provider, "google")
         self.assertIs(fake_llm.called_with, _StructuredOut)

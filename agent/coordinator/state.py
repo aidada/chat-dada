@@ -116,6 +116,7 @@ class CoordinatorState(TypedDict, total=False):
     # single_skill 模式
     selected_skill: str | None
     skill_input: dict[str, Any] | None
+    model_hints: dict[str, dict[str, Any]] | None
 
     # dag 模式
     task_dag: list[Task] | None

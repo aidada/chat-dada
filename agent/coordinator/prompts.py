@@ -122,9 +122,17 @@ def build_understand_goal_prompt(goal: str, skill_summary: str) -> list[dict[str
   "goal_understanding": "对用户目标的精炼理解",
   "selected_skill": "技能名称（仅 single_skill 模式）",
   "skill_input": {"query": "传入技能的参数（仅 single_skill 模式）"},
-  "dag_strategy": "dag 执行策略（仅 dag 模式，可选）"
+  "dag_strategy": "dag 执行策略（仅 dag 模式，可选）",
+  "model_hints": {
+    "role_name": {
+      "model": "模型名（可选）",
+      "provider": "provider 名（可选）"
+    }
+  }
 }
 ```
+
+`model_hints` 仅在默认模型明显不适合时输出，用于提示下游角色选择更合适的模型；如果没有明确偏好，请省略该字段。
 
 ## 决策原则
 
