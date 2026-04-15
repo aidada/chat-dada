@@ -12,6 +12,8 @@ from typing import Any, Protocol
 
 log = logging.getLogger("chatdada.hands.desktop")
 
+DesktopPathAliases = dict[str, str]
+
 
 class WebSocketLike(Protocol):
     """Minimal WebSocket interface for testability."""
@@ -27,6 +29,7 @@ class DesktopConnection:
     capabilities: dict[str, Any]
     tool_names: set[str] = field(default_factory=set)
     tool_descriptors: dict[str, dict[str, Any]] = field(default_factory=dict)
+    path_aliases: DesktopPathAliases = field(default_factory=dict)
 
     def has_tool(self, name: str) -> bool:
         return name in self.tool_names
@@ -52,10 +55,19 @@ class DesktopHandsManager:
     ) -> DesktopConnection:
         previous = self._connections.get(user_id)
         tools = capabilities.get("tools", [])
+        raw_paths = capabilities.get("paths", {})
         tool_descriptors = {
             str(tool["name"]): dict(tool)
             for tool in tools
             if isinstance(tool, dict) and "name" in tool
+        }
+        path_aliases = {
+            str(name): str(path)
+            for name, path in raw_paths.items()
+            if isinstance(raw_paths, dict)
+            and isinstance(name, str)
+            and isinstance(path, str)
+            and path.strip()
         }
         tool_names = set(tool_descriptors)
         conn = DesktopConnection(
@@ -63,6 +75,7 @@ class DesktopHandsManager:
             capabilities=capabilities,
             tool_names=tool_names,
             tool_descriptors=tool_descriptors,
+            path_aliases=path_aliases,
         )
         self._connections[user_id] = conn
         if previous is not None and previous.ws is not ws:
@@ -102,3 +115,9 @@ class DesktopHandsManager:
         if conn is None:
             return []
         return conn.list_tool_descriptors()
+
+    def get_path_aliases(self, user_id: str) -> DesktopPathAliases:
+        conn = self.get_connection(user_id)
+        if conn is None:
+            return {}
+        return dict(conn.path_aliases)

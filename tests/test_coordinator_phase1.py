@@ -164,6 +164,16 @@ def test_skill_registry_has_research():
     assert desc.name == "do_research"
 
 
+def test_skill_summary_hides_non_selectable_ppt_and_keeps_office() -> None:
+    from agent.coordinator.skills import skill_registry
+
+    summary = skill_registry.skill_summary_for_llm()
+    assert "do_office" in summary
+    assert "do_ppt" not in summary
+    assert skill_registry.get_description("do_ppt") is not None
+    assert skill_registry.get_description("do_ppt").selectable is False
+
+
 def test_skill_description_fields():
     from agent.coordinator.skills import skill_registry
     desc = skill_registry.get_description("do_research")
@@ -254,8 +264,9 @@ def test_ppt_capability_inquiry_routes_to_direct():
 
 def test_ppt_request_needs_clarification_for_vague_goal():
     from agent.coordinator.agent import _ppt_request_needs_clarification
-    assert _ppt_request_needs_clarification("帮我做一个PPT")
-    assert _ppt_request_needs_clarification("你能帮我写一个ppt出来吗")
+    assert not _ppt_request_needs_clarification("帮我做一个PPT")
+    assert not _ppt_request_needs_clarification("你能帮我写一个ppt出来吗")
+    assert _ppt_request_needs_clarification("帮我修改这个PPT")
     assert not _ppt_request_needs_clarification("帮我做一个关于公司介绍的PPT，面向客户，8页左右")
 
 

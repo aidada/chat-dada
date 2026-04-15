@@ -50,14 +50,26 @@ class ZeroReportDomainResult(BaseModel):
 async def build_deepagents_zero_report_agent() -> object:
     """Build a deepagents-backed zero-report agent with 5 specialised subagents."""
     from deepagents import create_deep_agent
+    from langgraph.config import get_config
 
     from agent.domains.zero_report.prompts import (
         ACTION_PLANNER_PROMPT,
         ROOT_CAUSE_ANALYST_PROMPT,
         TIMELINE_BUILDER_PROMPT,
     )
+    from agent.hands.deepagents_backend import resolve_deepagents_runtime
 
-    tools = get_zero_report_tools()
+    try:
+        configurable = get_config().get("configurable", {}) or {}
+    except Exception:
+        configurable = {}
+    task_id = str(configurable.get("thread_id", "") or "zero_report_domain")
+    tools, backend = resolve_deepagents_runtime(
+        domain="zero_report",
+        task_id=task_id,
+        fallback_tools=list(get_zero_report_tools()),
+        configurable=configurable,
+    )
     subagents = [
         {
             "name": "incident_structurer",
@@ -97,6 +109,7 @@ async def build_deepagents_zero_report_agent() -> object:
         system_prompt=BASE_ZERO_REPORT_SYSTEM,
         tools=tools,
         subagents=subagents,
+        backend=backend,
         checkpointer=False,
         name="zero_report_domain_agent",
     )

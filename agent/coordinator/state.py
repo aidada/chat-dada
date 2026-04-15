@@ -108,6 +108,7 @@ class CoordinatorState(TypedDict, total=False):
     skill_summary: str
     conversation_context: str  # 多轮对话上下文，来自 RootState
     clarification_history: list[dict[str, Any]]  # 历史澄清记录，用于技能 resume
+    source_files: list[str]
     request_user_id: str
     desktop_tool_descriptors: list[dict[str, Any]]
 

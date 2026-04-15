@@ -154,15 +154,31 @@ class ToolGateway:
         内部仍走 gateway.execute() 路径，确保事件记录一致。
         过渡期实现：包装现有工具函数为 gateway-aware adapters。
         """
-        # 过渡期：返回现有域工具，后续迁移到纯 gateway 调用
         if domain == "patent":
             from agent.domains.patent.tools import get_patent_tools
-            return get_patent_tools()
+            domain_tools = list(get_patent_tools())
         elif domain == "zero_report":
             from agent.domains.zero_report.tools import get_zero_report_tools
-            return get_zero_report_tools()
+            domain_tools = list(get_zero_report_tools())
         elif domain == "ppt":
             from agent.domains.ppt.tools import get_ppt_tools
-            return get_ppt_tools()
+            domain_tools = list(get_ppt_tools())
+        elif domain == "office":
+            from agent.domains.office.tools import get_office_tools
+            domain_tools = list(get_office_tools())
         else:
-            return []
+            domain_tools = []
+
+        if self._desktop_manager is None or ctx.user_id == "":
+            return domain_tools
+
+        from agent.hands.langchain_tools import build_desktop_langchain_tools
+
+        descriptors = [
+            descriptor
+            for descriptor in self._desktop_manager.list_tool_descriptors(ctx.user_id)
+            if str(descriptor.get("name", "") or "").strip()
+            not in {"list_dir", "file_read", "file_write", "file_edit", "file_search", "grep", "shell", "officecli"}
+        ]
+        desktop_tools = build_desktop_langchain_tools(descriptors, self, ctx)
+        return [*domain_tools, *desktop_tools]

@@ -36,7 +36,7 @@ CROSS_DOMAIN_SAMPLES = [
     {
         "id": "cd02",
         "goal": "调研竞品技术方案，生成PPT演示文稿并附上分析报告",
-        "expected_skills": ["do_research", "do_ppt"],
+        "expected_skills": ["do_research", "do_office"],
         "expected_mode": "dag",
     },
     {
@@ -54,7 +54,7 @@ CROSS_DOMAIN_SAMPLES = [
     {
         "id": "cd05",
         "goal": "帮我制作一个介绍公司新产品的PPT，包含产品功能演示和竞争优势分析",
-        "expected_skills": ["do_ppt"],
+        "expected_skills": ["do_office"],
         "expected_mode": "single_skill",
     },
     {
@@ -66,7 +66,7 @@ CROSS_DOMAIN_SAMPLES = [
     {
         "id": "cd07",
         "goal": "研究脑机接口技术最新进展，生成综述报告，并制作配套PPT",
-        "expected_skills": ["do_research", "do_ppt"],
+        "expected_skills": ["do_research", "do_office"],
         "expected_mode": "dag",
     },
     {
@@ -84,7 +84,7 @@ CROSS_DOMAIN_SAMPLES = [
     {
         "id": "cd10",
         "goal": "分析电动汽车续航技术突破，生成行业研究报告，并制作CEO汇报PPT",
-        "expected_skills": ["do_research", "do_ppt"],
+        "expected_skills": ["do_research", "do_office"],
         "expected_mode": "dag",
     },
     {
@@ -119,7 +119,7 @@ SKILL_MOCK_RESULTS = {
         review={"completeness": 0.9},
         budget={"cost_usd": 1.8},
     ),
-    "do_ppt": SkillResult(
+    "do_office": SkillResult(
         status="ok",
         result="PPT演示文稿已生成，共15页幻灯片。",
         artifact_refs=[{"name": "presentation.pptx", "type": "file"}],

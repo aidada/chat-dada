@@ -119,3 +119,32 @@ class TestGatewayDesktopRouting(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(local.called)
         self.assertFalse(desktop.called)
         self.assertIn("desktop tool unavailable", result.error.lower())
+
+    async def test_bind_deepagents_tools_includes_non_filesystem_desktop_tools(self):
+        mgr = DesktopHandsManager()
+        ws = FakeWebSocket()
+        mgr.register(
+            "user_1",
+            ws,
+            {
+                "tools": [
+                    {"name": "officecli", "operations": []},
+                    {"name": "list_dir", "parameters": {"type": "object"}},
+                    {"name": "shell", "parameters": {"type": "object"}},
+                    {"name": "screenshot", "parameters": {"type": "object"}},
+                    {"name": "sysinfo", "parameters": {"type": "object"}},
+                ]
+            },
+        )
+
+        gateway = ToolGateway(local=FakeLocalExecutor(), session=FakeSession(), desktop_manager=mgr, desktop_executor=FakeDesktopExecutor())
+        ctx = ToolContext(user_id="user_1", task_id="t1")
+        tools = gateway.bind_deepagents_tools("ppt", "t1", ctx)
+        names = {tool.name for tool in tools}
+
+        self.assertIn("officecli", names)
+        self.assertIn("officecli_batch", names)
+        self.assertIn("screenshot", names)
+        self.assertIn("sysinfo", names)
+        self.assertNotIn("list_dir", names)
+        self.assertNotIn("shell", names)

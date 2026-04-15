@@ -177,9 +177,9 @@ register(
 )
 register(
     "writer",
-    fn_path="agent.domains.ppt.orchestrated:run_ppt_domain_orchestrated",
+    fn_path="agent.domains.office.orchestrated:run_office_domain_orchestrated",
     cap_type="agent",
-    description="Generate PPT via OfficeCLI — outline, search, build slides",
+    description="Generate or edit Office documents via OfficeCLI",
 )
 
 # Renderers (OfficeCLI replaces ppt_engine)
@@ -188,7 +188,7 @@ register(
     fn_path="agent.tools.officecli:run",
     cap_type="tool",
     description="Execute officecli CLI commands to create/edit .pptx/.docx/.xlsx",
-    available_to=["ppt"],
+    available_to=["ppt", "office"],
 )
 
 # Tools

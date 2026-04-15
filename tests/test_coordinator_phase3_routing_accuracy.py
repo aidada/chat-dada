@@ -58,7 +58,7 @@ ROUTING_SAMPLES = [
     },
     {
         "id": "ra08", "goal": "制作一个介绍AI技术的PPT",
-        "expected_mode": "single_skill", "expected_skill": "do_ppt",
+        "expected_mode": "single_skill", "expected_skill": "do_office",
         "expected_old_route": "ppt",
     },
     {
@@ -90,12 +90,12 @@ ROUTING_SAMPLES = [
     },
     {
         "id": "ra14", "goal": "调研竞品技术方案，生成PPT演示文稿并附上分析报告",
-        "expected_mode": "dag", "expected_skills": ["do_research", "do_ppt"],
+        "expected_mode": "dag", "expected_skills": ["do_research", "do_office"],
         "expected_old_route": "composite",
     },
     {
         "id": "ra15", "goal": "研究脑机接口技术最新进展，生成综述报告，并制作配套PPT",
-        "expected_mode": "dag", "expected_skills": ["do_research", "do_ppt"],
+        "expected_mode": "dag", "expected_skills": ["do_research", "do_office"],
         "expected_old_route": "composite",
     },
     {
@@ -105,7 +105,7 @@ ROUTING_SAMPLES = [
     },
     {
         "id": "ra17", "goal": "分析这次重大故障，生成零报告，并制作管理层汇报PPT",
-        "expected_mode": "dag", "expected_skills": ["do_zero_report", "do_ppt"],
+        "expected_mode": "dag", "expected_skills": ["do_zero_report", "do_office"],
         "expected_old_route": "composite",
     },
     {

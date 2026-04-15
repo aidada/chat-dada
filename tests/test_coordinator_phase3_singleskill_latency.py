@@ -52,7 +52,7 @@ SKILL_RESULTS = {
         review={"completeness": 0.9},
         budget={"cost_usd": 1.5},
     ),
-    "do_ppt": SkillResult(
+    "do_office": SkillResult(
         status="ok",
         result="PPT已生成",
         artifact_refs=[{"name": "pptx", "type": "file"}],
@@ -283,7 +283,7 @@ def _infer_skill(goal: str) -> str:
     if any(k in goal_lower for k in ["专利", "patent", "发明", "权利"]):
         return "do_patent"
     if any(k in goal_lower for k in ["ppt", "幻灯片", "演示", "presentation"]):
-        return "do_ppt"
+        return "do_office"
     if any(k in goal_lower for k in ["故障", "事故", "incident", "零报告", "分析报告"]):
         return "do_zero_report"
     return "do_research"

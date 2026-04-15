@@ -13,15 +13,15 @@ async def test_officecli_run_returns_structured_validation_success() -> None:
 
     with (
         patch(
-            "agent.domains.ppt.tools._execute_officecli_via_gateway",
+            "agent.tools.officecli._execute_officecli_raw_via_gateway",
             new=AsyncMock(return_value=None),
         ),
         patch(
-            "agent.domains.ppt.tools._run_officecli_locally",
+            "agent.tools.officecli._run_officecli_raw_locally",
             new=AsyncMock(
                 return_value={
                     "success": True,
-                    "stdout": "Validation passed",
+                    "stdout": "Validation passed: no errors found.",
                     "stderr": "",
                     "exit_status": 0,
                 }
@@ -35,17 +35,35 @@ async def test_officecli_run_returns_structured_validation_success() -> None:
     assert payload["command"] == "validate demo.pptx"
 
 
+def test_ppt_content_researcher_has_real_search_tools() -> None:
+    from agent.domains.ppt.workflow import PPT_SUBAGENTS
+
+    [content_researcher] = [agent for agent in PPT_SUBAGENTS if agent.name == "content_researcher"]
+    tool_names = {tool.name for tool in content_researcher.tools}
+
+    assert "web_search" in tool_names
+    assert "academic_search" in tool_names
+    assert "brave_search" in tool_names
+
+
+def test_ppt_officecli_skill_bundle_includes_pptx_skill() -> None:
+    from agent.tools.officecli_skill_loader import build_officecli_skill_bundle
+
+    bundle = build_officecli_skill_bundle("做一个介绍 AI 的 PPT", format_hint="pptx")
+    assert "# Extra skill: officecli-pptx" in bundle
+
+
 @pytest.mark.asyncio
 async def test_officecli_run_rejects_non_officecli_command() -> None:
     from agent.domains.ppt.tools import officecli_run
 
     with (
         patch(
-            "agent.domains.ppt.tools._execute_officecli_via_gateway",
+            "agent.tools.officecli._execute_officecli_raw_via_gateway",
             new=AsyncMock(),
         ) as mocked_gateway,
         patch(
-            "agent.domains.ppt.tools._run_officecli_locally",
+            "agent.tools.officecli._run_officecli_raw_locally",
             new=AsyncMock(),
         ) as mocked_local,
     ):
@@ -64,11 +82,11 @@ async def test_officecli_run_returns_structured_help_output() -> None:
 
     with (
         patch(
-            "agent.domains.ppt.tools._execute_officecli_via_gateway",
+            "agent.tools.officecli._execute_officecli_raw_via_gateway",
             new=AsyncMock(return_value=None),
         ),
         patch(
-            "agent.domains.ppt.tools._run_officecli_locally",
+            "agent.tools.officecli._run_officecli_raw_locally",
             new=AsyncMock(
                 return_value={
                     "success": True,
@@ -91,11 +109,11 @@ async def test_officecli_run_returns_structured_fatal_error() -> None:
 
     with (
         patch(
-            "agent.domains.ppt.tools._execute_officecli_via_gateway",
+            "agent.tools.officecli._execute_officecli_raw_via_gateway",
             new=AsyncMock(return_value=None),
         ),
         patch(
-            "agent.domains.ppt.tools._run_officecli_locally",
+            "agent.tools.officecli._run_officecli_raw_locally",
             new=AsyncMock(
                 return_value={
                     "success": False,
@@ -119,11 +137,11 @@ async def test_officecli_run_returns_structured_validation_failure() -> None:
 
     with (
         patch(
-            "agent.domains.ppt.tools._execute_officecli_via_gateway",
+            "agent.tools.officecli._execute_officecli_raw_via_gateway",
             new=AsyncMock(return_value=None),
         ),
         patch(
-            "agent.domains.ppt.tools._run_officecli_locally",
+            "agent.tools.officecli._run_officecli_raw_locally",
             new=AsyncMock(
                 return_value={
                     "success": False,
@@ -155,7 +173,7 @@ async def test_ppt_workflow_terminates_on_inner_recursion_limit() -> None:
         ),
         patch("agent.domains.ppt.workflow.get_ppt_tools", return_value=[]),
         patch("agent.domains.ppt.workflow.PPT_SUBAGENTS", []),
-        patch("agent.domains.ppt.workflow._load_officecli_skill", return_value=""),
+        patch("agent.domains.ppt.workflow.build_officecli_skill_bundle", return_value=""),
     ):
         result = await graph.ainvoke(
             {

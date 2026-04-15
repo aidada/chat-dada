@@ -77,6 +77,7 @@ async def run_coordinator(state: RootState) -> dict[str, Any]:
         "config": CoordinatorConfig(report_profile=report_profile),
         "conversation_context": state.get("conversation_context") or "",
         "clarification_history": list(request_payload.get("clarification_history") or []),
+        "source_files": list(state.get("file_paths") or []),
         "request_user_id": str(state.get("user_id", "") or ""),
         "desktop_tool_descriptors": desktop_tool_descriptors,
         "artifact_refs": [],
@@ -100,6 +101,7 @@ async def run_coordinator(state: RootState) -> dict[str, Any]:
                 "checkpoint_ns": "coordinator",
                 "tool_gateway": configurable.get("tool_gateway"),
                 "desktop_manager": desktop_manager,
+                "request_user_id": str(state.get("user_id", "") or ""),
             }
         },
         extra_payload={

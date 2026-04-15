@@ -50,6 +50,7 @@ class PatentDomainResult(BaseModel):
 async def build_deepagents_patent_agent() -> object:
     """Build a deepagents-backed patent agent with 5 specialised subagents."""
     from deepagents import create_deep_agent
+    from langgraph.config import get_config
 
     from agent.domains.patent.prompts import (
         CLAIM_DRAFTER_PROMPT,
@@ -58,8 +59,19 @@ async def build_deepagents_patent_agent() -> object:
         PRIOR_ART_RESEARCHER_PROMPT,
         SPECIFICATION_DRAFTER_PROMPT,
     )
+    from agent.hands.deepagents_backend import resolve_deepagents_runtime
 
-    tools = get_patent_tools()
+    try:
+        configurable = get_config().get("configurable", {}) or {}
+    except Exception:
+        configurable = {}
+    task_id = str(configurable.get("thread_id", "") or "patent_domain")
+    tools, backend = resolve_deepagents_runtime(
+        domain="patent",
+        task_id=task_id,
+        fallback_tools=list(get_patent_tools()),
+        configurable=configurable,
+    )
     subagents = [
         {
             "name": "technical_disclosure_analyst",
@@ -99,6 +111,7 @@ async def build_deepagents_patent_agent() -> object:
         system_prompt=PATENT_DOMAIN_PROMPT,
         tools=tools,
         subagents=subagents,
+        backend=backend,
         checkpointer=False,
         name="patent_domain_agent",
     )
