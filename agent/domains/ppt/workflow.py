@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any
 
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.errors import GraphRecursionError
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 from typing_extensions import TypedDict
@@ -32,6 +33,10 @@ _log = logging.getLogger("chatdada.ppt.workflow")
 PPT_MODEL_ROLE = "orchestrator"
 PPT_MAX_STEPS = 15  # More steps needed: agent iterates create→add→validate→fix
 PPT_MAX_COST = 3.0
+# LangGraph recursion counts internal agent/tool graph transitions, not just visible tool turns.
+# A normal PPT create -> populate -> validate -> fix flow can consume far more than a dozen
+# recursion steps, so keep the guardrail bounded but high enough for legitimate runs.
+PPT_INNER_RECURSION_LIMIT = 40
 
 # ── SubagentConfig (local definition, PRD §8.3 C3) ──────────────────────────────
 
@@ -83,11 +88,14 @@ class PptWorkflowState(TypedDict, total=False):
     cost: float
     max_cost: float
     max_steps: int
+    inner_recursion_limit: int
 
     # Results
     intermediate_results: Annotated[list[dict[str, Any]], "add"]
     evaluations: Annotated[list[dict[str, Any]], "add"]
     final_result: str
+    terminal_status: str
+    terminal_reason: str
 
 
 # ── Helper functions ───────────────────────────────────────────────────────────
@@ -141,6 +149,14 @@ _PPT_SYSTEM = """\
 - 每页正文控制在 50-80 字，要点化表达
 - 使用中文内容
 - 完成后必须运行 validate 确认文件有效
+- 禁止编写或执行 Python、bash、shell 脚本来生成 PPT；只能调用 OfficeCLI 命令
+- 绝对不要把 `python3 ...`、`bash ...`、重定向、管道或其他 shell 命令塞进 `officecli_run`
+- officecli 工具返回的是 JSON 字符串，重点看 `success`、`kind`、`message`
+- 一旦收到 `kind=validation_passed`，禁止继续调用任何工具，立即输出最终 JSON
+- 一旦收到 `kind=fatal_error`，停止继续修复，直接输出失败总结
+- 如果相同 `command + kind + message` 连续出现 2 次，停止重试并输出失败总结
+- `kind=help` 只用于理解命令，不要反复查询同一帮助
+- `kind=validation_failed` 说明文件仍有问题，只能做有限修复；不要无限尝试
 
 ## 输出要求
 
@@ -148,6 +164,8 @@ _PPT_SYSTEM = """\
 ```json
 {{"filename": "<文件名>.pptx", "title": "<PPT标题>", "slide_count": <页数>}}
 ```
+
+如果无法完成，请输出简洁失败总结，说明最后一次工具调用的 `command`、`kind`、`message`，不要继续调用工具。
 
 ## OfficeCLI 参考手册
 
@@ -186,16 +204,79 @@ async def exec_sequential(state: PptWorkflowState) -> dict[str, Any]:
         if context
         else state["goal"]
     )
-    response = await stream_nested_graph(
-        agent,
-        {"messages": [HumanMessage(content=input_msg)]},
-        extra_payload={
-            "nested_graph": "ppt_sequential",
-            "strategy": "sequential",
-            "source": "ppt_workflow",
-        },
+    inner_limit = int(
+        state.get("inner_recursion_limit", PPT_INNER_RECURSION_LIMIT)
+        or PPT_INNER_RECURSION_LIMIT
     )
-    output = _extract_last_ai_text(response)
+    try:
+        response = await stream_nested_graph(
+            agent,
+            {"messages": [HumanMessage(content=input_msg)]},
+            config={
+                "recursion_limit": inner_limit,
+                "configurable": {
+                    "nested_recursion_limit": inner_limit,
+                },
+            },
+            extra_payload={
+                "nested_graph": "ppt_sequential",
+                "strategy": "sequential",
+                "source": "ppt_workflow",
+            },
+        )
+        output = _extract_last_ai_text(response)
+    except GraphRecursionError:
+        output = (
+            f"PPT 生成已中止：内层 agent 超过 {inner_limit} 步仍未收敛，"
+            "疑似重复工具调用。请检查 officecli 返回或提示词收敛规则。"
+        )
+        _safe_emit("step", output)
+        return {
+            "intermediate_results": [{
+                "strategy": "sequential",
+                "output": output,
+                "bounded_failure": True,
+                "reason": "inner_recursion_limit",
+            }],
+            "evaluations": [{
+                "passed": False,
+                "confidence": 0.0,
+                "issues": [{
+                    "severity": "error",
+                    "message": "PPT inner agent hit recursion limit",
+                    "metadata": {"limit": inner_limit},
+                }],
+            }],
+            "final_result": output,
+            "confidence": 0.0,
+            "terminal_status": "bounded_failure",
+            "terminal_reason": "inner_recursion_limit",
+        }
+    except Exception as exc:
+        output = f"PPT 生成失败：内层 agent 执行异常：{exc}"
+        _log.exception("PPT sequential agent failed: %s", exc)
+        _safe_emit("step", output)
+        return {
+            "intermediate_results": [{
+                "strategy": "sequential",
+                "output": output,
+                "bounded_failure": True,
+                "reason": "inner_agent_exception",
+            }],
+            "evaluations": [{
+                "passed": False,
+                "confidence": 0.0,
+                "issues": [{
+                    "severity": "error",
+                    "message": "PPT inner agent raised an exception",
+                    "metadata": {"error": str(exc)},
+                }],
+            }],
+            "final_result": output,
+            "confidence": 0.0,
+            "terminal_status": "error",
+            "terminal_reason": "inner_agent_exception",
+        }
 
     _safe_emit("step", f"PPT: Sequential done ({len(output)} chars)")
     return {
@@ -261,6 +342,23 @@ async def select_strategy_node(state: PptWorkflowState) -> dict[str, Any]:
 
 async def evaluate_node(state: PptWorkflowState) -> dict[str, Any]:
     """Evaluate using basic ReviewGate."""
+    terminal_status = str(state.get("terminal_status", "") or "")
+    if terminal_status:
+        evaluation = {
+            "passed": False,
+            "confidence": 0.0,
+            "issues": [{
+                "severity": "error",
+                "message": str(state.get("terminal_reason", terminal_status)),
+                "metadata": {"terminal_status": terminal_status},
+            }],
+        }
+        return {
+            "evaluations": state.get("evaluations") or [evaluation],
+            "final_result": str(state.get("final_result", "") or ""),
+            "confidence": float(state.get("confidence", 0.0) or 0.0),
+        }
+
     results = state.get("intermediate_results", [])
     if not results:
         return {
@@ -329,6 +427,9 @@ def route_to_strategy(state: PptWorkflowState) -> str:
 
 def should_continue(state: PptWorkflowState) -> str:
     if state.get("final_result"):
+        return "done"
+
+    if state.get("terminal_status"):
         return "done"
 
     max_cost = state.get("max_cost", PPT_MAX_COST)

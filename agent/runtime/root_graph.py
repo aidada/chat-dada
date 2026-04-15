@@ -54,6 +54,7 @@ async def run_coordinator(state: RootState) -> dict[str, Any]:
 
     graph_config = get_config()
     configurable = graph_config.get("configurable", {}) if isinstance(graph_config, dict) else {}
+    desktop_manager = configurable.get("desktop_manager")
     coordinator_graph = build_coordinator_graph(
         checkpointer=configurable.get(CONFIG_KEY_CHECKPOINTER),
     )
@@ -61,12 +62,23 @@ async def run_coordinator(state: RootState) -> dict[str, Any]:
     # P3: Forward explicit report_profile from caller so skills use it, not the default "".
     report_profile = str(request_payload.get("report_profile") or "")
 
+    desktop_tool_descriptors = []
+    if desktop_manager is not None:
+        try:
+            desktop_tool_descriptors = list(
+                desktop_manager.list_tool_descriptors(str(state.get("user_id", "") or ""))
+            )
+        except Exception:
+            desktop_tool_descriptors = []
+
     coordinator_input: CoordinatorState = {
         "original_goal": goal,
         "trace_id": state.get("task_id", ""),
         "config": CoordinatorConfig(report_profile=report_profile),
         "conversation_context": state.get("conversation_context") or "",
         "clarification_history": list(request_payload.get("clarification_history") or []),
+        "request_user_id": str(state.get("user_id", "") or ""),
+        "desktop_tool_descriptors": desktop_tool_descriptors,
         "artifact_refs": [],
         "review": {},
         "budget": {},
@@ -86,6 +98,8 @@ async def run_coordinator(state: RootState) -> dict[str, Any]:
             "configurable": {
                 "thread_id": state.get("task_id", ""),
                 "checkpoint_ns": "coordinator",
+                "tool_gateway": configurable.get("tool_gateway"),
+                "desktop_manager": desktop_manager,
             }
         },
         extra_payload={

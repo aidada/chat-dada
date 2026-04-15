@@ -103,3 +103,19 @@ class TestGatewayDesktopRouting(unittest.IsolatedAsyncioTestCase):
         result = await gateway.execute(call, ctx)
 
         self.assertTrue(local.called)
+
+    async def test_explicit_desktop_route_does_not_fallback_to_local(self):
+        mgr = DesktopHandsManager()
+        local = FakeLocalExecutor()
+        desktop = FakeDesktopExecutor()
+        gateway = ToolGateway(local=local, session=FakeSession(), desktop_manager=mgr, desktop_executor=desktop)
+        gateway.set_route("list_dir", "desktop")
+
+        call = ToolCall(tool_name="list_dir", params={"path": "~/Downloads"}, task_id="t1")
+        ctx = ToolContext(user_id="user_1", task_id="t1")
+        result = await gateway.execute(call, ctx)
+
+        self.assertFalse(result.success)
+        self.assertFalse(local.called)
+        self.assertFalse(desktop.called)
+        self.assertIn("desktop tool unavailable", result.error.lower())

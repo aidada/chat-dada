@@ -3,10 +3,14 @@ Phase 1 集成测试 — 覆盖 direct/single_skill/dag 三种模式的核心逻
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.messages import AIMessage
+
+from agent.hands.protocol import ToolResult
 
 
 # ── 数据结构测试 ──────────────────────────────────────────────────────────────
@@ -209,11 +213,12 @@ def test_skill_registry_fresh_instance():
 
 def test_understand_goal_prompt_contains_skills():
     from agent.coordinator.prompts import build_understand_goal_prompt
-    msgs = build_understand_goal_prompt("帮我研究量子计算", "技能摘要内容")
+    msgs = build_understand_goal_prompt("帮我研究量子计算", "技能摘要内容", "可用桌面工具: list_dir")
     assert len(msgs) >= 2
     # 技能摘要应该在 user prompt 中
     user_content = msgs[1]["content"]
     assert "技能摘要内容" in user_content
+    assert "可用桌面工具" in user_content
 
 
 def test_understand_goal_prompt_modes():
@@ -241,10 +246,115 @@ def test_direct_answer_prompt_with_context():
     assert "之前聊了AI" in msgs[1]["content"]
 
 
+def test_ppt_capability_inquiry_routes_to_direct():
+    from agent.coordinator.agent import _is_ppt_capability_inquiry
+    assert _is_ppt_capability_inquiry("你能帮我写一个ppt出来吗")
+    assert not _is_ppt_capability_inquiry("帮我写一个关于量子计算的ppt")
+
+
+def test_ppt_request_needs_clarification_for_vague_goal():
+    from agent.coordinator.agent import _ppt_request_needs_clarification
+    assert _ppt_request_needs_clarification("帮我做一个PPT")
+    assert _ppt_request_needs_clarification("你能帮我写一个ppt出来吗")
+    assert not _ppt_request_needs_clarification("帮我做一个关于公司介绍的PPT，面向客户，8页左右")
+
+
+def test_simple_ppt_generation_request_detection():
+    from agent.coordinator.agent import _is_simple_ppt_generation_request
+    assert _is_simple_ppt_generation_request("帮我在下载文件夹创建一个 PPT，大概 3 页，内容是介绍 chat-dada 可以帮助你完成什么工作")
+    assert not _is_simple_ppt_generation_request("调研竞品技术方案，生成PPT演示文稿并附上分析报告")
+
+
 def test_direct_answer_prompt_empty_context_ignored():
     from agent.coordinator.prompts import build_direct_answer_prompt
     msgs = build_direct_answer_prompt("你好", "   ")
     assert len(msgs) == 2
+
+
+@pytest.mark.asyncio
+async def test_direct_mode_can_call_runtime_desktop_tools():
+    from agent.coordinator.agent import build_coordinator_graph
+    from agent.coordinator.state import CoordinatorConfig
+
+    class FakeToolGateway:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def set_route(self, tool_name: str, target: str) -> None:
+            return None
+
+        async def execute(self, call, ctx):
+            self.calls.append((call.tool_name, dict(call.params)))
+            return ToolResult(success=True, output="file: report.pdf\nfile: image.png")
+
+    class FakeToolLLM:
+        def __init__(self) -> None:
+            self.bound_tools = []
+            self.round = 0
+
+        def bind_tools(self, tools):
+            self.bound_tools = tools
+            return self
+
+        async def ainvoke(self, _messages):
+            self.round += 1
+            if self.round == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"id": "call_1", "name": "list_dir", "args": {"path": "~/Downloads"}}],
+                )
+            return AIMessage(content="下载目录里主要是文档和图片。")
+
+    class FakeGoalLLM:
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(
+                text=None,
+                content=json.dumps(
+                    {
+                        "execution_mode": "direct",
+                        "reasoning": "本机查看任务，适合 direct + tools",
+                        "goal_understanding": "查看本地下载目录并总结文件类型",
+                    }
+                ),
+            )
+
+    tool_gateway = FakeToolGateway()
+    direct_llm = FakeToolLLM()
+    llm_calls = {"count": 0}
+
+    def llm_factory(_role: str, **_kwargs):
+        llm_calls["count"] += 1
+        return FakeGoalLLM() if llm_calls["count"] == 1 else direct_llm
+
+    graph = build_coordinator_graph()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("core.models.get_llm", llm_factory)
+        result = await graph.ainvoke(
+            {
+                "original_goal": "帮我看下我本地的下载中有什么种类的内容",
+                "trace_id": "trace-desktop-direct-001",
+                "config": CoordinatorConfig(),
+                "clarification_history": [],
+                "request_user_id": "user_1",
+                "desktop_tool_descriptors": [
+                    {
+                        "name": "list_dir",
+                        "description": "List directory contents",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                        "permission_level": "safe",
+                    }
+                ],
+            },
+            config={"configurable": {"thread_id": "test-direct-tool", "tool_gateway": tool_gateway}},
+        )
+
+    assert tool_gateway.calls == [("list_dir", {"path": "~/Downloads"})]
+    assert "文档和图片" in (result.get("final_result") or "")
 
 
 def test_decompose_tasks_prompt():

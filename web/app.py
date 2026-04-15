@@ -53,6 +53,16 @@ register_exception_handlers(app)
 for warning in settings.startup_warnings:
     log.warning("Startup config warning: %s", warning)
 
+log.info(
+    "HTTP runtime config: app_base_url=%s cors_allowed_origins=%s session_cookie_name=%s session_secure=%s session_same_site=%s session_domain=%s",
+    settings.app_base_url,
+    settings.cors_allowed_origins,
+    settings.session_cookie_name,
+    settings.session_secure,
+    settings.session_same_site,
+    settings.session_domain or "<none>",
+)
+
 app.include_router(auth_router)
 app.include_router(file_router)
 app.include_router(quota_router)
@@ -67,6 +77,10 @@ from web.routers.desktop_hands import create_desktop_hands_router
 
 _desktop_manager = DesktopHandsManager()
 _desktop_executor = DesktopToolExecutor(_desktop_manager)
+web_runtime.task_service.configure_desktop(
+    manager=_desktop_manager,
+    executor=_desktop_executor,
+)
 
 async def _ws_auth(token: str) -> dict | None:
     from infra.db.session import SessionFactory

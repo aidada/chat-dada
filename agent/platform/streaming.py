@@ -350,22 +350,39 @@ async def stream_nested_graph(
 
     consumed_interrupts = 0
     nested_resume_value: Any = None
+    inherited_configurable: dict[str, Any] = {}
     try:
         from langgraph.config import get_config
 
         configurable = get_config().get("configurable", {}) or {}
+        inherited_configurable = dict(configurable)
         consumed_interrupts = int(configurable.get("nested_interrupt_count", 0) or 0)
         nested_resume_value = configurable.get("nested_resume_value")
     except Exception:
         consumed_interrupts = 0
         nested_resume_value = None
+        inherited_configurable = {}
     _sync_parent_interrupt_state(consumed_interrupts)
+
+    merged_config = dict(config or {})
+    merged_configurable = {
+        **inherited_configurable,
+        **dict((config or {}).get("configurable", {}) or {}),
+    }
+    nested_recursion_limit = merged_configurable.get("nested_recursion_limit")
+    if "recursion_limit" not in merged_config and nested_recursion_limit not in (None, ""):
+        try:
+            merged_config["recursion_limit"] = int(nested_recursion_limit)
+        except (TypeError, ValueError):
+            pass
+    if merged_configurable:
+        merged_config["configurable"] = merged_configurable
 
     final_values: Any = None
     pending_interrupt_payload: dict[str, Any] | None = None
     async for part in graph.astream(
         Command(resume=nested_resume_value) if nested_resume_value is not None else input_data,
-        config=config,
+        config=merged_config or None,
         version="v2",
         stream_mode=list(stream_mode),
         subgraphs=subgraphs,
@@ -390,9 +407,9 @@ async def stream_nested_graph(
 
         request_interrupt(pending_interrupt_payload)
 
-    if config and hasattr(graph, "aget_state"):
+    if merged_config and hasattr(graph, "aget_state"):
         try:
-            state_snapshot = await graph.aget_state(config)
+            state_snapshot = await graph.aget_state(merged_config)
             snapshot_values = getattr(state_snapshot, "values", None)
             if isinstance(final_values, dict) and isinstance(snapshot_values, dict):
                 final_values = {**final_values, **snapshot_values}

@@ -396,11 +396,11 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("domain result", final_snapshot["result"])
 
         events = await self.service.get_events_after(snapshot["task_id"], 0)
-        assert_contains_event_types(events, ["start", "step", "task", "node", "file", "result", "monitoring"])
+        assert_contains_event_types(events, ["lifecycle.started", "progress.step", "artifact.created", "lifecycle.completed"])
         self.assertEqual(events[0]["seq"], 1)
-        file_event = next(event for event in events if event["type"] == "file")
-        self.assertEqual(file_event["name"], "fake.txt")
-        self.assertEqual(events[-1]["type"], "monitoring")
+        file_event = next(event for event in events if event["type"] == "artifact.created")
+        self.assertEqual(file_event["payload"]["name"], "fake.txt")
+        self.assertEqual(events[-1]["type"], "lifecycle.completed")
 
     async def test_task_can_pause_for_user_reply_and_resume(self) -> None:
         snapshot = await self.service.submit_task(
@@ -424,7 +424,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("更关注工程实现与实验效果", final_snapshot["result"])
 
         events = await self.service.get_events_after(snapshot["task_id"], 0)
-        assert_contains_event_types(events, ["start", "step", "task", "node", "question", "user_reply", "result", "monitoring"])
+        assert_contains_event_types(events, ["lifecycle.started", "progress.step", "interaction.question", "interaction.answer", "lifecycle.completed"])
 
     async def test_waiting_task_emits_monitoring_summary_before_user_reply(self) -> None:
         snapshot = await self.service.submit_task(
@@ -442,13 +442,10 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         waiting_events: list[dict] = []
         while time.monotonic() < deadline:
             waiting_events = await self.service.get_events_after(snapshot["task_id"], 0)
-            if any(event["type"] == "monitoring" for event in waiting_events):
+            if any(event["type"] == "interaction.question" for event in waiting_events):
                 break
             await asyncio.sleep(0.05)
-        assert_contains_event_types(waiting_events, ["question", "monitoring"])
-        waiting_monitoring = [event for event in waiting_events if event["type"] == "monitoring"]
-        self.assertTrue(waiting_monitoring[-1]["content"]["interrupted"])
-        self.assertTrue(waiting_monitoring[-1]["content"]["waiting_for_user"])
+        assert_contains_event_types(waiting_events, ["interaction.question"])
 
     async def test_running_task_can_be_cancelled(self) -> None:
         snapshot = await self.service.submit_task(
@@ -469,7 +466,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         events = await self.service.get_events_after(snapshot["task_id"], 0)
         self.assertTrue(
             any(
-                event["type"] == "task" and event.get("status") == "cancelled"
+                event["type"] == "lifecycle.cancelled"
                 for event in events
             )
         )
@@ -529,10 +526,9 @@ class TaskEndpointTests(unittest.TestCase):
 
             self.assertEqual(stream_response.status_code, 200)
             self.assertNotIn("event: start", body)
-            self.assertIn("event: step", body)
-            self.assertIn("event: result", body)
-            self.assertIn("event: monitoring", body)
-            self.assertIn("Route: general_chat", body)
+            self.assertIn("event: progress.step", body)
+            self.assertIn("event: lifecycle.completed", body)
+            self.assertNotIn("Route: general_chat", body)
 
     def test_chat_mode_rejects_attachments(self) -> None:
         with TestClient(main.app) as client:
@@ -580,8 +576,9 @@ class TaskEndpointTests(unittest.TestCase):
                 body = "".join(stream_response.iter_text())
 
             self.assertEqual(stream_response.status_code, 200)
-            self.assertIn("event: question", body)
-            self.assertIn("event: user_reply", body)
+            self.assertIn("event: interaction.question", body)
+            self.assertIn("event: interaction.answer", body)
+            self.assertIn("event: lifecycle.completed", body)
 
     def test_task_metadata_endpoints_expose_replay_artifacts_review_and_traces(self) -> None:
         with TestClient(main.app) as client:

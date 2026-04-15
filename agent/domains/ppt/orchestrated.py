@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from agent.domains.ppt.workflow import (
     build_ppt_workflow_graph,
+    PPT_INNER_RECURSION_LIMIT,
     PPT_MAX_COST,
     PPT_MAX_STEPS,
 )
@@ -89,6 +90,7 @@ async def run_ppt_domain_orchestrated(
             "confidence": 0.0,
             "max_cost": PPT_MAX_COST,
             "max_steps": PPT_MAX_STEPS,
+            "inner_recursion_limit": PPT_INNER_RECURSION_LIMIT,
             "intermediate_results": [],
             "evaluations": [],
             "step_history": [],
@@ -105,6 +107,8 @@ async def run_ppt_domain_orchestrated(
     content_text = result.get("final_result", "")
     strategy_trace = result.get("step_history", [])
     strategies_used = [s.get("strategy", "") for s in strategy_trace]
+    terminal_status = str(result.get("terminal_status", "") or "")
+    terminal_reason = str(result.get("terminal_reason", terminal_status) or terminal_status)
 
     if not content_text:
         return PptDomainResult(
@@ -112,6 +116,15 @@ async def run_ppt_domain_orchestrated(
             result="PPT 生成失败：agent 未返回结果。",
             artifact_refs=[],
             review={"passed": False, "reason": "No content generated"},
+            budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
+        )
+
+    if terminal_status:
+        return PptDomainResult(
+            status="error",
+            result=content_text,
+            artifact_refs=[],
+            review={"passed": False, "reason": terminal_reason},
             budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
         )
 

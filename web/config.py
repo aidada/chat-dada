@@ -11,6 +11,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+_DESKTOP_ALLOWED_ORIGINS = (
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+)
+
 
 @dataclass(frozen=True)
 class WebSettings:
@@ -43,10 +49,14 @@ class WebSettings:
     def cors_allowed_origins(self) -> list[str]:
         raw = self.cors_allowed_origins_raw.strip()
         if not raw:
-            return []
+            return list(_DESKTOP_ALLOWED_ORIGINS)
         if raw == "*":
             return ["*"]
-        return [item.strip() for item in raw.split(",") if item.strip()]
+        origins = [item.strip() for item in raw.split(",") if item.strip()]
+        for origin in _DESKTOP_ALLOWED_ORIGINS:
+            if origin not in origins:
+                origins.append(origin)
+        return origins
 
     @cached_property
     def effective_google_callback_url(self) -> str:

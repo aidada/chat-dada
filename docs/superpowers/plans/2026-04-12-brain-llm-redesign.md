@@ -15,7 +15,7 @@
 ```
 agent/brain/                    # NEW package
 ├── __init__.py                 # Public API: get_llm, build_chat_model, registry, etc.
-├── defaults.py                 # PROVIDERS + MODEL_CONFIGS dicts (pure data, ~50 lines)
+├── defaults.py                 # PROVIDERS + MODEL_CONFIGS dicts (+ env-backed timeout/retry defaults)
 ├── thinking.py                 # _thinking_level ContextVar + normalization (~30 lines)
 ├── context.py                  # _task_model_override ContextVar (~25 lines)
 ├── registry.py                 # ModelRegistry singleton (~120 lines)
@@ -30,9 +30,15 @@ agent/brain/                    # NEW package
 core/models.py                  # MODIFIED → thin re-export shim (~15 lines)
 agent/coordinator/state.py      # MODIFIED → add model_hints field to CoordinatorState
 agent/coordinator/agent.py      # MODIFIED → output model_hints from understand_goal_node
+agent/coordinator/prompts.py    # MODIFIED → add model_hints guidance to prompt
 web/routers/system.py           # MODIFIED → add admin model management endpoints
 tests/test_brain_registry.py    # NEW — ModelRegistry unit tests
+tests/test_admin_models_api.py  # NEW — admin model management API tests
 ```
+
+Notes:
+- `factory.py` continues to handle thin `openai` / `anthropic` client branches directly; no separate `providers/openai.py` or `providers/anthropic.py` module is planned in this refactor.
+- `ModelSpec.provider_config` is intentionally included even though it did not exist in the original monolith, to avoid repeated provider lookups at call sites.
 
 ---
 
@@ -54,10 +60,12 @@ tests/test_brain_registry.py    # NEW — ModelRegistry unit tests
 """
 Default provider and role-to-model configuration data.
 
-This module is pure data — no logic, no imports beyond stdlib.
+This module is configuration data plus env-backed default constants.
 Edit PROVIDERS to add/remove LLM providers.
 Edit MODEL_CONFIGS to change which model each agent role uses by default.
 """
+
+import os
 
 PROVIDERS: dict[str, dict] = {
     "proxy": {
@@ -104,8 +112,8 @@ MODEL_CONFIGS: dict[str, dict] = {
     "zero_report_domain": {"model": "gpt-5.4", "provider": "proxy"},
 }
 
-DEFAULT_LLM_TIMEOUT_SECONDS = 7200
-DEFAULT_LLM_MAX_RETRIES = 2
+DEFAULT_LLM_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "7200"))
+DEFAULT_LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "2"))
 GOOGLE_PROXY_SUPPORTED_THINKING_LEVELS = {"low", "high"}
 ```
 
@@ -210,14 +218,19 @@ _task_model_override: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
 )
 
 
-def set_task_model_override(overrides: dict[str, dict[str, Any]]) -> None:
+from contextvars import Token
+
+
+def set_task_model_override(
+    overrides: dict[str, dict[str, Any]]
+) -> Token[dict[str, dict[str, Any]] | None]:
     """Set per-task model overrides keyed by role for the current async context.
 
     Args:
         overrides: dict mapping role names to override dicts.
                    e.g. {"doc_analyst": {"model": "gemini-2.5-pro"}}
     """
-    _task_model_override.set(overrides)
+    return _task_model_override.set(overrides)
 
 
 def get_task_model_override() -> dict[str, dict[str, Any]] | None:
@@ -225,8 +238,11 @@ def get_task_model_override() -> dict[str, dict[str, Any]] | None:
     return _task_model_override.get()
 
 
-def clear_task_model_override() -> None:
+def clear_task_model_override(token: Token[dict[str, dict[str, Any]] | None] | None = None) -> None:
     """Clear per-task model overrides for the current async context."""
+    if token is not None:
+        _task_model_override.reset(token)
+        return
     _task_model_override.set(None)
 ```
 
@@ -255,20 +271,7 @@ git commit -m "feat(brain): add per-task model override ContextVar"
 - [ ] **Step 1: Create providers package and shared utils**
 
 ```python
-# agent/brain/providers/__init__.py
-"""LLM provider adapters."""
-
-from agent.brain.providers.minimax import MiniMaxOpenAIAdapter
-from agent.brain.providers.gemini import GeminiOpenAIAdapter
-from agent.brain.providers.browser_use import BrowserUseResponsesAdapter
-
-__all__ = ["MiniMaxOpenAIAdapter", "GeminiOpenAIAdapter", "BrowserUseResponsesAdapter"]
-```
-
-Note: this file will cause import errors until Tasks 5-6 create the gemini and browser_use modules. Create a temporary version that only imports minimax for now:
-
-```python
-# agent/brain/providers/__init__.py (temporary — Tasks 5-6 will add remaining imports)
+# agent/brain/providers/__init__.py (temporary — keep empty until Task 6)
 """LLM provider adapters."""
 ```
 

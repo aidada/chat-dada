@@ -562,7 +562,7 @@ class PptDomainTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock
 
         from agent.brain.registry import registry
-        from agent.domains.ppt.workflow import exec_sequential
+        from agent.domains.ppt.workflow import PPT_INNER_RECURSION_LIMIT, exec_sequential
 
         try:
             registry.update("orchestrator", model="MiniMax-M2.7-highspeed", provider="minimax")
@@ -582,9 +582,45 @@ class PptDomainTests(unittest.IsolatedAsyncioTestCase):
 
         mocked_stream.assert_awaited_once()
         self.assertEqual(
+            mocked_stream.await_args.kwargs["config"]["recursion_limit"],
+            PPT_INNER_RECURSION_LIMIT,
+        )
+        self.assertEqual(
+            mocked_stream.await_args.kwargs["config"]["configurable"]["nested_recursion_limit"],
+            PPT_INNER_RECURSION_LIMIT,
+        )
+        self.assertEqual(
             result,
             {"intermediate_results": [{"strategy": "sequential", "output": "ppt final"}]},
         )
+
+    async def test_ppt_sequential_workflow_bounded_failure_on_recursion_limit(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from agent.brain.registry import registry
+        from agent.domains.ppt.workflow import exec_sequential
+        from langgraph.errors import GraphRecursionError
+
+        try:
+            registry.update("orchestrator", model="MiniMax-M2.7-highspeed", provider="minimax")
+            with (
+                patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key"}, clear=False),
+                patch(
+                    "agent.domains.ppt.workflow.stream_nested_graph",
+                    new=AsyncMock(side_effect=GraphRecursionError("limit")),
+                ),
+                patch("agent.domains.ppt.workflow.get_ppt_tools", return_value=[]),
+                patch("agent.domains.ppt.workflow.PPT_SUBAGENTS", []),
+                patch("agent.domains.ppt.workflow._load_officecli_skill", return_value=""),
+            ):
+                result = await exec_sequential({"goal": "介绍一下你自己", "intermediate_results": []})
+        finally:
+            registry.reset()
+
+        self.assertEqual(result["terminal_status"], "bounded_failure")
+        self.assertEqual(result["terminal_reason"], "inner_recursion_limit")
+        self.assertIn("超过", result["final_result"])
+        self.assertFalse(result["evaluations"][0]["passed"])
 
     async def test_ppt_review_pass_does_not_emit_review_stream_event(self) -> None:
         from unittest.mock import AsyncMock
@@ -605,6 +641,44 @@ class PptDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["final_result"], "ppt body")
         self.assertEqual([payload.get("event_type") for payload in collected], ["progress.step"])
         self.assertEqual(collected[0]["content"], "PPT review passed")
+
+    async def test_ppt_evaluate_short_circuits_terminal_failure(self) -> None:
+        from agent.domains.ppt.workflow import evaluate_node
+
+        result = await evaluate_node(
+            {
+                "terminal_status": "bounded_failure",
+                "terminal_reason": "inner_recursion_limit",
+                "final_result": "PPT 生成已中止",
+                "confidence": 0.0,
+            }
+        )
+
+        self.assertEqual(result["final_result"], "PPT 生成已中止")
+        self.assertFalse(result["evaluations"][0]["passed"])
+        self.assertEqual(
+            result["evaluations"][0]["issues"][0]["metadata"]["terminal_status"],
+            "bounded_failure",
+        )
+
+
+class NestedStreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_nested_graph_promotes_nested_recursion_limit(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeGraph:
+            async def astream(self, _input_data, *, config=None, version=None, stream_mode=None, subgraphs=None):
+                captured["config"] = config
+                if False:
+                    yield {}
+
+        await stream_nested_graph(
+            FakeGraph(),
+            {"messages": []},
+            config={"configurable": {"nested_recursion_limit": 7}},
+        )
+
+        self.assertEqual(captured["config"]["recursion_limit"], 7)
 
 
 class PatentDomainTests(unittest.IsolatedAsyncioTestCase):

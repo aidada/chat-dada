@@ -12,7 +12,11 @@ from __future__ import annotations
 from typing import Any
 
 
-def build_understand_goal_prompt(goal: str, skill_summary: str) -> list[dict[str, str]]:
+def build_understand_goal_prompt(
+    goal: str,
+    skill_summary: str,
+    capability_summary: str = "",
+) -> list[dict[str, str]]:
     """Build prompt for understanding user goal and determining execution mode.
 
     Returns a list of messages (system + user) for LLM invocation.
@@ -141,7 +145,11 @@ def build_understand_goal_prompt(goal: str, skill_summary: str) -> list[dict[str
 - 如果涉及多个步骤或跨领域协作 → dag
 - 优先选择 single_skill（比 dag 开销更小）"""
 
-    user_prompt = f"""{skill_summary}
+    capability_section = ""
+    if capability_summary.strip():
+        capability_section = f"\n\n## Runtime Capabilities\n\n{capability_summary.strip()}"
+
+    user_prompt = f"""{skill_summary}{capability_section}
 
 ---
 
@@ -156,7 +164,11 @@ def build_understand_goal_prompt(goal: str, skill_summary: str) -> list[dict[str
     ]
 
 
-def build_direct_answer_prompt(goal: str, conversation_context: str) -> list[dict[str, str]]:
+def build_direct_answer_prompt(
+    goal: str,
+    conversation_context: str,
+    capability_summary: str = "",
+) -> list[dict[str, str]]:
     """Build prompt for direct LLM response without skill invocation.
 
     This replaces the old general_chat capability.
@@ -167,13 +179,23 @@ def build_direct_answer_prompt(goal: str, conversation_context: str) -> list[dic
 1. 简洁明了，避免冗长
 2. 如果涉及技术问题，提供准确信息
 3. 如果用户询问不确定的内容，诚实告知
-4. 可以使用适当的格式化（列表、代码块等）提高可读性"""
+4. 可以使用适当的格式化（列表、代码块等）提高可读性
+5. 如果用户只是在确认你能不能做某类交付，不要假装已经开始执行，也不要声称已经生成文件
+6. 如果用户想做 PPT、文档、报告等交付，但没有给出主题、受众、页数或关键要点，先明确告知还需要这些信息，再继续下一步
+7. 如果上下文说明当前可用桌面本机工具，请优先使用这些工具处理本地文件或本机环境请求，而不是直接声称无法访问
+8. 对有副作用的本机工具保持克制，仅在确有必要时调用；若权限被拒绝或工具离线，再向用户解释限制
+9. 对只读本地文件任务，优先使用 list_dir、file_read、file_search、grep 等专用工具，不要用 shell 代替
+10. 只有当专用工具无法满足需求时，才考虑 shell 这类高风险工具"""
 
     context_section = ""
     if conversation_context:
         context_section = f"\n\n上下文信息：\n{conversation_context}\n\n---\n"
 
-    user_prompt = f"""{context_section}用户问题：
+    capability_section = ""
+    if capability_summary.strip():
+        capability_section = f"\n\n运行时能力：\n{capability_summary.strip()}\n\n---\n"
+
+    user_prompt = f"""{context_section}{capability_section}用户问题：
 {goal}
 
 请直接回答。"""

@@ -13,6 +13,7 @@ from langgraph.types import Command
 from agent.session.protocol import EventType
 from agent.session.runtime import SessionRuntime, is_transient_progress_type
 from agent.platform.state import RouteDecisionPayload
+from agent.hands import DesktopHandsManager, DesktopToolExecutor, LocalToolExecutor, ToolGateway
 from agent.runtime.interaction import (
     reset_preloaded_user_replies,
     reset_task_interaction_handler,
@@ -101,11 +102,29 @@ class TaskService:
         self._conversation_context_builder_factory = conversation_context_builder_factory
         self._embedding_service = embedding_service
         self._conversation_service = conversation_service
+        self._desktop_manager: DesktopHandsManager | None = None
+        self._desktop_executor: DesktopToolExecutor | None = None
+        self._tool_gateway: ToolGateway | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._runner_tasks: dict[str, asyncio.Task[Any]] = {}
         self._checkpointer_cm: Any | None = None
         self._checkpointer: Any | None = None
         self._root_graph: Any | None = None
+
+    def configure_desktop(
+        self,
+        *,
+        manager: DesktopHandsManager,
+        executor: DesktopToolExecutor,
+    ) -> None:
+        self._desktop_manager = manager
+        self._desktop_executor = executor
+        self._tool_gateway = ToolGateway(
+            local=LocalToolExecutor(),
+            session=self._session,
+            desktop_manager=manager,
+            desktop_executor=executor,
+        )
 
     async def _open_checkpointer(self) -> Any:
         candidate = self._checkpointer_factory()
@@ -148,6 +167,11 @@ class TaskService:
     @property
     def redis(self) -> aioredis.Redis:
         return self._redis
+
+    def list_runtime_desktop_tools(self, user_id: str) -> list[dict[str, Any]]:
+        if self._desktop_manager is None:
+            return []
+        return self._desktop_manager.list_tool_descriptors(user_id)
 
     def _track_runner(self, task_id: str, task: asyncio.Task[Any]) -> None:
         self._runner_tasks[task_id] = task
@@ -446,11 +470,6 @@ class TaskService:
                 },
             )
             await self.record_event(task_id, EventType.LIFECYCLE_STARTED.value, {"content": f"开始执行: {execution_task}"})
-            await self.record_event(
-                task_id,
-                EventType.PROGRESS_STEP.value,
-                {"content": f"🧭 Route: {public_route_name} ({route_payload['reason']})", "thread_id": task_id},
-            )
             log.info("Task received user=%s task=%s", user_id, task_text[:80])
         else:
             stored_request = snapshot.get("request_payload", {})
@@ -552,6 +571,9 @@ class TaskService:
                     "nested_resume_value": None,
                     "session": self._session,
                     "conversation_service": self._conversation_service,
+                    "desktop_manager": self._desktop_manager,
+                    "tool_gateway": self._tool_gateway,
+                    "request_user_id": user_id,
                 }
             }
             if latest_checkpoint_id:

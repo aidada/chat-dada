@@ -10,6 +10,19 @@ from domain.auth.services import AuthService
 from infra.db.session import SessionFactory, get_db_session
 
 
+def _extract_session_token(request: Request) -> str:
+    token = request.cookies.get(settings.session_cookie_name, "")
+    if token:
+        return token
+    header_token = request.headers.get("x-session-token", "")
+    if header_token:
+        return header_token
+    query_token = request.query_params.get("session_token", "")
+    if query_token:
+        return query_token
+    return ""
+
+
 async def get_auth_service(session: AsyncSession = Depends(get_db_session)) -> AuthService:
     return AuthService(session)
 
@@ -18,7 +31,7 @@ async def get_current_user(
     request: Request,
     auth_service: AuthService = Depends(get_auth_service),
 ):
-    token = request.cookies.get(settings.session_cookie_name, "")
+    token = _extract_session_token(request)
     if not token:
         raise HTTPException(status_code=401, detail="未登录")
     user, _session = await auth_service.get_user_by_session_token(token)
@@ -31,7 +44,7 @@ async def get_optional_current_user(
     request: Request,
     auth_service: AuthService = Depends(get_auth_service),
 ):
-    token = request.cookies.get(settings.session_cookie_name, "")
+    token = _extract_session_token(request)
     if not token:
         return None
     user, _session = await auth_service.get_user_by_session_token(token)
@@ -51,7 +64,7 @@ async def resolve_current_user_once(request: Request):
 
 
 async def resolve_current_user_once_with_metadata(request: Request):
-    token = request.cookies.get(settings.session_cookie_name, "")
+    token = _extract_session_token(request)
     if not token:
         raise HTTPException(status_code=401, detail="未登录")
 

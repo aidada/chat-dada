@@ -55,7 +55,7 @@ class TestDesktopHandsManager(unittest.IsolatedAsyncioTestCase):
         mgr = DesktopHandsManager()
         ws = FakeWebSocket()
         mgr.register("user_1", ws, {"tools": []})
-        mgr.unregister("user_1")
+        mgr.unregister("user_1", ws)
         self.assertIsNone(mgr.get_connection("user_1"))
 
     async def test_has_tool(self):
@@ -67,3 +67,37 @@ class TestDesktopHandsManager(unittest.IsolatedAsyncioTestCase):
         conn = mgr.get_connection("user_1")
         self.assertTrue(conn.has_tool("officecli"))
         self.assertFalse(conn.has_tool("ffmpeg"))
+
+    async def test_can_query_tool_descriptor(self):
+        mgr = DesktopHandsManager()
+        ws = FakeWebSocket()
+        mgr.register("user_1", ws, {
+            "tools": [
+                {
+                    "name": "list_dir",
+                    "description": "List directory contents",
+                    "parameters": {"type": "object"},
+                    "permission_level": "safe",
+                }
+            ],
+        })
+        descriptor = mgr.get_tool_descriptor("user_1", "list_dir")
+        self.assertIsNotNone(descriptor)
+        self.assertEqual(descriptor["permission_level"], "safe")
+        self.assertEqual(len(mgr.list_tool_descriptors("user_1")), 1)
+
+    async def test_stale_disconnect_does_not_remove_new_connection(self):
+        mgr = DesktopHandsManager()
+        ws_old = FakeWebSocket()
+        ws_new = FakeWebSocket()
+
+        mgr.register("user_1", ws_old, {"tools": [{"name": "officecli"}]})
+        mgr.register("user_1", ws_new, {"tools": [{"name": "list_dir", "permission_level": "safe"}]})
+
+        mgr.unregister("user_1", ws_old)
+
+        conn = mgr.get_connection("user_1")
+        self.assertIsNotNone(conn)
+        assert conn is not None
+        self.assertIs(conn.ws, ws_new)
+        self.assertTrue(conn.has_tool("list_dir"))

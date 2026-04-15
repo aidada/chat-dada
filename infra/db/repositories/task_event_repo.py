@@ -17,6 +17,14 @@ class TaskEventRepository:
         self.session = session
 
     async def append(self, *, task_id: str, event_type: str, payload: dict[str, Any]) -> TaskEvent:
+        task_row = (
+            await self.session.execute(
+                select(TaskRun)
+                .where(TaskRun.task_id == task_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+
         next_seq = await self.session.scalar(
             select(func.coalesce(func.max(TaskEvent.seq), 0) + 1).where(TaskEvent.task_id == task_id)
         )
@@ -31,7 +39,6 @@ class TaskEventRepository:
         )
         self.session.add(row)
 
-        task_row = await self.session.get(TaskRun, task_id)
         if task_row is not None:
             task_row.updated_at = created_at
 

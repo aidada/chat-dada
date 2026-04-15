@@ -24,3 +24,4 @@ class AuthUserView(BaseModel):
 
 class AuthResponse(BaseModel):
     user: AuthUserView
+    session_token: str | None = None

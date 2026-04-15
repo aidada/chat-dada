@@ -26,9 +26,16 @@ class DesktopConnection:
     ws: Any  # WebSocketLike at runtime
     capabilities: dict[str, Any]
     tool_names: set[str] = field(default_factory=set)
+    tool_descriptors: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def has_tool(self, name: str) -> bool:
         return name in self.tool_names
+
+    def get_tool_descriptor(self, name: str) -> dict[str, Any] | None:
+        return self.tool_descriptors.get(name)
+
+    def list_tool_descriptors(self) -> list[dict[str, Any]]:
+        return list(self.tool_descriptors.values())
 
 
 class DesktopHandsManager:
@@ -43,14 +50,23 @@ class DesktopHandsManager:
         ws: Any,
         capabilities: dict[str, Any],
     ) -> DesktopConnection:
+        previous = self._connections.get(user_id)
         tools = capabilities.get("tools", [])
-        tool_names = {t["name"] for t in tools if "name" in t}
+        tool_descriptors = {
+            str(tool["name"]): dict(tool)
+            for tool in tools
+            if isinstance(tool, dict) and "name" in tool
+        }
+        tool_names = set(tool_descriptors)
         conn = DesktopConnection(
             ws=ws,
             capabilities=capabilities,
             tool_names=tool_names,
+            tool_descriptors=tool_descriptors,
         )
         self._connections[user_id] = conn
+        if previous is not None and previous.ws is not ws:
+            log.info("Desktop connection replaced: user=%s", user_id)
         log.info(
             "Desktop connected: user=%s tools=%s",
             user_id,
@@ -58,7 +74,13 @@ class DesktopHandsManager:
         )
         return conn
 
-    def unregister(self, user_id: str) -> None:
+    def unregister(self, user_id: str, ws: Any | None = None) -> None:
+        current = self._connections.get(user_id)
+        if current is None:
+            return
+        if ws is not None and current.ws is not ws:
+            log.info("Desktop disconnect ignored for stale connection: user=%s", user_id)
+            return
         removed = self._connections.pop(user_id, None)
         if removed:
             log.info("Desktop disconnected: user=%s", user_id)
@@ -68,3 +90,15 @@ class DesktopHandsManager:
 
     def is_connected(self, user_id: str) -> bool:
         return user_id in self._connections
+
+    def get_tool_descriptor(self, user_id: str, tool_name: str) -> dict[str, Any] | None:
+        conn = self.get_connection(user_id)
+        if conn is None:
+            return None
+        return conn.get_tool_descriptor(tool_name)
+
+    def list_tool_descriptors(self, user_id: str) -> list[dict[str, Any]]:
+        conn = self.get_connection(user_id)
+        if conn is None:
+            return []
+        return conn.list_tool_descriptors()

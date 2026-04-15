@@ -44,7 +44,7 @@ class ToolGateway:
         self._desktop_executor = desktop_executor
 
     def set_route(self, tool_name: str, target: str) -> None:
-        """Configure routing for a specific tool (local / remote)."""
+        """Configure routing for a specific tool (local / remote / desktop)."""
         self._routing[tool_name] = target
 
     async def execute(self, call: ToolCall, ctx: ToolContext) -> ToolResult:
@@ -62,21 +62,32 @@ class ToolGateway:
         # Desktop routing: if user has an active desktop connection with this tool
         target = self._routing.get(call.tool_name, "local")
         executor = self._local  # default
+        executor_available = True
+        availability_error = ""
+        conn = None
 
-        if (
-            self._desktop_manager is not None
-            and self._desktop_executor is not None
-        ):
+        if self._desktop_manager is not None and self._desktop_executor is not None:
             conn = self._desktop_manager.get_connection(ctx.user_id)
             if conn is not None and conn.has_tool(call.tool_name):
                 executor = self._desktop_executor
                 target = "desktop"
 
+        if self._routing.get(call.tool_name) == "desktop":
+            target = "desktop"
+            if (
+                self._desktop_manager is None
+                or self._desktop_executor is None
+                or conn is None
+                or not conn.has_tool(call.tool_name)
+            ):
+                executor_available = False
+                availability_error = f"Desktop tool unavailable: {call.tool_name}"
+            else:
+                executor = self._desktop_executor
+
         if target != "desktop" and self._routing.get(call.tool_name) == "remote" and self._remote is not None:
             executor = self._remote
             target = "remote"
-
-        await executor.prepare(call, ctx)
 
         # 每次工具调用生成唯一 ID，前端通过 toolCallId 关联 started/completed/failed
         tool_call_id = str(uuid.uuid4())
@@ -92,6 +103,23 @@ class ToolGateway:
             },
         )
 
+        if not executor_available:
+            await self._session.emit_event(
+                call.task_id,
+                EventType.TOOL_FAILED,
+                {
+                    "toolCallId": tool_call_id,
+                    "name":       call.tool_name,
+                    "error":      availability_error,
+                },
+            )
+            return ToolResult(
+                success=False,
+                output="",
+                error=availability_error,
+            )
+
+        await executor.prepare(call, ctx)
         result = await executor.execute(call, ctx)
 
         if result.success:

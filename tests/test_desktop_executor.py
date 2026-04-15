@@ -91,3 +91,33 @@ class TestDesktopToolExecutor(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.success)
         self.assertIn("timeout", result.error.lower())
+
+    async def test_execute_generic_tool_uses_tool_name_as_operation(self):
+        mgr = DesktopHandsManager()
+        executor = DesktopToolExecutor(mgr)
+        ws = FakeWebSocket()
+        mgr.register("user_1", ws, {
+            "tools": [{"name": "list_dir", "parameters": {"type": "object"}, "permission_level": "safe"}],
+        })
+
+        call = ToolCall(tool_name="list_dir", params={"path": "~/Downloads"}, task_id="task_2")
+        ctx = ToolContext(user_id="user_1", task_id="task_2")
+
+        async def simulate_client_response():
+            while not ws.sent:
+                await asyncio.sleep(0.01)
+            inv_id = ws.sent[0]["payload"]["invocation_id"]
+            executor.resolve_invocation(inv_id, {
+                "success": True,
+                "output": "file: demo.pdf",
+                "artifacts": [],
+                "execution_time_ms": 80,
+            })
+
+        task = asyncio.create_task(simulate_client_response())
+        result = await executor.execute(call, ctx)
+        await task
+
+        self.assertTrue(result.success)
+        self.assertEqual(ws.sent[0]["payload"]["tool"], "list_dir")
+        self.assertEqual(ws.sent[0]["payload"]["operation"], "list_dir")
