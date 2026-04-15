@@ -1,3 +1,4 @@
+alembic>=1.16.5
 aiofiles==25.1.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
@@ -11,6 +12,7 @@ attrs==25.4.0
 authlib==1.6.6
 backoff==2.2.1
 beautifulsoup4==4.14.3
+boto3>=1.35.0
 browser-use==0.12.1
 browser-use-sdk==2.0.15
 bubus==1.5.6
@@ -64,6 +66,7 @@ langchain-tavily==0.2.17
 langchain-text-splitters==1.1.1
 langgraph==1.1.2
 langgraph-checkpoint==4.0.1
+langgraph-checkpoint-postgres>=3.0.5
 langgraph-prebuilt==1.0.8
 langgraph-sdk==0.3.11
 langsmith==0.7.17
@@ -81,10 +84,11 @@ ollama==0.6.1
 openai==2.16.0
 openpyxl==3.1.5
 orjson==3.11.7
+pgvector>=0.4.2
+pwdlib[argon2]>=0.3.0
 ormsgpack==1.12.2
 packaging==26.0
 pfzy==0.3.4
-pgvector>=0.3.0
 pillow==12.1.0
 playwright==1.58.0
 pluggy==1.6.0
@@ -104,8 +108,6 @@ pydantic-settings==2.13.1
 pyee==13.0.1
 pygments==2.19.2
 pyjwt==2.11.0
-pyobjc-core==12.1
-pyobjc-framework-cocoa==12.1
 pyotp==2.9.0
 pyparsing==3.3.2
 pypdf==6.6.2
@@ -114,7 +116,7 @@ python-dateutil==2.9.0.post0
 python-docx==1.2.0
 python-dotenv==1.2.1
 python-multipart==0.0.22
-python-pptx==1.0.2
+psycopg[binary]>=3.2.9
 pyyaml==6.0.3
 redis==7.3.0
 referencing==0.37.0
@@ -144,6 +146,7 @@ uritemplate==4.2.0
 urllib3==2.6.3
 uuid-utils==0.14.1
 uuid7==0.1.0
+vsdx>=0.6.0
 uvicorn==0.41.0
 uvloop==0.22.1
 watchfiles==1.1.1

@@ -1,817 +1,410 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import browser_use
-from langchain_core.messages import AIMessage, ToolMessage
-
-from agents import deep_research
-
-
-class _FakeBrowserProfile:
-    def __init__(self, headless: bool = False) -> None:
-        self.headless = headless
-
-
-class _FakeBrowserSession:
-    def __init__(self, browser_profile=None, **kwargs) -> None:
-        self.browser_profile = browser_profile
-        self.kwargs = kwargs
-
-
-class _FakeAgentResult:
-    def final_result(self) -> str:
-        return "Browser task done."
-
-
-class _FakeBrowserAgent:
-    def __init__(self, task, llm, browser, max_actions_per_step) -> None:
-        self.task = task
-        self.llm = llm
-        self.browser = browser
-        self.max_actions_per_step = max_actions_per_step
-
-    async def run(self, max_steps: int = 10):
-        return _FakeAgentResult()
+import httpx
+from agent.capabilities.review_gates import ReviewResult
+from agent.capabilities.memory import ResearchMemory
+from agent.domains.research.config import (
+    ACADEMIC_DELIVERABLE_TYPE,
+    ACADEMIC_PAPER_GUIDANCE_PROFILE,
+    DEFAULT_DELIVERABLE_TYPE,
+    get_deliverable_profile,
+    normalize_deliverable_type,
+    resolve_deliverable_type,
+    resolve_report_profile,
+)
+from agent.domains.research.reviewers import ResearchReviewGate
+from agent.domains.research.workflow import (
+    _actionable_revision_targets,
+    _should_retry_workflow_llm_node,
+    aggregate_draft_node,
+    build_research_workflow_graph,
+    checkpoint_a_node,
+    checkpoint_b_node,
+    planner_node,
+    synthesize_final_node,
+)
 
 
-class _FakeBoundLLM:
-    async def ainvoke(self, messages):
-        return "ok"
-
-
-class _FakeLLM:
-    def bind_tools(self, tools):
-        return _FakeBoundLLM()
-
-
-class DeepResearchTests(unittest.IsolatedAsyncioTestCase):
-    def test_resolve_report_profile_auto_selects_academic_paper_guidance(self) -> None:
-        profile = deep_research._resolve_report_profile(
+class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    def test_resolve_report_profile_auto_selects_academic(self) -> None:
+        profile = resolve_report_profile(
             "请做文献综述，并说明这篇论文后续应该怎么写 introduction 和 experiment",
         )
+        self.assertEqual(profile, ACADEMIC_PAPER_GUIDANCE_PROFILE)
 
-        self.assertEqual(profile, deep_research.ACADEMIC_PAPER_GUIDANCE_PROFILE)
+    def test_resolve_deliverable_type_defaults_to_literature_review(self) -> None:
+        deliverable = resolve_deliverable_type("请分析这个技术方向的发展趋势")
+        self.assertEqual(deliverable, DEFAULT_DELIVERABLE_TYPE)
 
-    def test_resolve_report_profile_honors_explicit_override(self) -> None:
-        profile = deep_research._resolve_report_profile(
-            "请做市场调研",
-            requested_profile="academic",
+    def test_normalize_deliverable_type_maps_free_text_sci_article_to_paper_guidance(self) -> None:
+        deliverable = normalize_deliverable_type(
+            "Full-length research article (SCI journal paper, English)"
         )
-
-        self.assertEqual(profile, deep_research.ACADEMIC_PAPER_GUIDANCE_PROFILE)
-
-    def test_build_research_messages_include_academic_writing_sections(self) -> None:
-        messages = deep_research._build_research_messages(
-            "请帮我做论文引言相关的文献综述",
-            "### note\nexisting",
-            deep_research.ACADEMIC_PAPER_GUIDANCE_PROFILE,
-        )
-
-        self.assertEqual(len(messages), 2)
-        self.assertIn("科研论文写作导向", messages[0].content)
-        self.assertIn("## 对后续论文写作的明确建议", messages[1].content)
-        self.assertIn("## 建议补充的实验与材料", messages[1].content)
-
-    async def test_browser_navigate_uses_supported_browser_use_imports(self) -> None:
-        with (
-            patch.object(browser_use, "Agent", _FakeBrowserAgent),
-            patch.object(browser_use, "BrowserSession", _FakeBrowserSession),
-            patch.object(browser_use, "BrowserProfile", _FakeBrowserProfile),
-            patch("agents.deep_research.run.get_browser_use_llm", return_value="mock-llm") as mocked_get_llm,
-        ):
-            result = await deep_research.browser_navigate.ainvoke(
-                {"task_description": "Open example.com"}
-            )
-
-        mocked_get_llm.assert_called_once_with("deep_research")
-        self.assertEqual(result, "Browser task done.")
-
-    async def test_research_planner_uses_deep_research_role(self) -> None:
-        state = {"messages": [], "query": "GNSS", "step_count": 0}
-
-        with patch("agents.deep_research.graphs.get_llm", return_value=_FakeLLM()) as mocked_get_llm:
-            result = await deep_research.research_planner(state)
-
-        mocked_get_llm.assert_called_once_with("deep_research")
-        self.assertEqual(result["step_count"], 1)
-        self.assertEqual(result["messages"], ["ok"])
-
-    async def test_research_planner_builds_compact_prompt_from_context(self) -> None:
-        captured: dict[str, object] = {}
-
-        class _InspectBoundLLM:
-            async def ainvoke(self, messages):
-                captured["messages"] = messages
-                return AIMessage(content="final answer")
-
-        class _InspectLLM:
-            def bind_tools(self, tools):
-                return _InspectBoundLLM()
-
-        state = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[{"id": "call_1", "name": "brave_search", "args": {"query": "GNSS"}}],
-                ),
-                ToolMessage(content="A" * 1200, tool_call_id="call_1", name="brave_search"),
-            ],
-            "query": "GNSS NLOS",
-            "step_count": 1,
-        }
-
-        with patch("agents.deep_research.graphs.get_llm", return_value=_InspectLLM()):
-            result = await deep_research.research_planner(state)
-
-        prompt_messages = captured["messages"]
-        self.assertEqual(len(prompt_messages), 2)
-        self.assertIn("当前研究笔记（已压缩）", prompt_messages[1].content)
-        # Three-tier context is now used in prompt
-        self.assertIn("## 研究总结", prompt_messages[1].content)
-        self.assertIn("## 最近发现（完整）", prompt_messages[1].content)
-        # research_context is populated
-        self.assertIn("research_context", result)
-        self.assertTrue(len(result["research_context"]["entries"]) > 0)
-
-    async def test_research_finish_extracts_text_from_responses_blocks(self) -> None:
-        state = {
-            "messages": [
-                AIMessage(
-                    content=[
-                        {"id": "rs_1", "summary": [], "type": "reasoning"},
-                        {"type": "text", "text": "**直接结论**\n\n可以，但依赖额外几何约束。"},
-                    ]
-                )
-            ],
-            "query": "GNSS NLOS",
-            "step_count": 2,
-        }
-
-        result = deep_research.research_finish(state)
-
-        self.assertEqual(result["_final_text"], "## 直接结论\n\n可以，但依赖额外几何约束。")
-
-    async def test_research_finish_skips_thinking_only_message_and_uses_previous_text(self) -> None:
-        state = {
-            "messages": [
-                AIMessage(content=[{"type": "text", "text": "**直接结论**\n\n前一轮已经给出结论。"}]),
-                AIMessage(content=[{"type": "thinking", "thinking": "继续检索。"}]),
-            ],
-            "query": "GNSS NLOS",
-            "step_count": 2,
-        }
-
-        result = deep_research.research_finish(state)
-
-        self.assertEqual(result["_final_text"], "## 直接结论\n\n前一轮已经给出结论。")
-
-    async def test_research_finish_falls_back_to_research_context(self) -> None:
-        from capabilities.context_manager import FindingEntry, ResearchContext
-        ctx = ResearchContext()
-        ctx.add_entry(FindingEntry(step=1, tool_name="web_search", query="q",
-                                   raw_content="已有检索笔记。"))
-        state = {
-            "messages": [
-                AIMessage(content=[{"type": "thinking", "thinking": "继续检索。"}]),
-            ],
-            "query": "GNSS NLOS",
-            "step_count": 2,
-            "research_context": ctx.to_dict(),
-        }
-
-        result = deep_research.research_finish(state)
-
-        self.assertIn("已有检索笔记", result["_final_text"])
-
-    async def test_run_rewrites_final_report_with_markdown_headings(self) -> None:
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                return {"_final_text": "raw notes"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(
-                    content=[
-                        {"type": "reasoning", "summary": []},
-                        {"type": "text", "text": "**直接结论**\n\n结论更聚焦。"},
-                    ]
-                )
-
-        with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=_FakeGraph()),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-        ):
-            result = await deep_research.run("GNSS NLOS")
-
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["result"], "## 直接结论\n\n结论更聚焦。")
-
-    async def test_run_accepts_nested_search_query_dict_with_report_profile(self) -> None:
-        captured: dict[str, object] = {}
-
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                captured["state"] = state
-                return {"_final_text": "raw notes"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="## 文献综述正文\n\n聚焦论文写作建议。")
-
-        with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=_FakeGraph()),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-        ):
-            result = await deep_research.run(
-                {
-                    "search_query": {
-                        "query": "请做文献综述并指导后续论文写作",
-                        "report_profile": "academic_paper_guidance",
-                    }
-                }
-            )
-
-        self.assertEqual(captured["state"]["query"], "请做文献综述并指导后续论文写作")
-        self.assertEqual(
-            captured["state"]["report_profile"],
-            deep_research.ACADEMIC_PAPER_GUIDANCE_PROFILE,
-        )
-        self.assertEqual(result["result"], "## 文献综述正文\n\n聚焦论文写作建议。")
-
-    async def test_rewrite_final_report_uses_academic_profile_instructions(self) -> None:
-        captured: dict[str, object] = {}
-
-        class _InspectRewriteLLM:
-            async def ainvoke(self, messages):
-                captured["messages"] = messages
-                return AIMessage(content="## 文献综述正文\n\nAcademic draft.")
-
-        with patch("agents.deep_research.utils.get_llm", return_value=_InspectRewriteLLM()):
-            result = await deep_research._rewrite_final_report(
-                "请帮我做后续论文写作指导",
-                "raw notes",
-                deep_research.ACADEMIC_PAPER_GUIDANCE_PROFILE,
-            )
-
-        prompt_messages = captured["messages"]
-        self.assertIn("对后续论文写作的明确建议", prompt_messages[0].content)
-        self.assertIn("当前输出模板：academic_paper_guidance", prompt_messages[1].content)
-        self.assertEqual(result, "## 文献综述正文\n\nAcademic draft.")
-
-    async def test_research_planner_populates_research_context(self) -> None:
-        """Verify research_planner returns research_context with entries."""
-        class _InspectBoundLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="continuing research")
-
-        class _InspectLLM:
-            def bind_tools(self, tools):
-                return _InspectBoundLLM()
-
-        state = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[{"id": "call_1", "name": "web_search", "args": {"query": "test"}}],
-                ),
-                ToolMessage(content="result from search https://example.com", tool_call_id="call_1", name="web_search"),
-            ],
-            "query": "test query",
-            "step_count": 1,
-            "research_context": {},
-            "task_id": "",
-        }
-
-        with patch("agents.deep_research.graphs.get_llm", return_value=_InspectLLM()):
-            result = await deep_research.research_planner(state)
-
-        self.assertIn("research_context", result)
-        ctx = result["research_context"]
-        self.assertIsInstance(ctx, dict)
-        self.assertTrue(len(ctx.get("entries", [])) > 0)
-        self.assertEqual(ctx["entries"][0]["tool_name"], "web_search")
-
-    async def test_run_creates_research_memory(self) -> None:
-        """Verify run() initializes ResearchMemory and saves final report."""
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                return {"_final_text": "raw notes"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="## 直接结论\n\nRewritten.")
-
-        with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=_FakeGraph()),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
-        ):
-            mock_instance = MagicMock()
-            MockMemory.return_value = mock_instance
-
-            result = await deep_research.run("test query")
-
-        self.assertEqual(result["status"], "ok")
-        mock_instance.init.assert_called_once()
-        mock_instance.save_final_report.assert_called_once()
-
-    async def test_run_backward_compat_no_research_context(self) -> None:
-        """Existing callers with simple string input still get ok result."""
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                # Verify new fields are present with defaults
-                self.captured_state = state
-                return {"_final_text": "notes"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="## 直接结论\n\nDone.")
-
-        fake_graph = _FakeGraph()
-
-        with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
-        ):
-            MockMemory.return_value = MagicMock()
-            result = await deep_research.run("simple question")
-
-        self.assertEqual(result["status"], "ok")
-        self.assertIn("直接结论", result["result"])
-        # Verify state had new fields
-        self.assertEqual(fake_graph.captured_state["research_context"], {})
-        self.assertIsInstance(fake_graph.captured_state["task_id"], str)
-        self.assertEqual(fake_graph.captured_state["progress"], {})
-
-    async def test_research_planner_populates_progress(self) -> None:
-        """Verify research_planner returns progress dict with tracked searches."""
-        class _InspectBoundLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="continuing")
-
-        class _InspectLLM:
-            def bind_tools(self, tools):
-                return _InspectBoundLLM()
-
-        state = {
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[{"id": "call_1", "name": "web_search", "args": {"query": "GNSS accuracy"}}],
-                ),
-                ToolMessage(content="GNSS provides 3m accuracy.", tool_call_id="call_1", name="web_search"),
-            ],
-            "query": "GNSS research",
-            "step_count": 1,
-            "research_context": {},
-            "task_id": "",
-            "progress": {},
-        }
-
-        with patch("agents.deep_research.graphs.get_llm", return_value=_InspectLLM()):
-            result = await deep_research.research_planner(state)
-
-        self.assertIn("progress", result)
-        progress = result["progress"]
-        self.assertIn("GNSS accuracy", progress["completed_searches"])
-        self.assertTrue(len(progress["key_findings_so_far"]) > 0)
-
-    def test_build_research_messages_attention_block(self) -> None:
-        """Verify attention_block appears at end of prompt."""
-        block = "---\n研究进度：\n目标：test\n---"
-        messages = deep_research._build_research_messages(
-            "test query", "notes", attention_block=block,
-        )
-        self.assertIn(block, messages[1].content)
-
-    async def test_run_resume_from_checkpoint(self) -> None:
-        """Verify run() resumes from checkpoint when resume_task_id is given."""
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                self.captured_state = state
-                return {"_final_text": "resumed notes"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="## 直接结论\n\nResumed.")
-
-        fake_graph = _FakeGraph()
-
-        with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
-        ):
-            mock_instance = MagicMock()
-            mock_instance.load_checkpoint.return_value = {
-                "step_count": 5,
-                "research_context": {"entries": [], "summary": "", "current_step": 5},
-                "progress": {"original_query": "GNSS", "completed_searches": ["q1"], "failed_searches": [], "key_findings_so_far": [], "remaining_gaps": [], "subtasks_status": [], "clarified_goal": ""},
-            }
-            mock_instance.load_meta.return_value = {"query": "GNSS research", "report_profile": "default"}
-            MockMemory.return_value = mock_instance
-
-            result = await deep_research.run({"resume_task_id": "research_abc123"})
-
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(fake_graph.captured_state["step_count"], 5)
-
-    async def test_run_resume_missing_checkpoint_falls_back(self) -> None:
-        """Verify run() gracefully falls back when checkpoint is missing."""
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                self.captured_state = state
-                return {"_final_text": "fresh notes"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="## 直接结论\n\nFresh.")
-
-        fake_graph = _FakeGraph()
-
-        with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
-        ):
-            mock_instance = MagicMock()
-            mock_instance.load_checkpoint.return_value = None
-            mock_instance.init.return_value = None
-            MockMemory.return_value = mock_instance
-
-            result = await deep_research.run({"query": "test", "resume_task_id": "nonexistent"})
-
-        self.assertEqual(result["status"], "ok")
-        # Should start from step 0 since no checkpoint
-        self.assertEqual(fake_graph.captured_state["step_count"], 0)
-
-    async def test_summary_generated_at_interval(self) -> None:
-        """Verify _generate_structured_summary works correctly."""
-        class _SummaryLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="Summary of research progress")
-
-        from capabilities.context_manager import ResearchContext
-        from capabilities.progress_tracker import ProgressTracker
-        ctx = ResearchContext()
-        tracker = ProgressTracker(original_query="test")
-        tracker.record_search("q1", success=True)
-
-        with patch("agents.deep_research.utils.get_llm", return_value=_SummaryLLM()):
-            summary = await deep_research._generate_structured_summary("test query", ctx, tracker)
-        self.assertIn("Summary", summary)
-
-        # Verify the interval logic: step divisible by SUMMARY_INTERVAL should trigger
-        self.assertEqual(deep_research.SUMMARY_INTERVAL % deep_research.SUMMARY_INTERVAL, 0)
-
-    async def test_summary_not_generated_before_interval(self) -> None:
-        """Verify summary is NOT generated before SUMMARY_INTERVAL."""
-        # step=3 should not trigger summary (SUMMARY_INTERVAL=6)
-        self.assertNotEqual(3 % deep_research.SUMMARY_INTERVAL, 0)
-
-    def test_core_tools_include_memory_tools(self) -> None:
-        """Verify CORE_TOOLS includes save/recall research notes."""
-        tool_names = [t.name for t in deep_research.CORE_TOOLS]
-        self.assertIn("save_research_note", tool_names)
-        self.assertIn("recall_research_notes", tool_names)
-
-    def test_hierarchical_graph_compiles(self) -> None:
-        """Verify the hierarchical graph compiles without errors."""
-        with patch("core.registry.get_tools_for_agent", return_value=[]):
-            graph = deep_research.build_hierarchical_research_graph()
+        self.assertEqual(deliverable, ACADEMIC_DELIVERABLE_TYPE)
+        self.assertEqual(get_deliverable_profile(deliverable).name, ACADEMIC_DELIVERABLE_TYPE)
+
+    def test_build_research_workflow_graph_compiles(self) -> None:
+        graph = build_research_workflow_graph()
         self.assertIsNotNone(graph)
+        for node_name in ("intake", "planner", "aggregate_draft", "optimize_modules", "synthesize_final"):
+            self.assertIsNotNone(graph.builder.nodes[node_name].retry_policy)
 
-    async def test_run_hierarchical_mode(self) -> None:
-        """Verify run() uses hierarchical graph when requested."""
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                self.captured_state = state
-                return {"_final_text": "hierarchical findings"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="## 直接结论\n\nHierarchical done.")
-
-        fake_graph = _FakeGraph()
-
-        with (
-            patch("agents.deep_research.graphs.build_hierarchical_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
-        ):
-            MockMemory.return_value = MagicMock()
-            result = await deep_research.run({"query": "test", "hierarchical": True})
-
-        self.assertEqual(result["status"], "ok")
-        self.assertIn("research_plan", fake_graph.captured_state)
-        self.assertIn("current_subtask", fake_graph.captured_state)
-
-    def test_parallel_graph_compiles(self) -> None:
-        """Verify the parallel graph compiles without errors."""
-        with patch("core.registry.get_tools_for_agent", return_value=[]):
-            graph = deep_research.build_parallel_research_graph()
-        self.assertIsNotNone(graph)
-
-    async def test_run_parallel_mode(self) -> None:
-        """Verify run() uses parallel graph when requested."""
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                self.captured_state = state
-                return {"_final_text": "parallel findings"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="## 直接结论\n\nParallel done.")
-
-        fake_graph = _FakeGraph()
-
-        with (
-            patch("agents.deep_research.graphs.build_parallel_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
-        ):
-            MockMemory.return_value = MagicMock()
-            result = await deep_research.run({"query": "test", "parallel": True})
-
-        self.assertEqual(result["status"], "ok")
-        self.assertIn("research_plan", fake_graph.captured_state)
-        self.assertEqual(fake_graph.captured_state["research_plan"], {})
-
-    async def test_run_empty_query_returns_error(self) -> None:
-        result = await deep_research.run("")
-        self.assertEqual(result["status"], "error")
-        self.assertIn("不能为空", result["result"])
-
-    async def test_run_empty_dict_query_returns_error(self) -> None:
-        result = await deep_research.run({"query": ""})
-        self.assertEqual(result["status"], "error")
-        self.assertIn("不能为空", result["result"])
-
-    async def test_run_long_query_truncated(self) -> None:
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                self.captured_state = state
-                return {"_final_text": "notes"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="## 直接结论\n\nDone.")
-
-        fake_graph = _FakeGraph()
-        long_query = "A" * 15000
-
-        with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
-        ):
-            MockMemory.return_value = MagicMock()
-            result = await deep_research.run(long_query)
-
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(len(fake_graph.captured_state["query"]), 10000)
-
-    async def test_synthesize_parallel_findings_basic(self) -> None:
-        class _SynthLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="合并后的发现报告")
-
-        with patch("agents.deep_research.utils.get_llm", return_value=_SynthLLM()):
-            result = await deep_research._synthesize_parallel_findings(
-                "test query",
-                {"sub_1": "发现1", "sub_2": "发现2"},
-                "default",
-            )
-        self.assertIn("合并后的发现报告", result)
-
-    async def test_synthesize_parallel_findings_fallback(self) -> None:
-        """LLM failure should be catchable for fallback."""
-        class _FailLLM:
-            async def ainvoke(self, messages):
-                raise ConnectionError("LLM unavailable")
-
-        with patch("agents.deep_research.utils.get_llm", return_value=_FailLLM()):
-            with self.assertRaises((ConnectionError, OSError)):
-                await deep_research._synthesize_parallel_findings(
-                    "test query", {"sub_1": "f1"}, "default",
-                )
-
-    async def test_retry_async_succeeds_first_try(self) -> None:
-        call_count = 0
-        async def _ok():
-            nonlocal call_count
-            call_count += 1
-            return "success"
-
-        result = await deep_research._retry_async(_ok, max_retries=2, delay=0.01)
-        self.assertEqual(result, "success")
-        self.assertEqual(call_count, 1)
-
-    async def test_retry_async_succeeds_on_second_try(self) -> None:
-        call_count = 0
-        async def _flaky():
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise OSError("transient")
-            return "recovered"
-
-        result = await deep_research._retry_async(_flaky, max_retries=2, delay=0.01)
-        self.assertEqual(result, "recovered")
-        self.assertEqual(call_count, 2)
-
-    async def test_retry_async_raises_after_max_retries(self) -> None:
-        async def _always_fail():
-            raise OSError("persistent failure")
-
-        with self.assertRaises(OSError):
-            await deep_research._retry_async(_always_fail, max_retries=1, delay=0.01)
-
-    async def test_retry_async_no_retry_on_value_error(self) -> None:
-        call_count = 0
-        async def _bad_input():
-            nonlocal call_count
-            call_count += 1
-            raise ValueError("bad")
-
-        with self.assertRaises(ValueError):
-            await deep_research._retry_async(_bad_input, max_retries=2, delay=0.01)
-        self.assertEqual(call_count, 1)
-
-    def test_config_from_dict_defaults(self) -> None:
-        config = deep_research.ResearchConfig.from_dict({})
-        self.assertEqual(config.max_steps, 15)
-        self.assertEqual(config.checkpoint_interval, 5)
-        self.assertEqual(config.summary_interval, 6)
-        self.assertEqual(config.max_parallel_workers, 3)
-
-    def test_config_from_dict_custom(self) -> None:
-        config = deep_research.ResearchConfig.from_dict({"max_steps": 5, "checkpoint_interval": 2})
-        self.assertEqual(config.max_steps, 5)
-        self.assertEqual(config.checkpoint_interval, 2)
-        self.assertEqual(config.summary_interval, 6)  # default
-
-    async def test_run_with_custom_config(self) -> None:
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                self.captured_state = state
-                return {"_final_text": "notes"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="## 直接结论\n\nDone.")
-
-        fake_graph = _FakeGraph()
-
-        with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph) as mock_build,
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
-        ):
-            MockMemory.return_value = MagicMock()
-            result = await deep_research.run({"query": "test", "config": {"max_steps": 3}})
-
-        self.assertEqual(result["status"], "ok")
-        call_args = mock_build.call_args
-        config_arg = call_args[0][0] if call_args[0] else call_args[1].get("config")
-        self.assertEqual(config_arg.max_steps, 3)
-
-    def test_research_should_continue_non_ai_last_message(self) -> None:
-        """Non-AIMessage last message should return 'finish'."""
-        from langchain_core.messages import HumanMessage
-        state = {"messages": [HumanMessage(content="test")], "step_count": 0, "query": "test"}
-        result = deep_research.research_should_continue(state)
-        self.assertEqual(result, "finish")
-
-    def test_research_finish_no_messages(self) -> None:
-        """Empty messages list should not crash."""
-        state = {"messages": [], "query": "test", "step_count": 0}
-        result = deep_research.research_finish(state)
-        self.assertIn("_final_text", result)
-
-    async def test_run_exception_in_memory_init_continues(self) -> None:
-        """Memory init failure should not prevent research from running."""
-        class _FakeGraph:
-            async def ainvoke(self, state):
-                self.captured_state = state
-                return {"_final_text": "notes"}
-
-        class _RewriteLLM:
-            async def ainvoke(self, messages):
-                return AIMessage(content="## 直接结论\n\nDone.")
-
-        fake_graph = _FakeGraph()
-
-        with (
-            patch("agents.deep_research.graphs.build_research_graph", return_value=fake_graph),
-            patch("agents.deep_research.utils.get_llm", return_value=_RewriteLLM()),
-            patch("agents.deep_research.run.ResearchMemory") as MockMemory,
-        ):
-            mock_instance = MagicMock()
-            mock_instance.init.side_effect = OSError("disk full")
-            MockMemory.return_value = mock_instance
-
-            result = await deep_research.run("test query")
-
-        self.assertEqual(result["status"], "ok")
-        # task_id should be empty since init failed
-        self.assertEqual(fake_graph.captured_state["task_id"], "")
-
-
-class SearchToolSelectionTests(unittest.TestCase):
-    """Tests for _select_search_tools and _apply_tool_selection in graphs.py."""
-
-    def _make_tool(self, name: str) -> MagicMock:
-        t = MagicMock()
-        t.name = name
-        return t
-
-    def _make_all_search_tools(self) -> list:
-        return [self._make_tool(n) for n in ("web_search", "brave_search", "academic_search", "exa_deep_search")]
-
-    def test_early_step_general_query(self):
-        """Steps 0-3 with general query: only web_search + brave_search."""
-        from agents.deep_research.graphs import _select_search_tools
-        tools = self._make_all_search_tools()
-        state = {"step_count": 0, "query": "how does GPS work", "progress": {}}
-        selected = _select_search_tools(state, tools)
-        names = {t.name for t in selected}
-        self.assertEqual(names, {"web_search", "brave_search"})
-
-    def test_early_step_academic_query(self):
-        """Steps 0-3 with academic query: adds academic_search."""
-        from agents.deep_research.graphs import _select_search_tools
-        tools = self._make_all_search_tools()
-        state = {"step_count": 1, "query": "请帮我写一篇关于GNSS多路径的论文", "progress": {}}
-        selected = _select_search_tools(state, tools)
-        names = {t.name for t in selected}
-        self.assertIn("academic_search", names)
-        self.assertNotIn("exa_deep_search", names)
-
-    def test_late_step_opens_exa(self):
-        """Step >= 4 opens exa_deep_search."""
-        from agents.deep_research.graphs import _select_search_tools
-        tools = self._make_all_search_tools()
-        state = {"step_count": 5, "query": "test query", "progress": {}}
-        selected = _select_search_tools(state, tools)
-        names = {t.name for t in selected}
-        self.assertIn("exa_deep_search", names)
-
-    def test_gaps_with_paper_keyword_opens_academic_and_exa_early(self):
-        """Gaps mentioning 论文 opens academic_search and exa at step >= 2."""
-        from agents.deep_research.graphs import _select_search_tools
-        tools = self._make_all_search_tools()
-        state = {
-            "step_count": 2,
-            "query": "general question",
-            "progress": {"remaining_gaps": ["缺少相关论文的实验数据"]},
-        }
-        selected = _select_search_tools(state, tools)
-        names = {t.name for t in selected}
-        self.assertIn("academic_search", names)
-        self.assertIn("exa_deep_search", names)
-
-    def test_gaps_keyword_at_step_1_no_exa(self):
-        """Gaps with keyword at step 1: academic yes, exa no (needs step >= 2)."""
-        from agents.deep_research.graphs import _select_search_tools
-        tools = self._make_all_search_tools()
-        state = {
-            "step_count": 1,
-            "query": "general question",
-            "progress": {"remaining_gaps": ["need paper data"]},
-        }
-        selected = _select_search_tools(state, tools)
-        names = {t.name for t in selected}
-        self.assertIn("academic_search", names)
-        self.assertNotIn("exa_deep_search", names)
-
-    def test_many_findings_removes_brave(self):
-        """8+ findings removes brave_search."""
-        from agents.deep_research.graphs import _select_search_tools
-        tools = self._make_all_search_tools()
-        state = {
-            "step_count": 5,
-            "query": "test",
-            "progress": {"key_findings_so_far": [f"finding {i}" for i in range(10)]},
-        }
-        selected = _select_search_tools(state, tools)
-        names = {t.name for t in selected}
-        self.assertNotIn("brave_search", names)
-        self.assertIn("web_search", names)
-
-    def test_apply_tool_selection_preserves_non_search_tools(self):
-        """_apply_tool_selection keeps non-search tools unchanged."""
-        from agents.deep_research.graphs import _apply_tool_selection
-        all_tools = self._make_all_search_tools() + [
-            self._make_tool("browser_navigate"),
-            self._make_tool("ask_user_clarification"),
+    def test_actionable_revision_targets_preserves_non_terminal_revision_targets(self) -> None:
+        targets = [
+            {"module_id": "related_work"},
+            {"module_id": "argument_map"},
+            {"module_id": "limitations"},
         ]
-        state = {"step_count": 0, "query": "test", "progress": {}}
-        selected = _apply_tool_selection(state, all_tools)
-        names = {t.name for t in selected}
-        self.assertIn("browser_navigate", names)
-        self.assertIn("ask_user_clarification", names)
+        statuses = {
+            "related_work": "blocked",
+            "argument_map": "skipped",
+            "limitations": "needs_revision",
+        }
+        actionable = _actionable_revision_targets(targets, statuses)
+        self.assertEqual([item["module_id"] for item in actionable], ["related_work", "argument_map", "limitations"])
 
+    def test_workflow_llm_retry_policy_matches_transient_gateway_errors(self) -> None:
+        self.assertTrue(_should_retry_workflow_llm_node(httpx.RemoteProtocolError("incomplete chunked read")))
+        self.assertTrue(_should_retry_workflow_llm_node(RuntimeError("502 Bad Gateway")))
+        self.assertFalse(_should_retry_workflow_llm_node(ValueError("invalid planner json")))
+
+    async def test_research_review_gate_emits_revision_targets(self) -> None:
+        gate = ResearchReviewGate()
+        review: ReviewResult = await gate.evaluate(
+            {
+                "brief": {
+                    "deliverable_type": "paper_guidance",
+                    "clarified_goal": "为论文写作准备研究草案",
+                },
+                "plan": {
+                    "modules": [
+                        {"module_id": "problem_definition"},
+                        {"module_id": "related_work"},
+                        {"module_id": "method_candidates"},
+                        {"module_id": "experiment_design"},
+                        {"module_id": "argument_map"},
+                        {"module_id": "contributions"},
+                        {"module_id": "limitations"},
+                    ]
+                },
+                "report": "## 文献综述正文\n\n只有很短的草案。",
+                "module_outputs": {
+                    "problem_definition": {"content": "问题定义"},
+                    "related_work": {"content": "没有引用的 related work"},
+                },
+                "evidence_bank": [],
+            }
+        )
+
+        self.assertFalse(review.passed)
+        self.assertTrue(review.revision_targets)
+        self.assertTrue(any(target.module_id == "related_work" for target in review.revision_targets))
+
+    async def test_research_review_gate_accepts_semantic_english_sections_for_intent_alignment(self) -> None:
+        gate = ResearchReviewGate()
+        dimensions = await gate.dimension_checks(
+            {
+                "brief": {
+                    "deliverable_type": "paper_guidance",
+                    "clarified_goal": "Produce an English SCI paper roadmap",
+                },
+                "plan": {
+                    "modules": [
+                        {"module_id": "problem_definition"},
+                        {"module_id": "related_work"},
+                        {"module_id": "method_candidates"},
+                        {"module_id": "experiment_design"},
+                        {"module_id": "argument_map"},
+                        {"module_id": "contributions"},
+                        {"module_id": "limitations"},
+                    ]
+                },
+                "report": (
+                    "## Literature Review\n\n"
+                    "## Research Gap and Entry Points\n\n"
+                    "## Method and Experimental Path Suggestions\n\n"
+                    "## Suggestions for Writing the Paper\n"
+                ),
+                "module_outputs": {
+                    "related_work": {"content": "Related work with https://example.com/p1"},
+                    "method_candidates": {"content": "Method candidates and variables"},
+                    "experiment_design": {"content": "Dataset, baseline, metric, ablation"},
+                    "argument_map": {"content": "Background, gap, method, contribution, limitation"},
+                    "contributions": {"content": "Main contributions and novelty"},
+                },
+                "evidence_bank": [
+                    {"url": "https://example.com/p1", "traceable": True, "year": 2024},
+                    {"url": "https://example.com/p2", "traceable": True, "year": 2023},
+                    {"url": "https://example.com/p3", "traceable": True, "year": 2022},
+                ],
+            }
+        )
+        intent_alignment = next(item for item in dimensions if item.name == "intent_alignment")
+        self.assertTrue(intent_alignment.passed)
+
+    async def test_research_review_gate_argument_chain_supports_english_concepts(self) -> None:
+        gate = ResearchReviewGate()
+        dimensions = await gate.dimension_checks(
+            {
+                "brief": {"deliverable_type": "literature_review", "clarified_goal": "test"},
+                "plan": {
+                    "modules": [
+                        {"module_id": "problem_definition"},
+                        {"module_id": "related_work"},
+                        {"module_id": "argument_map"},
+                        {"module_id": "contributions"},
+                        {"module_id": "limitations"},
+                    ]
+                },
+                "report": "## Research Problem Definition",
+                "module_outputs": {
+                    "argument_map": {"content": "Background and research gap motivate the proposed method."},
+                    "contributions": {"content": "The main contribution and claim are clearly scoped."},
+                    "limitations": {"content": "Limitations, risks, and threats to validity are stated."},
+                },
+                "evidence_bank": [],
+            }
+        )
+        argument_dimension = next(item for item in dimensions if item.name == "argument_chain_completeness")
+        self.assertTrue(argument_dimension.passed)
+
+    async def test_research_review_gate_citation_coverage_focuses_on_citation_modules(self) -> None:
+        gate = ResearchReviewGate()
+        dimensions = await gate.dimension_checks(
+            {
+                "brief": {"deliverable_type": "paper_guidance", "clarified_goal": "test"},
+                "plan": {
+                    "modules": [
+                        {"module_id": "problem_definition"},
+                        {"module_id": "related_work"},
+                        {"module_id": "method_candidates"},
+                        {"module_id": "experiment_design"},
+                        {"module_id": "argument_map"},
+                        {"module_id": "contributions"},
+                        {"module_id": "limitations"},
+                    ]
+                },
+                "report": "## Literature Review",
+                "module_outputs": {
+                    "problem_definition": {"content": "Problem framing with https://example.com/a"},
+                    "related_work": {"content": "Key papers https://example.com/b https://example.com/c"},
+                },
+                "evidence_bank": [
+                    {"url": "https://example.com/a", "traceable": True, "year": 2024},
+                    {"url": "https://example.com/b", "traceable": True, "year": 2023},
+                    {"url": "https://example.com/c", "traceable": True, "year": 2022},
+                    {"url": "https://example.com/d", "traceable": True, "year": 2021},
+                ],
+            }
+        )
+        coverage_dimension = next(item for item in dimensions if item.name == "citation_relevance_coverage")
+        self.assertTrue(coverage_dimension.passed)
+
+    async def test_checkpoint_b_preserves_evaluator_replan_signal(self) -> None:
+        state = {
+            "needs_replan": True,
+            "revision_targets": [
+                {
+                    "module_id": "problem_definition",
+                    "reason": "当前草案与用户目标不对齐",
+                    "priority": "high",
+                    "actions": ["重新校准任务定义"],
+                }
+            ],
+            "evaluations": [
+                {
+                    "summary": "评审未通过，需要改方向。",
+                    "revision_targets": [
+                        {
+                            "module_id": "problem_definition",
+                            "reason": "当前草案与用户目标不对齐",
+                            "priority": "high",
+                            "actions": ["重新校准任务定义"],
+                        }
+                    ],
+                }
+            ],
+            "aggregated_draft": "## 草稿\n\n当前仍偏综述。",
+            "feedback_history": [],
+            "plan": {"modules": [{"module_id": "problem_definition"}]},
+            "workflow_trace": [],
+        }
+
+        with patch("agent.domains.research.workflow.ask_user", return_value="继续修订"):
+            result = await checkpoint_b_node(state)
+
+        self.assertTrue(result["needs_replan"])
+
+    async def test_planner_preserves_budget_context_for_review_driven_replan(self) -> None:
+        state = {
+            "brief": {"clarified_goal": "重规划"},
+            "active_checkpoint": "checkpoint_b",
+            "needs_replan": True,
+            "aggregated_draft": "## draft",
+            "draft_history": [{"draft": "v1", "at": 1}],
+            "evaluations": [{"summary": "需要重规划"}],
+            "last_evaluation_diff": {"changed_modules": ["related_work"]},
+            "budget": {"awaiting_user_decision": False, "soft_budget_total": 6},
+            "revision_round": 2,
+            "workflow_trace": [],
+        }
+
+        with patch("agent.domains.research.workflow._invoke_llm_text", return_value=""):
+            result = await planner_node(state)
+
+        self.assertEqual(result["budget"]["soft_budget_total"], 6)
+        self.assertEqual(result["revision_round"], 2)
+        self.assertEqual(result["aggregated_draft"], "## draft")
+        self.assertEqual(result["draft_history"], [{"draft": "v1", "at": 1}])
+        self.assertEqual(result["evaluations"], [{"summary": "需要重规划"}])
+        self.assertTrue(result["skip_checkpoint_a_once"])
+
+    async def test_checkpoint_a_skips_user_prompt_once_after_review_replan(self) -> None:
+        state = {
+            "plan": {"modules": [{"module_id": "problem_definition", "title": "研究问题定义"}]},
+            "skip_checkpoint_a_once": True,
+            "workflow_trace": [],
+        }
+
+        with patch("agent.domains.research.workflow.ask_user") as mocked_ask:
+            result = await checkpoint_a_node(state)
+
+        mocked_ask.assert_not_called()
+        self.assertFalse(result["skip_checkpoint_a_once"])
+        self.assertFalse(result["needs_replan"])
+
+    async def test_aggregate_draft_writes_full_draft_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            state = {
+                "task_id": "task_stage_file",
+                "query": "研究任务",
+                "report_profile": "",
+                "brief": {"clarified_goal": "生成草稿"},
+                "module_outputs": {
+                    "intro": {"content": "## 引言\n\n完整草稿正文"},
+                },
+                "module_status": {"intro": "completed"},
+                "blocked_modules": [],
+                "revision_round": 0,
+                "draft_history": [],
+                "workflow_trace": [],
+            }
+
+            def _memory_factory(task_id: str):
+                return ResearchMemory(task_id, root=Path(tmpdir))
+
+            with patch("agent.domains.research.workflow._invoke_llm_text", return_value=""), patch(
+                "agent.domains.research.workflow.ResearchMemory",
+                side_effect=_memory_factory,
+            ):
+                result = await aggregate_draft_node(state)
+
+            draft_path = Path(tmpdir) / "task_stage_file" / "aggregated_draft.md"
+            self.assertTrue(draft_path.exists())
+            self.assertEqual(draft_path.read_text(encoding="utf-8"), result["aggregated_draft"])
+
+    async def test_checkpoint_b_emits_stage_artifacts_for_current_draft(self) -> None:
+        state = {
+            "task_id": "task_stage_emit",
+            "needs_replan": False,
+            "revision_targets": [],
+            "evaluations": [{"summary": "评审未通过，需要补强论证。", "revision_targets": []}],
+            "aggregated_draft": "## 草稿\n\n需要完整查看。",
+            "feedback_history": [],
+            "plan": {"modules": [{"module_id": "problem_definition"}]},
+            "workflow_trace": [],
+        }
+        emitted: list[tuple[str, object]] = []
+
+        with patch("agent.domains.research.workflow.ask_user", return_value="继续修订"), patch(
+            "agent.domains.research.workflow._safe_emit",
+            side_effect=lambda event_type, content: emitted.append((event_type, content)),
+        ):
+            await checkpoint_b_node(state)
+
+        stage_events = [
+            payload
+            for event_type, payload in emitted
+            if event_type == "stage_artifacts" and isinstance(payload, dict)
+        ]
+        self.assertGreaterEqual(len(stage_events), 2)
+        self.assertEqual(stage_events[0]["stage_id"], "checkpoint_b")
+        self.assertEqual(stage_events[0]["status"], "ready")
+        self.assertEqual(stage_events[0]["files"][0]["name"], "当前研究草稿.md")
+        self.assertIn("/tasks/task_stage_emit/artifact-file?path=aggregated_draft.md", stage_events[0]["files"][0]["url"])
+        self.assertEqual(stage_events[-1]["status"], "cleared")
+
+    async def test_synthesize_final_writes_markdown_artifact_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            state = {
+                "task_id": "task_final_emit",
+                "query": "研究任务",
+                "report_profile": "",
+                "aggregated_draft": "## 草稿\n\n完整中间稿。",
+                "module_outputs": {"intro": {"content": "## 引言\n\n正文"}},
+                "evaluations": [{"passed": True, "issues": []}],
+                "blocked_modules": [],
+                "workflow_trace": [],
+            }
+            emitted: list[tuple[str, object]] = []
+
+            def _memory_factory(task_id: str):
+                return ResearchMemory(task_id, root=Path(tmpdir))
+
+            with patch("agent.domains.research.workflow._invoke_llm_text", return_value=""), patch(
+                "agent.domains.research.workflow.ResearchMemory",
+                side_effect=_memory_factory,
+            ), patch(
+                "agent.domains.research.workflow._safe_emit",
+                side_effect=lambda event_type, content: emitted.append((event_type, content)),
+            ):
+                result = await synthesize_final_node(state)
+
+            final_path = Path(tmpdir) / "task_final_emit" / "final_report.md"
+            self.assertTrue(final_path.exists())
+            self.assertEqual(final_path.read_text(encoding="utf-8"), result["final_result"])
+            stage_events = [
+                payload
+                for event_type, payload in emitted
+                if event_type == "stage_artifacts" and isinstance(payload, dict)
+            ]
+            self.assertTrue(stage_events)
+            self.assertEqual(stage_events[-1]["stage_id"], "final_report")
+            self.assertEqual(stage_events[-1]["files"][0]["name"], "最终研究输出.md")
+            self.assertIn("/tasks/task_final_emit/artifact-file?path=final_report.md", stage_events[-1]["files"][0]["url"])
+
+    async def test_checkpoint_b_extends_budget_after_user_confirms_continue(self) -> None:
+        state = {
+            "task_id": "task_budget_extend",
+            "needs_replan": False,
+            "revision_targets": [{"module_id": "related_work", "reason": "覆盖不足", "actions": ["补文献"]}],
+            "evaluations": [{"summary": "评审未通过，需要补强 related_work。", "revision_targets": []}],
+            "aggregated_draft": "## 草稿\n\nrelated work 仍不足。",
+            "feedback_history": [],
+            "plan": {"modules": [{"module_id": "related_work"}]},
+            "module_status": {"related_work": "blocked"},
+            "budget": {
+                "awaiting_user_decision": True,
+                "module_budgets": {
+                    "related_work": {
+                        "soft_budget": 3,
+                        "hard_budget": 5,
+                        "consumed_rounds": 5,
+                        "terminal_blocked": True,
+                    }
+                },
+            },
+            "workflow_trace": [],
+        }
+
+        with patch("agent.domains.research.workflow.ask_user", return_value="继续"):
+            result = await checkpoint_b_node(state)
+
+        self.assertFalse(result["budget"]["awaiting_user_decision"])
+        self.assertEqual(result["budget"]["last_user_decision"], "extend")
+        self.assertGreaterEqual(result["budget"]["module_budgets"]["related_work"]["hard_budget"], 7)

@@ -23,6 +23,8 @@
 !core/**
 !runtime/
 !runtime/**
+!task_platform/
+!task_platform/**
 !capabilities/
 !capabilities/**
 !storage/
@@ -31,6 +33,10 @@
 !ppt_engine/**
 !orchestrator/
 !orchestrator/**
+!workflows/
+!workflows/**
+!domain_agents/
+!domain_agents/**
 !memory/
 !memory/**
 !tools/
@@ -57,6 +63,14 @@
 !Dockerfile
 !scripts/
 !scripts/**
+!apps/
+!apps/**
+!domain/
+!domain/**
+!infra/
+!infra/**
+!agent_runtime/
+!agent_runtime/**
 
 # Virtual environment
 .venv/

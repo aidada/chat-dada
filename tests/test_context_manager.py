@@ -4,7 +4,7 @@ import unittest
 
 from langchain_core.messages import ToolMessage
 
-from capabilities.context_manager import (
+from agent.capabilities.context_manager import (
     FindingEntry,
     ResearchContext,
     _extract_urls,
@@ -188,13 +188,13 @@ class ExtractUrlsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_extract_urls("no urls here"), [])
 
     def test_context_to_dict_includes_version(self) -> None:
-        from capabilities.context_manager import CONTEXT_VERSION
+        from agent.capabilities.context_manager import CONTEXT_VERSION
         ctx = ResearchContext()
         data = ctx.to_dict()
         self.assertEqual(data["_version"], CONTEXT_VERSION)
 
     def test_finding_entry_to_dict_includes_version(self) -> None:
-        from capabilities.context_manager import FINDING_ENTRY_VERSION
+        from agent.capabilities.context_manager import FINDING_ENTRY_VERSION
         entry = FindingEntry(step=1, tool_name="test", query="q", raw_content="content")
         data = entry.to_dict()
         self.assertEqual(data["_version"], FINDING_ENTRY_VERSION)

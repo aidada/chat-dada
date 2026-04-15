@@ -1,543 +1,567 @@
-# chat dada / Local Agent
+# chat-dada
 
-一个基于 FastAPI、LangGraph 和流式任务运行时的通用多智能体平台。支持聊天、深度研究（含层级分解与并行执行）、文件分析、翻译、图片生成、Markdown/Word/Excel/PPT 输出的任务系统。
+`chat-dada` 是一个本地优先的多智能体任务平台后端。架构对齐 Anthropic Managed Agents 的 **Brain / Hands / Session** 三层解耦模型，源码归入 5 个语义清晰的顶级包：
 
-前端页面位于 [static/index.html](static/index.html)，后端入口位于 [main.py](main.py)。
+- `web/`：FastAPI 入口、路由、中间件、静态文件、SSE
+- `agent/`：全部 AI/LLM 相关 — 运行时、任务编排、领域 agent、能力组件、工具
+- `domain/`：认证、任务、对话、额度等业务服务
+- `infra/`：SQLAlchemy 模型、仓储、数据库会话、Google OAuth、用户存储
+- `core/`：LLM 工厂、日志、内容处理等共享工具
 
-## 当前能力概览
+`main.py` 是兼容启动入口，真正的 FastAPI 应用在 `web/app.py`。
 
-- 任务提交采用 `POST /tasks`，事件流采用 `GET /tasks/{task_id}/events` 的 SSE 模式，支持断线重放。
-- 任务状态和事件持久化到 **PostgreSQL**，跨实例事件广播通过 **Redis Pub/Sub**。
-- 支持人机交互追问。任务运行中可进入 `waiting_for_user`，再通过 `POST /tasks/{task_id}/reply` 继续。跨实例回复通过 Redis BLPOP/LPUSH 传递。
-- 编排链路支持用户记忆。`orchestrator` 路由会从 `data/memory/` 召回历史片段，并在任务结束后回写长期记忆。
-- 能力通过统一注册表维护，当前共 20 个已注册能力：6 个 agents、9 个 tools、5 个 renderers。
-- 深度研究支持三种图模式：简单循环、层级分解、并行工作者，配合三层上下文管理、进度追踪与外部研究记忆。
-- 支持多种输出形态：直接回答、Markdown、Word、Excel、PPT、图片、占位版 Visio JSON。
+## 架构概览
 
-## 架构
-
-```text
-Browser / API Client
-        │
-        ├── POST /upload
-        ├── POST /tasks
-        ├── GET  /tasks/{task_id}
-        ├── GET  /tasks/{task_id}/events   (SSE)
-        └── POST /tasks/{task_id}/reply
-        │
-        ▼
-FastAPI app (main.py)
-        │
-        ▼
-TaskService / TaskRunStore (runtime/task_runtime.py)
-        │              ├── PostgreSQL: task_runs + task_events
-        │              ├── Redis Pub/Sub: SSE 广播
-        │              └── Redis BLPOP/LPUSH: 跨实例用户回复
-        ▼
-Task Dispatcher (runtime/task_dispatcher.py)
-        │
-        ├── general_chat
-        └── orchestrator
-                │
-                ├── memory recall / save  (storage/user_store.py)
-                ├── planner               (orchestrator/planner.py)
-                ├── template selection or free-form planning
-                └── scheduler             (orchestrator/scheduler.py)
-                        │
-                        ▼
-                 core/registry.py
-        ┌──────────────┼──────────────┐
-        ▼              ▼              ▼
-      agents         tools        renderers
-
-deep_research 内部结构:
-        │
-        ├── capabilities/planner     → 层级子任务分解 (2-5 subtasks)
-        ├── capabilities/context_manager → 三层上下文压缩 (raw → compact → summary)
-        ├── capabilities/progress_tracker → 进度/发现/缺口追踪
-        ├── capabilities/memory      → 外部文件记忆 (data/research/{task_id}/)
-        └── agents/research_worker   → 并行工作者 (wave-based, max 3)
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│              Brain / Harness（纯编排、无状态）                           │
+│                                                                         │
+│  TaskService       Root Graph / Coordinator       Domain Skill Runners  │
+│  ┌─────────────┐   ┌────────────────────────┐   ┌──────────────────┐   │
+│  │ 调 session  │   │ 规划 / DAG 编排 / 恢复 │   │ 领域编排 / LLM   │   │
+│  │ 调 gateway  │   │ 上下文整理 / prompt    │   │ 调 gateway       │   │
+│  └──────┬──────┘   └──────────┬─────────────┘   └────────┬─────────┘   │
+│         │                     │                          │              │
+│         └──────────┬──────────┴──────────────┬───────────┘              │
+│                    │                         │                          │
+│           session.get/emit/wake       gateway.execute()                 │
+├────────────────────┼─────────────────────────┼──────────────────────────┤
+│                    ▼                         ▼                          │
+│           ┌────────────────┐        ┌──────────────────┐               │
+│           │ SessionRuntime │        │   ToolGateway    │               │
+│           │                │        │                  │               │
+│           │ emit_event     │        │ route + prepare  │               │
+│           │ emit_progress  │        │ 唯一 tool 事件点 │               │
+│           │ get_events     │        └───────┬──────────┘               │
+│           │ get_projection │                │                           │
+│           │ wake           │          ┌─────┴─────┐                     │
+│           └────────┬───────┘          │           │                     │
+│                    │            ┌─────┴───┐ ┌─────┴──────────────┐     │
+│          ┌─────────┴─────────┐ │ Local   │ │ Desktop / Future   │     │
+│          │ task_events       │ │ Hands   │ │ Remote Hands       │     │
+│          │ (canonical)       │ └─────────┘ └────────────────────┘     │
+│          │ checkpoints       │                                         │
+│          │ (recovery asset)  │                                         │
+│          │ task_runs         │                                         │
+│          │ (projection)      │                                         │
+│          └───────────────────┘                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 任务模式
+### 三层职责
 
-`POST /tasks` 支持 3 种模式：
+| 层 | 职责 | 合法接口 |
+|:---|:-----|:---------|
+| **Brain / Harness** | 编排、规划、上下文整理、决定 tool call | `session.emit_event()` / `session.get_projection()` / `session.wake()` / `gateway.execute()` |
+| **Hands** | 执行工具、可选 prepare/provision、返回结果 | `execute()` / `prepare()` |
+| **Session** | durable event log、恢复、投影、分发 | `emit_event()` / `emit_progress()` / `get_events()` / `wake()` / `get_projection()` |
 
-| mode | 行为 |
-| --- | --- |
-| `auto` | 默认模式。按附件和关键词在 `general_chat` 与 `orchestrator` 之间自动路由 |
-| `chat` | 强制走直接对话，不允许附件 |
-| `agent` | 强制走编排器 |
+### 数据真相源
 
-`thinking_level` 当前支持 `low` / `medium` / `high`，会通过 [core/models.py](core/models.py) 映射到底层模型的推理强度参数。
+| 数据 | 定位 | 是否真相源 |
+|:-----|:-----|:-----------|
+| `task_events` | append-only 历史事件流 | **是** |
+| `checkpoints` | 恢复加速资产 | 否 |
+| `task_runs` | UI / 查询 / 过滤 projection | 否 |
+| Redis PubSub / SSE | 分发与通知通道 | 否 |
 
-## 已注册能力
+## 项目结构
 
-能力注册定义见 [core/registry.py](core/registry.py)。
-
-### Agents
-
-| 名称 | 入口 | 说明 |
-| --- | --- | --- |
-| `general_chat` | `agents.general_chat:run` | 直接问答，支持流式文本增量 |
-| `search` | `agents.search_agent:run_search` | Web 搜索与页面抓取 |
-| `doc_analyst` | `agents.doc_agent:run_doc_analysis` | 读取并分析 PDF/文本/附件 |
-| `writer` | `agents.writer_agent:run_writer` | 生成写作内容或幻灯片 DSL |
-| `deep_research` | `agents.deep_research:run` | 多轮深度研究，支持 Web、学术检索、浏览器、追问、研究笔记 |
-| `data_analyst` | `agents.data_analyst:run` | 数据分析与代码执行协同 |
-
-### Tools
-
-| 名称 | 入口 | 说明 |
-| --- | --- | --- |
-| `web_search` | `tools.web_search:run` | Tavily 搜索 |
-| `brave_search` | `tools.brave_search:run` | Brave 搜索 |
-| `academic_search` | `tools.academic_search:run` | Semantic Scholar + arXiv |
-| `translator` | `tools.translator:run` | LLM 翻译 |
-| `summarizer` | `tools.summarizer:run` | LLM 摘要 |
-| `code_executor` | `tools.code_executor:run` | Python 沙箱执行 |
-| `image_gen` | `tools.image_gen:run` | 文本生成图片 |
-| `image_to_diagram` | `tools.image_to_diagram:run` | 图片转结构化图表 |
-| `research_notes` | `tools.research_notes` | 研究笔记持久化存储与召回 |
-
-### Renderers
-
-| 名称 | 入口 | 输出 |
-| --- | --- | --- |
-| `ppt_render` | `ppt_engine.renderer:render_pptx` | `.pptx` |
-| `markdown_render` | `renderers.markdown_renderer:run` | `.md` |
-| `word_render` | `renderers.word_renderer:run` | `.docx` |
-| `excel_render` | `renderers.excel_renderer:run` | `.xlsx` |
-| `visio_render` | `renderers.visio_renderer:run` | 当前为占位 JSON 输出 |
-
-## 深度研究系统
-
-`deep_research` 是系统中最复杂的 agent，实现位于 `agents/deep_research/` 子包，支持三种图执行模式：
-
-| 模式 | 流程 | 适用场景 |
-| --- | --- | --- |
-| Simple | planner → tools loop → finish | 简单问题，单线研究 |
-| Hierarchical | plan → route subtasks → individual research → judge → synthesize | 复杂多维度问题 |
-| Parallel | plan → parallel workers → synthesis | 独立子问题可并行 |
-
-子包结构（`agents/deep_research/`）：
-
-| 文件 | 职责 |
-| --- | --- |
-| `config.py` | 状态定义、研究配置、报告模板（default / academic_paper_guidance） |
-| `graphs.py` | LangGraph 图构建（simple / hierarchical / parallel） |
-| `prompts.py` | 系统提示词与报告模板选择 |
-| `run.py` | 入口函数、工具定义（web_search / academic_search / browser / ask_user / research_notes） |
-| `utils.py` | 报告改写与辅助函数 |
-
-依赖的 capabilities 模块：
-
-| 模块 | 文件 | 职责 |
-| --- | --- | --- |
-| 研究规划器 | `capabilities/planner.py` | 将问题分解为 2-5 个带依赖的子任务 |
-| 上下文管理器 | `capabilities/context_manager.py` | 三层压缩：最近 2 步保留原文，旧步骤取 200 字摘要，全局研究摘要 |
-| 进度追踪器 | `capabilities/progress_tracker.py` | 记录已完成搜索、关键发现（FIFO, max 10）、剩余缺口 |
-| 研究记忆 | `capabilities/memory.py` | 文件系统外部记忆，支持发现/摘要/检查点/恢复 |
-
-并行工作者：`agents/research_worker.py`（Wave-based 并行执行，最多 3 个并发）。
-
-报告模板：
-
-| profile | 说明 |
-| --- | --- |
-| `default` | 问题导向报告，含 6 个必需章节（直接结论、证据链、机理与成立条件等） |
-| `academic_paper_guidance` | 期刊论文准备指南，含 8 个章节（文献综述正文、研究空白、写作建议等） |
-
-运行参数：最多 15 步，每 5 步保存检查点，每 6 步生成中间摘要。
-
-## 编排模板
-
-模板定义见 [orchestrator/templates.py](orchestrator/templates.py)。
-
-| intent | 典型流水线 | 当前输出 |
-| --- | --- | --- |
-| `ppt_report` | `search` + `doc_analyst` -> `writer` -> `ppt_render` | `.pptx` |
-| `research_report` | `deep_research` + `doc_analyst` -> `markdown_render` | `.md` |
-| `data_analysis` | `doc_analyst` -> `data_analyst` -> `writer` | 文本/结构化结果 |
-| `quick_question` | `general_chat` | 直接文本回答 |
-| `translate_doc` | `doc_analyst` -> `translator` -> `word_render` | `.docx` |
-| `image_to_visio` | `image_to_diagram` -> `visio_render` | `.json` |
-| `image_generation` | `image_gen` | 图片文件 |
-
-补充说明：
-
-- `ppt_report` 在 [orchestrator/runner.py](orchestrator/runner.py) 中仍保留了一条兼容旧版 PPT 的专用分支。
-- 当任务不匹配模板时，`planner` 会基于注册表摘要自由规划步骤。
-
-## 流式任务协议
-
-当前主协议不是旧版 `/ws`，而是任务式 API。
-
-### 1. 上传附件
-
-```bash
-curl -F "file=@/absolute/path/to/report.pdf" http://localhost:8000/upload
+```
+chat-dada/
+├── web/                         # 🌐 WEB LAYER (Controller + HTTP)
+│   ├── app.py                   #   FastAPI app factory
+│   ├── config.py                #   WebSettings
+│   ├── runtime.py               #   TaskService + SessionRuntime wiring
+│   ├── routers/                 #   HTTP endpoints (auth, tasks, conversations...)
+│   ├── deps/                    #   FastAPI DI (auth, services, billing...)
+│   └── middleware/              #   Errors, sessions
+│
+├── agent/                       # 🤖 AGENT LAYER (全部 AI/LLM 相关)
+│   ├── brain/                   #   LLM 配置层 — 运行时模型注册与切换
+│   │   ├── factory.py           #     LLM client factory (OpenAI, Anthropic, Gemini, MiniMax...)
+│   │   ├── registry.py          #     ModelRegistry: 角色 → 模型/provider 映射
+│   │   ├── defaults.py          #     MODEL_CONFIGS 默认配置
+│   │   ├── thinking.py          #     Thinking level 管理 (Claude)
+│   │   ├── context.py           #     Task 级模型 override 上下文
+│   │   └── providers/           #     MiniMax, Gemini, browser_use 等 adapter
+│   ├── session/                 #   Session 层 — durable state boundary
+│   │   ├── runtime.py           #     SessionRuntime (emit_event/progress, wake, projection)
+│   │   └── __init__.py          #     EventType, ResumeHandle
+│   ├── hands/                   #   Hands 层 — 可替换执行端
+│   │   ├── protocol.py          #     ToolCall, ToolResult, ToolContext, ToolExecutor
+│   │   ├── gateway.py           #     ToolGateway (路由 + 唯一事件权威点)
+│   │   ├── local_executor.py    #     LocalToolExecutor (服务端工具)
+│   │   └── __init__.py
+│   ├── runtime/                 #   LangGraph 图执行引擎、事件流
+│   │   ├── root_graph.py        #     Root graph (normalize → coordinator → persist)
+│   │   └── task_execution.py    #     TaskService (Harness Runtime)
+│   ├── coordinator/             #   Coordinator: 理解目标 → 路由 → DAG/单技能/直答
+│   │   ├── agent.py             #     build_coordinator_graph(checkpointer)
+│   │   ├── executor.py          #     DAG 执行节点
+│   │   ├── state.py             #     CoordinatorState, Task, SkillContext, SkillResult
+│   │   └── skills.py            #     SkillRegistry + run_skill_via_adapter
+│   ├── platform/                #   平台能力：中断、流透传、事件发射
+│   │   ├── emit.py              #     统一事件发射器
+│   │   ├── streaming.py         #     stream_nested_graph (transport bridge)
+│   │   ├── interrupts.py        #     LangGraph interrupt 桥接
+│   │   └── ...
+│   ├── domains/                 #   领域 agent (research, patent, ppt, zero_report)
+│   ├── capabilities/            #   可复用组件 (review_gates, budget, planner, context_manager...)
+│   ├── tools/                   #   LLM 可调用工具 (search, image_gen, code_executor, translator...)
+│   └── ppt_engine/              #   PPT DSL 渲染引擎
+│
+├── domain/                      # 📦 DOMAIN LAYER (业务逻辑)
+│   ├── auth/                    #   认证、OAuth、密码
+│   ├── billing/                 #   额度、用量
+│   ├── conversations/           #   🔄 对话管理 (独立 ConversationService)
+│   ├── tasks/                   #   任务执行服务
+│   └── agents/                  #   Agent 查询服务
+│
+├── infra/                       # 🔧 INFRASTRUCTURE
+│   ├── db/                      #   SQLAlchemy models, repositories, session
+│   ├── oauth/                   #   Google OIDC client
+│   ├── events/                  #   Redis Pub/Sub
+│   └── storage/                 #   用户记忆持久化
+│
+├── core/                        # ⚙️ SHARED UTILITIES
+│   ├── models.py                #   兼容 shim，实际实现在 agent/brain/
+│   ├── logger.py                #   结构化日志
+│   ├── r2_storage.py            #   Cloudflare R2
+│   └── content_utils.py         #   文本处理
+│
+├── tests/                       # 测试
+├── alembic/                     # 数据库迁移
+├── scripts/  docs/              # 辅助
+├── data/  logs/  outputs/  uploads/  # 运行时数据
+└── main.py + pyproject.toml + Dockerfile + ...   # 配置
 ```
 
-返回示例：
+## Streaming Protocol
 
-```json
-{
-  "path": "/absolute/server/path/uploads/abcd1234_report.pdf",
-  "name": "report.pdf"
-}
-```
+后端与所有客户端（Web / 桌面 / 移动）之间的实时数据流遵循统一的 5 层协议，规范详见 [`docs/superpowers/specs/2026-04-11-protocol-design.md`](docs/superpowers/specs/2026-04-11-protocol-design.md)。
 
-### 2. 创建任务
+### 5 层架构
 
-```bash
-curl -X POST http://localhost:8000/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "task": "分析这份附件并给我一份研究结论",
-    "user_id": "alice",
-    "mode": "auto",
-    "thinking_level": "high",
-    "file_paths": ["/absolute/server/path/uploads/abcd1234_report.pdf"]
-  }'
-```
+| 层 | 位置 | 职责 |
+|:---|:-----|:-----|
+| Layer 0 | `docs/superpowers/specs/` | 协议规范（语言无关） |
+| Layer 1 | `agent/session/protocol.py` | Python `EventType` enum + 持久化分类 |
+| Layer 2 | Transport 层（前端 `src/protocol/transport.ts`） | SSE 连接抽象，可插拔 |
+| Layer 3 | Reducer 层（前端 `src/protocol/reducer.ts`） | 纯函数状态机，无框架依赖 |
+| Layer 4 | 框架绑定（前端 `src/hooks/useTaskStream.ts`） | 极薄的 React 适配层 |
 
-返回示例：
+### 事件命名空间
 
-```json
-{
-  "task_id": "task_1234567890ab",
-  "status": "queued"
-}
-```
+所有事件类型采用 `category.action` 格式，分为 8 个命名空间：
 
-### 3. 查询任务快照
+| 命名空间 | 类型示例 | canonical |
+|:---------|:---------|:----------|
+| `lifecycle` | `started` / `completed` / `failed` / `cancelled` | 全部 |
+| `content` | `delta` / `done` | delta 为 transient |
+| `thinking` | `delta` / `done` | 全部 transient |
+| `tool` | `started` / `completed` / `failed` | 全部 |
+| `interaction` | `question` / `answer` | 全部 |
+| `artifact` | `created` / `staged` | 全部 |
+| `progress` | `step` / `plan` / `brief` / `checkpoint` / `node` / `dag` | node/dag 为 transient |
+| `system` | `monitoring` / `heartbeat` | 全部 transient |
 
-```bash
-curl http://localhost:8000/tasks/task_1234567890ab
-```
+**canonical** 事件写入 `task_events` 表并附带 `seq`，支持断线重放；**transient** 事件仅走 Redis → SSE，不落库。
 
-任务快照包含：
+### 新增事件类型 3 步
 
-- `status`
-- `route_name`
-- `route_reason`
-- `route_confidence`
-- `pending_question`
-- `result`
-- `error`
-- `last_seq`
+1. 在 `agent/session/protocol.py` 中添加 `EventType.XXX = "category.action"` 并更新 `CANONICAL_EVENT_TYPES` 或 `TRANSIENT_EVENT_TYPES`
+2. 在前端 `src/protocol/types.ts` 中添加对应的 TypeScript 接口并加入 `ProtocolEvent` 联合类型
+3. 在 `src/protocol/reducer.ts` 的 `reduce()` 中添加对应 `case` 处理
 
-### 4. 订阅事件流
+## 当前能力
 
-```bash
-curl -N http://localhost:8000/tasks/task_1234567890ab/events
-```
+### 认证
 
-SSE 事件支持 `Last-Event-ID` 和 `after_seq` 重放。当前会出现的用户态事件类型包括：
+当前已经支持：
 
-| type | 含义 |
-| --- | --- |
-| `start` | 任务开始 |
-| `step` | 过程日志 |
-| `question` | 任务向用户追问 |
-| `user_reply` | 用户回复已写入任务上下文 |
-| `result_delta` | 流式增量文本 |
-| `file` | 生成了可下载文件 |
-| `result` | 最终成功结果 |
-| `error` | 最终失败结果 |
-| `monitoring` | 本次任务的监控摘要 |
+- `POST /auth/register`
+- `POST /auth/login`
+- `GET /auth/google/login`
+- `GET /auth/google/callback`
+- `POST /auth/logout`
+- `GET /auth/me`
 
-### 5. 回复追问
+登录态使用自有 session cookie，不把 Google token 当作业务 session。
 
-当任务状态变成 `waiting_for_user` 时：
+补充实现细节：
 
-```bash
-curl -X POST http://localhost:8000/tasks/task_1234567890ab/reply \
-  -H 'Content-Type: application/json' \
-  -d '{"answer": "更关注工程实现与实验效果"}'
-```
+- 密码哈希使用 `pwdlib` 的推荐算法
+- session token 只以 `SHA-256` 哈希形式存进数据库
+- `get_current_user` 会从 cookie 中恢复当前用户
+- `get_admin_user` 通过 `ADMIN_EMAILS` 限定管理员
 
-### 6. 下载生成文件
+### 任务
 
-```bash
-curl -O http://localhost:8000/download/your_file.docx
-```
-
-## WebSocket 兼容路径
-
-[main.py](main.py) 仍保留 `/ws`，用于兼容旧客户端，但新客户端应优先使用：
+任务创建和查看接口：
 
 - `POST /tasks`
+- `GET /tasks/{task_id}`
+- `GET /tasks/{task_id}/artifacts`
+- `GET /tasks/{task_id}/artifact-file?path=...`
+- `GET /tasks/{task_id}/review`
+- `GET /tasks/{task_id}/provenance`
+- `GET /tasks/{task_id}/trace`
+- `GET /tasks/{task_id}/replay`
+- `POST /tasks/{task_id}/reply`
+- `POST /tasks/{task_id}/cancel`
 - `GET /tasks/{task_id}/events`
 
-## 用户记忆
+创建任务时支持的关键字段：
 
-记忆模块位于 [storage/user_store.py](storage/user_store.py)。
+- `task`
+- `mode`：`auto` / `chat` / `agent`
+- `thinking_level`：`low` / `medium` / `high`
+- `file_paths`
+- `conversation_id`
 
-默认存储路径：
+任务流现在是：
 
-```text
-data/memory/<user_id>/
-├── profile.md
-├── summaries/YYYY/YYYY-MM.md
-└── timeline/YYYY/MM/YYYY-MM-DD.md
-```
+1. Coordinator 内部的 `understand_goal` 节点决定执行模式（直答 / 单技能 / DAG）
+2. `agent/runtime/task_execution.py` (TaskService / Harness Runtime) 驱动执行
+3. `agent/session/runtime.py` (SessionRuntime) 负责 canonical 事件落库、projection 更新、恢复
+4. 事件通过 `SessionRuntime.emit_event()` → DB + Redis PubSub 推到 SSE
+5. 高频进度通过 `SessionRuntime.emit_progress()` 或 `platform/emit.py` 仅走 stream
+6. 结果、review、budget 和 artifact_refs 会持久化到 Postgres
 
-当前逻辑：
+SSE 事件流会：
 
-- `orchestrator` 路由开始前会根据 `user_id` 召回相关历史片段。
-- 任务结束后会把当前任务与结果写入时间线和月度摘要。
-- 同时尝试抽取稳定画像，更新长期 profile。
+- 先回放 `after_seq` 之后的历史事件
+- 再持续推送新事件
+- 在空闲时发送 keep-alive
+- 附带 `stream_meta`，里面包含 `auth_lookup_ms`、连接数和连接池使用情况
 
-如果不希望使用默认目录，可设置 `LOCAL_AGENT_MEMORY_DIR`。
+### 对话
 
-## 目录结构
+对话接口：
 
-```text
-.
-├── main.py                        # FastAPI 入口（唯一根级模块）
-│
-├── core/                          # 基础设施层
-│   ├── models.py                  # 模型与 provider 配置中心
-│   ├── registry.py                # 统一能力注册表
-│   ├── logger.py                  # 结构化日志与监控汇总
-│   └── content_utils.py           # 输出文本提取与清洗
-│
-├── runtime/                       # 任务运行时
-│   ├── task_runtime.py            # 任务持久化 (PostgreSQL)、SSE (Redis Pub/Sub)
-│   ├── task_dispatcher.py         # auto/chat/agent 路由判定
-│   └── task_interaction.py        # 任务内 ask_user 交互桥接
-│
-├── storage/                       # 持久化存储
-│   └── user_store.py              # 用户记忆 (Markdown 文件层级)
-│
-├── capabilities/                  # 深度研究能力模块
-│   ├── context_manager.py         # 三层上下文管理 (raw → compact → summary)
-│   ├── progress_tracker.py        # 研究进度与缺口追踪
-│   ├── memory.py                  # 研究外部文件记忆 (data/research/)
-│   └── planner.py                 # 研究子任务层级分解
-│
-├── orchestrator/                  # 编排层
-│   ├── planner.py                 # intent 分类与自由规划
-│   ├── runner.py                  # 编排总入口
-│   ├── scheduler.py               # 依赖图执行
-│   └── templates.py               # 预设模板
-│
-├── agents/                        # Agent 实现
-│   ├── general_chat.py            # 直接问答
-│   ├── deep_research/             # 多模式深度研究（子包）
-│   │   ├── config.py              # 状态、配置、报告模板
-│   │   ├── graphs.py              # LangGraph 图构建
-│   │   ├── prompts.py             # 系统提示词
-│   │   ├── run.py                 # 入口与工具定义
-│   │   └── utils.py               # 报告改写辅助
-│   ├── research_worker.py         # 并行研究工作者
-│   ├── search_agent.py            # Web 搜索
-│   ├── doc_agent.py               # 文档分析
-│   ├── writer_agent.py            # 写作与幻灯片
-│   └── data_analyst.py            # 数据分析
-│
-├── tools/                         # 工具实现
-│   ├── web_search.py              # Tavily 搜索
-│   ├── brave_search.py            # Brave 搜索
-│   ├── academic_search.py         # 学术检索 (Semantic Scholar + arXiv)
-│   ├── translator.py              # LLM 翻译
-│   ├── summarizer.py              # LLM 摘要
-│   ├── code_executor.py           # Python 沙箱
-│   ├── image_gen.py               # 图片生成
-│   ├── image_to_diagram.py        # 图片转图表
-│   └── research_notes.py          # 研究笔记持久化
-│
-├── renderers/                     # 输出渲染
-│   ├── word_renderer.py           # .docx
-│   ├── markdown_renderer.py       # .md
-│   ├── excel_renderer.py          # .xlsx
-│   └── visio_renderer.py          # .json (占位)
-│
-├── ppt_engine/                    # PPT 渲染引擎
-│   ├── dsl_schema.py              # 幻灯片 DSL 定义
-│   └── renderer.py                # PPTX 渲染
-│
-├── scripts/
-│   └── init.sql                   # PostgreSQL 建表脚本
-│
-├── static/index.html              # 当前前端页面
-├── old/                           # 旧版前端与单体 agent 备份
-├── uploads/                       # 上传文件
-├── outputs/                       # 生成文件
-├── data/                          # 运行时数据
-│   ├── memory/                    # 用户记忆
-│   └── research/                  # 研究任务外部记忆
-├── logs/                          # 日志输出
-└── tests/                         # 单元测试
-```
+- `GET /conversations`
+- `POST /conversations`
+- `PATCH /conversations/{conversation_id}`
+- `DELETE /conversations/{conversation_id}`
+- `GET /conversations/{conversation_id}/entries`
 
-## 安装与运行
+当前对话上下文构建逻辑不是简单拼接历史，而是分层处理：
+
+- 1 到 5 轮：直接使用原始对话
+- 6 到 20 轮：先做摘要，再拼最近几轮
+- 20 轮以上：摘要 + 最近对话 + 向量检索补回相关片段
+
+这里用到了：
+
+- `conversations.context_summary`
+- `conversations.summary_through_seq`
+- `task_events.embedding` 的 pgvector 向量
+
+### 额度
+
+额度接口：
+
+- `GET /me/quota`
+- `GET /admin/users/{user_id}/quota`
+- `PUT /admin/users/{user_id}/quota`
+
+当前支持的额度维度：
+
+- 日 / 周 / 月任务数
+- 日 / 周 / 月 token 数
+- 日 / 周 / 月成本美元
+
+补充配置：
+
+- `ADMIN_EMAILS`
+- `MODEL_PRICING_JSON`
+
+`MODEL_PRICING_JSON` 用来把 token 使用量估算为 `cost_usd`。如果未配置或解析失败，`cost_usd` 会退化为 `0`，并在启动时给出 warning。
+
+### 领域工作流
+
+当前领域入口如下：
+
+| 领域           | 入口                                             | 说明                                    |
+| -------------- | ------------------------------------------------ | --------------------------------------- |
+| `research`     | `agent/domains/research/orchestrated.py`         | 模块化科研工作流                        |
+| `patent`       | `agent/domains/patent/orchestrated.py`           | 专利草稿工作流                          |
+| `zero_report`  | `agent/domains/zero_report/orchestrated.py`      | 归零报告工作流                          |
+| `ppt`          | `agent/domains/ppt/orchestrated.py`              | 生成内容后再渲染 `.pptx`                |
+
+轻量问答和跨领域 DAG 组合（如「先调研再做 PPT」）现在由 Coordinator 统一处理：`understand_goal` 节点根据用户意图路由到 direct（直答）、single_skill（单领域）或 dag（多任务编排）三种执行模式。
+
+`research` 工作流已经支持的产物类型：
+
+- `literature_review`
+- `paper_guidance`
+- `paper_outline`
+- `research_proposal`
+
+研究工作流大致是：
+
+1. intake 把用户输入整理成结构化 brief
+2. planner 生成模块化 plan
+3. worker 分模块检索、起草、校验
+4. aggregator 聚合模块草稿
+5. evaluator 打分并给出修订目标
+6. optimizer 只重写低分模块
+7. synthesizer 输出最终科研结果
+
+`patent`、`zero_report` 和 `ppt` 也都走 orchestrated graph，但各自的 subagent 组合和产物不同：
+
+- `patent`：`technical_disclosure -> prior_art -> claims -> spec -> review`
+- `zero_report`：`timeline -> root_cause -> actions -> draft -> review`
+- `ppt`：`outline -> research -> write -> render`
+
+### 调试与静态资源
+
+当前还保留这些调试接口：
+
+- `GET /api/traces`
+- `GET /api/langsmith`
+- `POST /api/langsmith`
+- `GET /api/verbose`
+- `POST /api/verbose`
+- `POST /api/log-level`
+
+模型管理接口（运行时切换 LLM provider/model，无需重启）：
+
+- `GET /api/admin/models` — 查看当前各角色模型配置
+- `PUT /api/admin/models/{role}` — 修改指定角色的模型/provider
+- `POST /api/admin/models/reset` — 重置为默认配置
+
+静态资源和文件接口：
+
+- `GET /`：返回前端构建产物的 `index.html`
+- `POST /upload`：上传文件
+- `GET /uploads/{filename}`：访问上传文件
+- `GET /download/{filename}`：下载生成文件
+
+## 数据库与迁移
+
+数据库初始化使用 `scripts/init.sql`，适合本地快速起库或容器初始化。
+
+当前主要表：
+
+- `users`
+- `oauth_accounts`
+- `user_sessions`
+- `user_quotas`
+- `usage_events`
+- `task_runs`
+- `task_events`
+- `conversations`
+
+其中 `task_events` 已开启 `pgvector` 向量列，用于对话检索。
+
+## 本地开发
 
 ### 环境要求
 
 - Python 3.13
 - PostgreSQL
 - Redis
-- `uv` 或 `pip`
+- Node.js / npm
+- 推荐 `uv`
 
-### 基础设施
+### 安装后端依赖
 
-启动 PostgreSQL 和 Redis 后，执行建表脚本：
+```bash
+uv venv .venv
+source .venv/bin/activate
+uv pip install -e .
+playwright install chromium
+```
+
+如需严格按锁文件安装：
+
+```bash
+uv pip install -r requirements.txt
+```
+
+### 初始化数据库
 
 ```bash
 psql -U chatdada -d chatdada -f scripts/init.sql
 ```
 
-默认连接地址（可通过环境变量覆盖）：
-
-```bash
-DATABASE_URL=postgresql://chatdada:chatdada@localhost:5432/chatdada
-REDIS_URL=redis://localhost:6379
-```
-
-### 安装依赖
-
-推荐使用项目虚拟环境：
-
-```bash
-uv venv .venv
-source .venv/bin/activate
-
-uv pip install -e .
-
-playwright install chromium
-```
-
-说明：
-
-- 依赖已定义在 `pyproject.toml`，使用 `uv pip install -e .` 即可安装全部依赖。
-- `playwright install chromium` 建议执行，因为 `deep_research` 会使用 `browser-use`。
-
-### 最小可用配置
-
-默认模型配置见 [core/models.py](core/models.py)。按当前仓库默认值，至少需要：
-
-```bash
-CO_API_KEY=your_proxy_key
-```
-
-服务启动时会自动调用 `load_dotenv()` 读取仓库根目录的 `.env` 文件，也可以直接通过 shell 环境变量注入。
-
-常见可选配置：
-
-```bash
-# 搜索
-TAVILY_API_KEY=your_tavily_key
-BRAVE_SEARCH_API_KEY=your_brave_key
-
-# Provider / 模型
-OPENAI_API_KEY=your_openai_key
-GOOGLE_API_KEY=your_google_key
-MOONSHOT_API_KEY=your_moonshot_key
-ANTHROPIC_API_KEY=your_anthropic_key
-YESCODE_GEMINI_BASE_URL=https://co.yes.vg/gemini
-
-# 数据库
-DATABASE_URL=postgresql://chatdada:chatdada@localhost:5432/chatdada
-REDIS_URL=redis://localhost:6379
-
-# 运行时
-LOCAL_AGENT_MEMORY_DIR=data/memory
-RESEARCH_DATA_DIR=data/research
-LLM_TIMEOUT_SECONDS=7200
-LLM_MAX_RETRIES=2
-
-# 图片生成
-IMAGE_GEN_API_URL=https://co.yes.vg/v1/chat/completions
-IMAGE_GEN_MODEL=gemini-3.1-flash-image-landscape
-```
-
-### 启动服务
+### 启动后端
 
 ```bash
 uvicorn main:app --reload --port 8000
 ```
 
-启动后访问：
+后端默认访问：
 
-- `http://localhost:8000/`
+- [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
-## 当前默认模型映射
+### 启动前端
 
-当前角色到模型的默认映射定义在 [core/models.py](core/models.py)：
+前端不在本仓库内，而是在同级目录：
 
-| role | provider | model |
-| --- | --- | --- |
-| `orchestrator` | `proxy` | `gpt-5.4` |
-| `search` | `proxy` | `gpt-5.4` |
-| `doc_analyst` | `google_proxy` | `gemini-3.1-pro-preview-customtools` |
-| `writer` | `proxy` | `gpt-5.4` |
-| `deep_research` | `google_proxy` | `gemini-3.1-pro-preview-customtools` |
-| `data_analyst` | `proxy` | `gpt-5.4` |
+- `../chat-dada-front`
 
-如果要切换模型或 provider，直接修改 `PROVIDERS` 和 `MODEL_CONFIGS`。
+开发模式：
 
-## 数据库 Schema
-
-任务持久化使用 PostgreSQL，建表脚本位于 [scripts/init.sql](scripts/init.sql)。
-
-```sql
--- task_runs: 任务主表
-task_id, user_id, status, task_text, mode, thinking_level,
-route_name, route_reason, route_confidence,
-request_payload (JSONB), pending_question (JSONB),
-result_text, error_text,
-created_at, started_at, finished_at, updated_at
-
--- task_events: 事件流表
-task_id, seq, event_type, payload (JSONB), created_at
+```bash
+cd ../chat-dada-front
+npm install
+npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-索引：`task_runs(user_id)`、`task_runs(status)`、`task_runs(created_at DESC)`、`task_events(task_id, seq)`。
+前端开发地址：
 
-服务启动时会自动标记中断的任务（queued/running/waiting_for_user）为 failed。
+- [http://127.0.0.1:5173](http://127.0.0.1:5173)
 
-## 监控与调试
+构建产物会输出到：
 
-除了业务事件流，后端还提供两个调试接口：
+- `../chat-dada-front/dist`
 
-| 接口 | 说明 |
-| --- | --- |
-| `GET /api/verbose` / `POST /api/verbose` | 查看或切换 verbose 输出 |
-| `POST /api/log-level` | 动态调整日志级别 |
+后端也可以直接服务这个构建产物，默认会从 `FRONTEND_DIST_DIR` 读取。
 
-任务结束时会追加一个 `monitoring` 事件，内容来自 [core/logger.py](core/logger.py) 的采集汇总，包括耗时、LLM 调用数、token 统计和错误信息。
+## 本地 Google 登录调试
+
+Google 控制台本地建议配置：
+
+### 已获授权的 JavaScript 来源
+
+- `http://127.0.0.1:5173`
+- `http://localhost:5173`
+- `http://127.0.0.1:8000`
+- `http://localhost:8000`
+
+### 已获授权的重定向 URI
+
+- `http://127.0.0.1:8000/auth/google/callback`
+- `http://localhost:8000/auth/google/callback`
+
+### `.env` 关键项
+
+```env
+DATABASE_URL=postgresql://chatdada:chatdada@localhost:5432/chatdada
+REDIS_URL=redis://localhost:6379
+FRONTEND_DIST_DIR=../chat-dada-front/dist
+
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_CALLBACK_URL=http://127.0.0.1:8000/auth/google/callback
+
+APP_NAME=Local Agent
+APP_BASE_URL=http://127.0.0.1:8000
+FRONTEND_REDIRECT_URL=http://127.0.0.1:5173
+
+SESSION_COOKIE_NAME=chat_dada_session
+SESSION_COOKIE_SECURE=false
+SESSION_COOKIE_SAMESITE=lax
+SESSION_COOKIE_DOMAIN=
+SESSION_MAX_AGE_SECONDS=2592000
+CORS_ALLOWED_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
+APP_SESSION_SECRET=replace-this-with-a-random-secret
+
+ADMIN_EMAILS=
+MODEL_PRICING_JSON=
+```
+
+### 研究 / 搜索 / LLM provider
+
+```env
+TAVILY_API_KEY=
+BRAVE_SEARCH_API_KEY=
+EXA_API_KEY=
+GEMINI_API_KEY=
+
+CO_API_KEY=
+OPENAI_API_KEY=
+MINIMAX_API_KEY=
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1
+MOONSHOT_API_KEY=
+GOOGLE_API_KEY=
+ANTHROPIC_API_KEY=
+YESCODE_GEMINI_BASE_URL=
+```
+
+### 图片生成
+
+```env
+IMAGE_GEN_API_URL=
+IMAGE_GEN_MODEL=
+```
+
+### 调试与 tracing
+
+```env
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=
+LANGSMITH_ENDPOINT=
+
+LLM_TIMEOUT_SECONDS=7200
+LLM_MAX_RETRIES=2
+```
 
 ## 测试
 
-当前测试位于 [tests](tests)：
-
-- `test_task_streaming.py` 覆盖任务提交、SSE、追问回复、HTTP 接口
-- `test_models.py` 覆盖模型适配层
-- `test_scheduler.py`、`test_orchestrator_runner.py` 覆盖编排执行
-- `test_deep_research.py` 覆盖深度研究 agent
-- `test_context_manager.py` 覆盖三层上下文管理
-- `test_progress_tracker.py` 覆盖进度追踪
-- `test_research_memory.py` 覆盖研究外部记忆
-- `test_research_planner.py` 覆盖研究子任务分解
-- `test_research_worker.py` 覆盖并行研究工作者
-- `test_research_notes.py` 覆盖研究笔记工具
-- `test_word_renderer.py`、`test_markdown_renderer.py` 覆盖渲染器
-
-运行：
+当前共 42 个测试文件。关键的后端回归包括：
 
 ```bash
-python -m unittest discover -s tests
+.venv/bin/python -m unittest \
+  tests.test_auth_password \
+  tests.test_auth_deps \
+  tests.test_auth_routes \
+  tests.test_quota_routes \
+  tests.test_task_sse_auth_lifecycle \
+  tests.test_conversation_context \
+  tests.test_platform_refactor \
+  tests.test_brain_registry \
+  tests.test_admin_models_api \
+  tests.test_coordinator_phase1 \
+  tests.test_dag_validation
 ```
 
-## 旧版代码说明
+如果你要重点验证研究工作流收敛，也可以补跑：
 
-这些路径仍保留，但不再是主执行链路：
+```bash
+.venv/bin/python -m unittest tests.test_research_worker_convergence
+```
 
-- [old/agent.py](old/agent.py)
-- [old/index.html](old/index.html)
-- [old/orchestrator.py](old/orchestrator.py)
+Coordinator 相关的完整测试套件：
 
-当前应以 [orchestrator/runner.py](orchestrator/runner.py) 和 [runtime/task_runtime.py](runtime/task_runtime.py) 为准。
+```bash
+.venv/bin/python -m unittest \
+  tests.test_coordinator_phase1 \
+  tests.test_coordinator_phase2_e2e \
+  tests.test_coordinator_phase2_events \
+  tests.test_coordinator_phase2_interrupt \
+  tests.test_coordinator_phase2_checkpoints \
+  tests.test_coordinator_phase2_research \
+  tests.test_coordinator_phase2_patent \
+  tests.test_coordinator_phase2_ppt \
+  tests.test_coordinator_phase2_zero_report \
+  tests.test_coordinator_phase3_routing_accuracy \
+  tests.test_coordinator_phase3_singleskill_latency \
+  tests.test_coordinator_phase3_crossdomain \
+  tests.test_coordinator_phase3_event_sequence
+```
+
+前端构建检查：
+
+```bash
+cd ../chat-dada-front
+npm run build
+```
+
+## 当前要点
+
+- 所有源码归入 5 个顶级包：`web/`、`agent/`、`domain/`、`infra/`、`core/`
+- `agent/brain/` 实现运行时模型注册与切换，支持通过 `/api/admin/models` 动态修改；`core/models.py` 现为兼容 shim
+- Coordinator 统一了 direct（直答）/ single_skill（单领域）/ dag（多任务编排）三种执行路径，替代了原有的 dispatcher + strategy_selector 分层
+- 领域 skill 通过 `SkillRegistry` 自动发现注册（`agent/coordinator/skills.py`）
+- 自审门控：`review_gates` 实现 run → review → retry 循环
+- Google 登录和邮箱密码登录都已接入
+- 主业务 HTTP 接口已经要求登录
+- quota 管理接口和前端额度展示已经接入
+- `conversation_context` 已经支持 raw / summary / summary+retrieval 三种策略
+- `cost_usd` 现在按 `MODEL_PRICING_JSON` 基于 LLM token 使用量估算；未配置时会退化为 `0`
+- 生产上线前，必须替换 `APP_SESSION_SECRET`，并确认 `SESSION_COOKIE_SECURE`、`SESSION_COOKIE_DOMAIN`、`CORS_ALLOWED_ORIGINS` 与域名配置一致

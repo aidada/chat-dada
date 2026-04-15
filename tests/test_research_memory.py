@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from capabilities.memory import ResearchMemory, _sanitize_tool_name
+from agent.capabilities.memory import ResearchMemory, _sanitize_tool_name
 
 
 class ResearchMemoryTests(unittest.TestCase):
@@ -113,7 +113,7 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_checkpoint_version_roundtrip(self) -> None:
-        from capabilities.memory import CHECKPOINT_VERSION
+        from agent.capabilities.memory import CHECKPOINT_VERSION
         self.mem.init("q", "default")
         state = {"step_count": 5, "findings": "test"}
         self.mem.save_checkpoint(5, state)
