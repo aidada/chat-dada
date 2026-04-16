@@ -77,6 +77,70 @@ This is preferred over both:
 
 ## Proposed Architecture
 
+### Layering Model
+
+The staged execution design should be split into two layers:
+
+1. **Office Core**
+2. **Format Strategy**
+
+This avoids hard-coding PPT-specific semantics into the long-term Office execution backbone.
+
+#### Office Core
+
+The Office Core owns shared runtime structure for `.pptx`, `.docx`, and `.xlsx`:
+
+- stage machine
+- task-level and stage-level cost accounting
+- error classification
+- artifact registration
+- flush/finalize
+- runtime-target handling
+- partial-completion reporting
+
+Core state should include:
+
+- `task_profile`
+- `execution_state`
+- `cost_state`
+- `review_state`
+- `artifact_state`
+
+The Office Core should not directly assume slide-based semantics.
+
+#### Format Strategy
+
+Format Strategy owns file-type-specific planning, unit-of-work construction, and quality gates.
+
+Examples:
+
+- `PptStrategy`
+  - slide count
+  - deck plan
+  - batch plan
+  - transitions
+  - notes
+  - visual density
+
+- `DocxStrategy`
+  - document section plan
+  - heading structure
+  - tables and references
+
+- `XlsxStrategy`
+  - workbook and sheet plan
+  - formulas
+  - charts
+  - summary and pivot outputs
+
+The shared strategy contract should be:
+
+- `plan(task_profile) -> plan`
+- `get_build_units(plan) -> list[build_unit]`
+- `build_unit(unit, state) -> build_result`
+- `review(state) -> quality_report`
+- `repair(report, state) -> repair_result`
+
 ### Top-Level Flow
 
 The external orchestration path remains:
@@ -146,6 +210,28 @@ The finalize stage is reserved for:
 No return to build is allowed after finalize begins.
 
 ## Component Design
+
+### OfficeCoreWorkflow
+
+Purpose: run the shared staged execution skeleton.
+
+Responsibilities:
+
+- own stage transitions
+- apply stage budgets
+- invoke strategy-specific plan/build/review/repair logic
+- emit partial completion diagnostics
+- own finalize semantics
+
+### Format Strategy Implementations
+
+Initial strategies:
+
+- `PptStrategy`
+- `DocxStrategy`
+- `XlsxStrategy`
+
+Rollout order is PPT first, then DOCX/XLSX after the core skeleton is stable.
 
 ### GoalNormalizer
 
@@ -260,6 +346,76 @@ Responsibilities:
 6. If QA is `fixable`, bounded repair runs and QA is re-executed.
 7. `Finalize` closes the file, records artifacts, and emits the final result.
 8. `TaskCostRecorder` records totals and stage/call details throughout.
+
+## Migration Path
+
+The migration should proceed incrementally to avoid destabilizing the already-evolving Office flow.
+
+### Step 1: Stabilize Current Office Workflow
+
+Keep the current `agent/domains/office/workflow.py` as the active implementation while:
+
+- dynamic budgeting
+- convergence
+- cost logging
+- staged execution skeleton
+
+are stabilized in place.
+
+This step prioritizes behavioral confidence over structural elegance.
+
+### Step 2: Extract Office Core Without Changing Behavior
+
+Move shared behavior out of the monolithic workflow file into an Office Core layer:
+
+- shared state
+- stage routing
+- finalize helpers
+- cost integration
+- error handling helpers
+
+This step should be mostly a code-movement refactor with minimal behavior change.
+
+### Step 3: Move PPT-Specific Logic Into `PptStrategy`
+
+Once Office Core is stable, migrate PPT-specific logic out of the workflow file:
+
+- deck planning
+- batch planning
+- PPT review gates
+- slide-specific quality metrics
+
+At this point, the Office Core becomes truly format-agnostic.
+
+### Step 4: Add DOCX And XLSX Strategies
+
+After PPT proves the architecture, add:
+
+- `DocxStrategy`
+- `XlsxStrategy`
+
+without changing the stage skeleton again.
+
+## Code Structure Target
+
+Recommended target layout:
+
+- `agent/domains/office/core/`
+  - `workflow.py`
+  - `state.py`
+  - `routing.py`
+  - `finalize.py`
+  - `errors.py`
+  - `costs.py`
+- `agent/domains/office/strategies/`
+  - `base.py`
+  - `ppt.py`
+  - `docx.py`
+  - `xlsx.py`
+- `agent/domains/office/orchestrated.py`
+  - remains the stable external entrypoint
+
+The current implementation may temporarily keep some of this logic in `office/workflow.py` while the migration is in progress.
 
 ## State Model
 
