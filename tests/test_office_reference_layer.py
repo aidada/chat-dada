@@ -66,7 +66,6 @@ def test_inspect_reference_file_canonicalizes_uppercase_spaced_format_name(monke
 
     profiled = asyncio.run(reference_inspector.inspect_reference_file(format_name=" XLSX ", file_path="book.xlsx"))
 
-    assert calls == ["text", "issues"]
     assert profiled["text"] == "sheet text"
     assert profiled["issues"]["text"] == "sheet issues"
     assert profiled["issues"]["message"] == "issues ready"

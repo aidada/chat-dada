@@ -58,11 +58,13 @@ def _unwrap_officecli_result(result: dict[str, Any], *, mode: str) -> Any:
                     "raw_stdout": raw_stdout,
                     "raw_stderr": raw_stderr,
                     "success": bool(result.get("success")),
-                    "kind": str(result.get("kind") or ""),
-                    "exit_status": result.get("exit_status"),
-                }
+                        "kind": str(result.get("kind") or ""),
+                        "exit_status": result.get("exit_status"),
+                    }
             if mode == "text":
-                return parsed
+                if isinstance(parsed, str):
+                    return parsed
+                return raw_stdout or message or raw_stderr
         except json.JSONDecodeError:
             pass
 
