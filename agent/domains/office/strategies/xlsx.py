@@ -554,6 +554,13 @@ def _normalize_batches(
                 "slide_roles": [str(sheet.get("sheet_type", "") or "") for sheet in expected_slice],
             }
         )
+    expected_ranges = [(position, position) for position in range(1, sheet_count + 1)]
+    normalized_ranges = [
+        (int(batch.get("sheet_start", 0) or 0), int(batch.get("sheet_end", 0) or 0))
+        for batch in normalized
+    ]
+    if normalized_ranges != expected_ranges:
+        return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
     return normalized
 
 
