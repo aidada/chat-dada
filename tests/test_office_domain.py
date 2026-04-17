@@ -265,6 +265,25 @@ def test_xlsx_strategy_accepts_realistic_multi_word_sheet_name() -> None:
     ]
 
 
+def test_xlsx_strategy_ignores_string_hard_requirements_value() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": "RawData",
+            },
+            "reference_structure_constraints": {"units": [{"name": "Summary"}]},
+        },
+    )
+
+    assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary"]
+
+
 def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 
@@ -306,6 +325,62 @@ def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> 
     assert issues == []
     assert plan["sheets"] == [existing_sheet]
     assert plan["batches"] == [existing_batch]
+
+
+def test_xlsx_strategy_validate_plan_normalizes_stale_alias_fields_in_preserved_batch() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    strategy = XlsxStrategy()
+    existing_sheets = [
+        {
+            "name": "Budget",
+            "purpose": "Track approved budget lines.",
+            "sheet_type": "summary",
+            "columns": [],
+            "table_regions": [],
+            "formula_regions": [],
+            "chart_regions": [],
+            "validation_rules": [],
+        }
+    ]
+
+    plan, issues = strategy.validate_plan(
+        plan={
+            "title": "Budget Workbook",
+            "sheet_count": 1,
+            "sheets": existing_sheets,
+            "batches": [
+                {
+                    "index": 0,
+                    "sheet_start": 1,
+                    "sheet_end": 1,
+                    "sheet_names": ["Budget"],
+                    "slide_start": 1,
+                    "slide_end": 1,
+                    "slide_titles": ["Old Title"],
+                    "slide_roles": ["worksheet"],
+                }
+            ],
+        },
+        goal="生成预算表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+    )
+
+    assert issues == []
+    assert plan["batches"] == [
+        {
+            "index": 0,
+            "sheet_start": 1,
+            "sheet_end": 1,
+            "sheet_names": ["Budget"],
+            "slide_start": 1,
+            "slide_end": 1,
+            "slide_titles": ["Budget"],
+            "slide_roles": ["summary"],
+        }
+    ]
 
 
 def test_xlsx_strategy_validate_plan_rebuilds_inconsistent_preserved_batch() -> None:

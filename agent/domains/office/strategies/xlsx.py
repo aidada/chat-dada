@@ -326,7 +326,9 @@ def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None)
     if isinstance(merged_constraints, dict):
         goal_constraints = merged_constraints.get("goal_constraints")
         if isinstance(goal_constraints, dict):
-            hard_requirements = list(goal_constraints.get("hard_requirements") or [])
+            raw_requirements = goal_constraints.get("hard_requirements")
+            if isinstance(raw_requirements, (list, tuple)):
+                hard_requirements = list(raw_requirements)
 
     names: list[str] = []
     for item in hard_requirements:
@@ -506,6 +508,7 @@ def _normalize_batches(
         names = _coerce_batch_list(batch, "sheet_names")
         if start <= 0 or end < start or end > sheet_count or not names:
             return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
+        expected_slice = sheets[start - 1:end]
         expected_names = sheet_names[start - 1:end]
         if names != expected_names:
             return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
@@ -517,8 +520,8 @@ def _normalize_batches(
                 "sheet_names": names,
                 "slide_start": int(batch.get("slide_start", start) or start),
                 "slide_end": int(batch.get("slide_end", end) or end),
-                "slide_titles": _coerce_batch_list(batch, "slide_titles") or names,
-                "slide_roles": _coerce_batch_list(batch, "slide_roles") or [_sheet_type(name) for name in names],
+                "slide_titles": [str(sheet.get("name", "") or "") for sheet in expected_slice],
+                "slide_roles": [str(sheet.get("sheet_type", "") or "") for sheet in expected_slice],
             }
         )
     return normalized
