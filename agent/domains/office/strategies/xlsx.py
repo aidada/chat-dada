@@ -1,10 +1,385 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 from agent.domains.office.strategies.default import DefaultOfficeStrategy
 
 
 class XlsxStrategy(DefaultOfficeStrategy):
-    """Placeholder strategy for XLSX during staged migration."""
+    def build_plan(
+        self,
+        *,
+        goal: str,
+        requested_slide_count: int,
+        build_batch_size: int,
+        default_create_file: str,
+        merged_constraints: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        title = _infer_workbook_title(goal, default_create_file)
+        sheets = _build_sheets(goal=goal, merged_constraints=merged_constraints)
+        batches = _build_batches(sheets=sheets, build_batch_size=build_batch_size)
+        sheet_count = len(sheets)
+        return {
+            "title": title,
+            "sheet_count": sheet_count,
+            "sheets": sheets,
+            "batches": batches,
+            # Keep the shared workflow stable until workbook-native naming is threaded through it.
+            "slide_count": sheet_count,
+            "slides": sheets,
+        }
+
+    def summarize_plan(self, plan: dict[str, Any]) -> str:
+        if not isinstance(plan, dict):
+            return ""
+        sheets = list(plan.get("sheets") or [])
+        batches = list(plan.get("batches") or [])
+        lines = [
+            f"- workbook_title: {str(plan.get('title', '') or '').strip()}",
+            f"- planned_sheet_count: {int(plan.get('sheet_count', 0) or 0)}",
+        ]
+        if sheets:
+            lines.append("- sheet_outline:")
+            for index, sheet in enumerate(sheets[:12], start=1):
+                lines.append(
+                    f"  - sheet[{index}] {str(sheet.get('name', '') or '').strip()} ({str(sheet.get('sheet_type', '') or '').strip()}) :: {str(sheet.get('purpose', '') or '').strip()}"
+                )
+        if batches:
+            lines.append("- build_batches:")
+            for batch in batches:
+                lines.append(
+                    f"  - batch[{int(batch.get('index', 0) or 0)}] sheets {int(batch.get('sheet_start', 0) or 0)}-{int(batch.get('sheet_end', 0) or 0)}: {', '.join(str(item) for item in batch.get('sheet_names', []) or [])}"
+                )
+        return "\n".join(lines)
+
+    def validate_plan(
+        self,
+        *,
+        plan: dict[str, Any],
+        goal: str,
+        requested_slide_count: int,
+        build_batch_size: int,
+        default_create_file: str,
+        merged_constraints: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        if not isinstance(plan, dict):
+            fallback = self.build_plan(
+                goal=goal,
+                requested_slide_count=requested_slide_count,
+                build_batch_size=build_batch_size,
+                default_create_file=default_create_file,
+                merged_constraints=merged_constraints,
+            )
+            return fallback, ["plan_not_dict"]
+
+        issues: list[str] = []
+        title = str(plan.get("title", "") or "").strip()
+        if not title:
+            issues.append("missing_title")
+
+        raw_sheets = plan.get("sheets")
+        if not isinstance(raw_sheets, list) or not raw_sheets:
+            issues.append("missing_sheets")
+
+        normalized = self.build_plan(
+            goal=goal,
+            requested_slide_count=max(int(plan.get("sheet_count", 0) or 0), requested_slide_count),
+            build_batch_size=build_batch_size,
+            default_create_file=default_create_file,
+            merged_constraints=merged_constraints,
+        )
+        if title:
+            normalized["title"] = title
+        return normalized, issues
+
+    def get_current_batch(self, plan: dict[str, Any], batch_index: int) -> dict[str, Any] | None:
+        batches = list(plan.get("batches") or []) if isinstance(plan, dict) else []
+        if batch_index < 0 or batch_index >= len(batches):
+            return None
+        return dict(batches[batch_index])
+
+    def build_phase_guidance(
+        self,
+        *,
+        plan: dict[str, Any],
+        current_batch_index: int,
+        repair_mode: bool,
+        qa_feedback: str,
+    ) -> str:
+        batch = self.get_current_batch(plan, current_batch_index)
+        if repair_mode:
+            guidance = [
+                "- 当前阶段: repair run",
+                "- 本轮只允许修复上一轮 QA 指出的工作簿问题。",
+                "- 修复完成后，执行 validate / view stats，并返回更新后的 stats。",
+            ]
+            if qa_feedback:
+                guidance.extend(["- 必须优先修复这些问题：", qa_feedback])
+            return "\n".join(guidance)
+
+        if batch is None:
+            return "- 当前阶段: build\n- 所有 sheet batch 已规划完成，本轮如果继续，只允许执行最终 QA。"
+
+        lines = [
+            "- 当前阶段: build",
+            f"- 当前 batch: {current_batch_index + 1}/{max(len(plan.get('batches', []) or []), 1)}",
+            f"- 只处理 sheet {int(batch.get('sheet_start', 0) or 0)}-{int(batch.get('sheet_end', 0) or 0)}。",
+        ]
+        sheet_names = ", ".join(str(item) for item in batch.get("sheet_names", []) or [])
+        if sheet_names:
+            lines.append(f"- 本批 sheet: {sheet_names}")
+        lines.append("- 先保证工作簿结构、表区域和公式区域完整，再做最终交付。")
+        return "\n".join(lines)
+
+    def build_input_sections(
+        self,
+        *,
+        goal: str,
+        operation: str,
+        format_hint: str,
+        runtime_target: str,
+        default_create_file: str,
+        requested_slide_count: int | None,
+        build_batch_size: int,
+        source_files: list[str],
+        context: str,
+        qa_feedback: str,
+        plan: dict[str, Any],
+        current_batch_index: int,
+        repair_mode: bool,
+    ) -> list[str]:
+        sections = [
+            goal,
+            "",
+            "执行上下文：",
+            f"- operation: {operation}",
+            f"- format: {format_hint}",
+            f"- runtime_target: {runtime_target}",
+        ]
+        if default_create_file:
+            sections.append(f"- default_create_file: {default_create_file}")
+        sections.append(f"- build_batch_size: {build_batch_size}")
+        if plan:
+            sections.extend(["- workbook_plan:", self.summarize_plan(plan)])
+        sections.append(f"- current_batch_index: {current_batch_index}")
+        sections.append(f"- repair_mode: {str(repair_mode).lower()}")
+        batch = self.get_current_batch(plan, current_batch_index)
+        if batch is not None:
+            sections.append(
+                f"- current_batch_sheet_range: {int(batch.get('sheet_start', 0) or 0)}-{int(batch.get('sheet_end', 0) or 0)}"
+            )
+        if source_files:
+            sections.append("- source_files:")
+            sections.extend(f"  - {item}" for item in source_files)
+        if context:
+            sections.extend(["", "已有上下文：", context])
+        if qa_feedback:
+            sections.extend(["", "上轮 QA 未通过，必须先修正这些问题：", qa_feedback])
+        return sections
+
+    def evaluate_quality_stats(
+        self,
+        *,
+        operation: str,
+        stats: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if operation not in {"create", "edit", "transform"}:
+            return []
+        if not isinstance(stats, dict) or not stats:
+            return [{"severity": "error", "message": "XLSX 写入结果缺少质量 stats"}]
+        return []
+
+    def advance_after_build(
+        self,
+        *,
+        plan: dict[str, Any],
+        current_batch_index: int,
+        repair_mode: bool,
+        completed_pages: int,
+    ) -> dict[str, Any]:
+        if repair_mode:
+            return {
+                "current_batch_index": current_batch_index,
+                "completed_pages": completed_pages,
+                "next_stage": "qa_fix",
+            }
+
+        batch = self.get_current_batch(plan, current_batch_index)
+        next_batch_index = current_batch_index + 1
+        next_completed_pages = completed_pages
+        if batch is not None:
+            next_completed_pages = max(next_completed_pages, int(batch.get("sheet_end", 0) or 0))
+        next_stage = "build" if next_batch_index < len(plan.get("batches", []) or []) else "qa_fix"
+        return {
+            "current_batch_index": next_batch_index,
+            "completed_pages": next_completed_pages,
+            "next_stage": next_stage,
+        }
+
+
+def _infer_workbook_title(goal: str, default_create_file: str) -> str:
+    compact = str(goal or "").replace("\n", " ").strip()
+    if compact:
+        return compact[:80]
+    stem = Path(str(default_create_file or "")).stem.replace("-", " ").strip()
+    return stem or "Workbook"
+
+
+def _build_sheets(*, goal: str, merged_constraints: dict[str, Any] | None) -> list[dict[str, Any]]:
+    names = _derive_sheet_names(goal=goal, merged_constraints=merged_constraints)
+    return [
+        {
+            "name": name,
+            "purpose": _sheet_purpose(name),
+            "sheet_type": _sheet_type(name),
+            "columns": _sheet_columns(name),
+            "table_regions": _table_regions(name),
+            "formula_regions": _formula_regions(name),
+            "chart_regions": _chart_regions(name),
+            "validation_rules": _validation_rules(name),
+        }
+        for name in names
+    ]
+
+
+def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None) -> list[str]:
+    hard_requirements = []
+    if isinstance(merged_constraints, dict):
+        goal_constraints = merged_constraints.get("goal_constraints")
+        if isinstance(goal_constraints, dict):
+            hard_requirements = list(goal_constraints.get("hard_requirements") or [])
+
+    names: list[str] = []
+    for item in hard_requirements:
+        name = str(item or "").strip()
+        if name and name not in names:
+            names.append(name)
+
+    if isinstance(merged_constraints, dict):
+        structure_constraints = merged_constraints.get("reference_structure_constraints")
+        units = structure_constraints.get("units") if isinstance(structure_constraints, dict) else []
+        if isinstance(units, list):
+            for unit in units:
+                if not isinstance(unit, dict):
+                    continue
+                name = str(unit.get("name", "") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+
+    if names:
+        return names
+
+    fallback_names = []
+    lowered = str(goal or "").lower()
+    if "dashboard" in lowered or "仪表盘" in goal:
+        fallback_names.append("Dashboard")
+    if "summary" in lowered or "汇总" in goal or "总结" in goal:
+        fallback_names.append("Summary")
+    if "raw" in lowered or "原始" in goal:
+        fallback_names.append("RawData")
+    return fallback_names or ["Sheet1"]
+
+
+def _sheet_type(name: str) -> str:
+    lowered = str(name or "").strip().lower()
+    if "dashboard" in lowered or "仪表盘" in name:
+        return "dashboard"
+    if "summary" in lowered or "汇总" in name or "总览" in name:
+        return "summary"
+    if "raw" in lowered or "data" in lowered or "明细" in name or "原始" in name:
+        return "raw_data"
+    return "worksheet"
+
+
+def _sheet_purpose(name: str) -> str:
+    sheet_type = _sheet_type(name)
+    if sheet_type == "dashboard":
+        return "Display KPI highlights and charts derived from summary metrics."
+    if sheet_type == "summary":
+        return "Aggregate the core metrics needed for review and downstream analysis."
+    if sheet_type == "raw_data":
+        return "Store source records in a structured table for calculations."
+    return "Support workbook calculations and organization."
+
+
+def _sheet_columns(name: str) -> list[dict[str, str]]:
+    sheet_type = _sheet_type(name)
+    if sheet_type == "dashboard":
+        return [
+            {"name": "Metric", "type": "text"},
+            {"name": "Value", "type": "number"},
+            {"name": "Trend", "type": "text"},
+        ]
+    if sheet_type == "summary":
+        return [
+            {"name": "Metric", "type": "text"},
+            {"name": "Value", "type": "number"},
+            {"name": "Variance", "type": "number"},
+        ]
+    return [
+        {"name": "Category", "type": "text"},
+        {"name": "Amount", "type": "number"},
+        {"name": "Date", "type": "date"},
+    ]
+
+
+def _table_regions(name: str) -> list[dict[str, str]]:
+    return [{"name": f"{name}Table", "range_hint": "A1:C20"}]
+
+
+def _formula_regions(name: str) -> list[dict[str, str]]:
+    sheet_type = _sheet_type(name)
+    if sheet_type == "summary":
+        return [{"name": "SummaryCalculations", "range_hint": "E2:G20"}]
+    if sheet_type == "dashboard":
+        return [{"name": "DashboardMetrics", "range_hint": "E2:F10"}]
+    return []
+
+
+def _chart_regions(name: str) -> list[dict[str, str]]:
+    if _sheet_type(name) == "dashboard":
+        return [{"name": "PrimaryChart", "range_hint": "H2:M16"}]
+    return []
+
+
+def _validation_rules(name: str) -> list[dict[str, str]]:
+    rules = [{"kind": "required_headers", "target": "A1:C1"}]
+    if _sheet_type(name) == "raw_data":
+        rules.append({"kind": "numeric_amounts", "target": "B2:B1048576"})
+    return rules
+
+
+def _build_batches(*, sheets: list[dict[str, Any]], build_batch_size: int) -> list[dict[str, Any]]:
+    batch_size = max(int(build_batch_size or 1), 1)
+    batches: list[dict[str, Any]] = []
+    for start in range(0, len(sheets), batch_size):
+        batch_sheets = sheets[start:start + batch_size]
+        batches.append(
+            {
+                "index": len(batches),
+                "sheet_start": start + 1,
+                "sheet_end": start + len(batch_sheets),
+                "sheet_names": [str(sheet.get("name", "") or "") for sheet in batch_sheets],
+                # Keep generic workflow counters stable while XLSX-specific keys are introduced.
+                "slide_start": start + 1,
+                "slide_end": start + len(batch_sheets),
+                "slide_titles": [str(sheet.get("name", "") or "") for sheet in batch_sheets],
+                "slide_roles": [str(sheet.get("sheet_type", "") or "") for sheet in batch_sheets],
+            }
+        )
+    return batches or [
+        {
+            "index": 0,
+            "sheet_start": 0,
+            "sheet_end": 0,
+            "sheet_names": [],
+            "slide_start": 0,
+            "slide_end": 0,
+            "slide_titles": [],
+            "slide_roles": [],
+        }
+    ]
 
 
 __all__ = ["XlsxStrategy"]

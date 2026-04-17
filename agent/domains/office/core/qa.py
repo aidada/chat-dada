@@ -21,6 +21,19 @@ def _attach_fidelity_deviations(
     return decorated
 
 
+def _extract_completed_units(stats: dict[str, Any], fallback: int) -> int:
+    if not isinstance(stats, dict):
+        return fallback
+    for key in ("slide_count", "sheet_count"):
+        try:
+            value = int(stats.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return fallback
+
+
 def run_qa_fix_stage(
     state: OfficeWorkflowState,
     *,
@@ -216,11 +229,7 @@ def run_qa_fix_stage(
         "issues": issues,
     }
     quality_summary = summarize_quality_report(quality_report)
-    completed_pages = 0
-    try:
-        completed_pages = int(stats.get("slide_count", 0) or 0)
-    except (TypeError, ValueError):
-        completed_pages = int(state.get("completed_pages", 0) or 0)
+    completed_pages = _extract_completed_units(stats, int(state.get("completed_pages", 0) or 0))
     cost_ledger = update_completed_pages(cost_ledger, completed_pages=completed_pages)
     cost_ledger = attach_quality_summary(cost_ledger, quality_report_summary=quality_summary)
 

@@ -205,6 +205,26 @@ def test_strategy_selector_returns_docx_and_xlsx_specific_strategies() -> None:
     assert isinstance(get_strategy_for_format("xlsx"), XlsxStrategy)
 
 
+def test_xlsx_strategy_builds_sheet_plan_from_goal_and_reference() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成一个预算分析表，包含 RawData、Summary、Dashboard",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget-analysis.xlsx",
+        merged_constraints={
+            "goal_constraints": {"hard_requirements": ["RawData", "Summary", "Dashboard"]},
+            "reference_structure_constraints": {"units": [{"name": "RawData"}, {"name": "Summary"}]},
+            "reference_style_constraints": {"style_tokens": {"summary_position": "top"}},
+        },
+    )
+
+    assert plan["sheet_count"] == 3
+    assert plan["sheets"][0]["name"] == "RawData"
+    assert plan["sheets"][2]["sheet_type"] == "dashboard"
+
+
 def test_ppt_strategy_build_input_sections_include_batch_context() -> None:
     from agent.domains.office.strategies.ppt import PptStrategy
 
