@@ -15,11 +15,17 @@ class OfficeWorkflowState(TypedDict, total=False):
     requested_slide_count: int
     build_batch_size: int
     source_files: list[str]
+    reference_files: list[str]
     operation_hint: str
     quality_profile: dict[str, Any]
     cost_ledger: dict[str, Any]
     current_stage: str
     task_profile: dict[str, Any]
+    goal_constraints: dict[str, Any]
+    reference_structure_constraints: dict[str, Any]
+    reference_style_constraints: dict[str, Any]
+    existing_document_profile: dict[str, Any]
+    fidelity_deviations: list[dict[str, Any]]
     deck_plan: dict[str, Any]
     planning_summary: dict[str, Any]
     planner_validation_issues: list[str]
