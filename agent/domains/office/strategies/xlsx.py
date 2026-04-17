@@ -289,6 +289,9 @@ class XlsxStrategy(DefaultOfficeStrategy):
             return []
         if not isinstance(stats, dict) or not stats:
             return [{"severity": "error", "message": "XLSX 写入结果缺少质量 stats"}]
+        sheet_count = _coerce_int(stats.get("sheet_count"), default=0)
+        if sheet_count <= 0:
+            return [{"severity": "error", "message": "XLSX 质量 stats 缺少有效的 sheet_count"}]
         return []
 
     def advance_after_build(

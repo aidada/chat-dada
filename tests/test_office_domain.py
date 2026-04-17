@@ -1577,6 +1577,52 @@ async def test_office_workflow_xlsx_quality_stats_required_for_write() -> None:
 
 
 @pytest.mark.asyncio
+async def test_office_workflow_xlsx_quality_stats_require_sheet_count() -> None:
+    from agent.domains.office.workflow import evaluate_node
+
+    state = {
+        "format": "xlsx",
+        "operation": "create",
+        "write_required": True,
+        "intermediate_results": [
+            {
+                "output": """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"budget.xlsx","format":"xlsx","role":"primary"}],"stats":{"foo":"bar"}}
+```"""
+            }
+        ],
+    }
+
+    result = await evaluate_node(state)
+
+    assert result["evaluations"][0]["passed"] is False
+    assert any("sheet_count" in issue["message"] for issue in result["evaluations"][0]["issues"])
+
+
+@pytest.mark.asyncio
+async def test_office_workflow_xlsx_quality_stats_pass_with_sheet_count() -> None:
+    from agent.domains.office.workflow import evaluate_node
+
+    state = {
+        "format": "xlsx",
+        "operation": "create",
+        "write_required": True,
+        "intermediate_results": [
+            {
+                "output": """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"budget.xlsx","format":"xlsx","role":"primary"}],"stats":{"sheet_count":3}}
+```"""
+            }
+        ],
+    }
+
+    result = await evaluate_node(state)
+
+    assert result["evaluations"][0]["passed"] is True
+    assert result["quality_report"]["stats_summary"]["sheet_count"] == 3
+
+
+@pytest.mark.asyncio
 async def test_office_qa_fix_uses_sheet_count_when_slide_count_missing() -> None:
     from agent.domains.office.workflow import qa_fix_node
 
