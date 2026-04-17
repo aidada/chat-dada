@@ -549,7 +549,7 @@ async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
         refined_filename = refine_filename_from_plan(
             current_filename=default_create_file,
             plan_title=str(deck_plan.get("title", "") or ""),
-            format_name=str(state.get("format", "") or ""),
+            format_name=str(strategy_format or ""),
         )
     else:
         refined_filename = default_create_file

@@ -136,6 +136,25 @@ async def test_planning_node_carries_reference_constraints_into_task_profile() -
     assert result["planning_summary"]["slide_count"] == 8
 
 
+@pytest.mark.asyncio
+async def test_planning_node_refines_filename_when_format_is_inferred() -> None:
+    from agent.domains.office.workflow import planning_node
+
+    result = await planning_node(
+        {
+            "goal": "在下载文件夹下，为我生成一个 10 页 PPT，主题为 AI 时代儿童现代化教育",
+            "requested_slide_count": 10,
+            "build_batch_size": 3,
+            "default_create_file": "ai.pptx",
+            "operation": "create",
+            "cost_ledger": {},
+        }
+    )
+
+    assert result["task_profile"]["target_filename"].endswith(".pptx")
+    assert result["task_profile"]["target_filename"] != "ai.pptx"
+
+
 def test_office_route_after_build_loops_until_all_batches_written() -> None:
     from agent.domains.office.workflow import route_after_build
 
