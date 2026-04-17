@@ -823,6 +823,25 @@ def test_xlsx_strategy_sanitizes_table_region_identifier_from_multi_word_sheet_n
     assert plan["sheets"][0]["table_regions"] == [{"name": "RegionalSalesSummaryTable", "range_hint": "A1:C20"}]
 
 
+def test_xlsx_strategy_sanitizes_numeric_leading_table_region_identifier() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": ["2026 Budget"],
+            },
+        },
+    )
+
+    assert plan["sheets"][0]["name"] == "2026 Budget"
+    assert plan["sheets"][0]["table_regions"] == [{"name": "tbl_2026BudgetTable", "range_hint": "A1:C20"}]
+
+
 def test_xlsx_strategy_validate_plan_normalizes_stale_alias_fields_in_preserved_batch() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 

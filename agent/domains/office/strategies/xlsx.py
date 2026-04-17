@@ -602,8 +602,12 @@ def _has_full_batch_coverage(batches: list[dict[str, Any]], *, sheet_count: int)
 
 
 def _structural_identifier(value: str) -> str:
-    chars = [char for char in str(value or "") if char.isalnum()]
-    return "".join(chars) or "Sheet"
+    identifier = "".join(char for char in str(value or "") if char.isalnum())
+    if not identifier:
+        return "Sheet"
+    if identifier[0].isdigit():
+        return f"tbl_{identifier}"
+    return identifier
 
 
 __all__ = ["XlsxStrategy"]
