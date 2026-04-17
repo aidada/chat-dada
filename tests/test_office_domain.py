@@ -307,6 +307,24 @@ def test_xlsx_strategy_accepts_numeric_and_light_punctuation_sheet_names() -> No
     ]
 
 
+def test_xlsx_strategy_accepts_comma_separated_explicit_sheet_name() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成财务预算表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": ["Summary, Final", "preserve formulas", "rename summary sheet"]
+            },
+        },
+    )
+
+    assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary, Final"]
+
+
 def test_xlsx_strategy_rejects_overlong_sheet_name() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 
