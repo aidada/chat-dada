@@ -225,6 +225,68 @@ def test_xlsx_strategy_builds_sheet_plan_from_goal_and_reference() -> None:
     assert plan["sheets"][2]["sheet_type"] == "dashboard"
 
 
+def test_xlsx_strategy_ignores_non_sheet_like_hard_requirements() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成一个预算分析表，保留公式并重命名汇总表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget-analysis.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": ["preserve formulas", "RawData", "rename summary sheet", "Dashboard"]
+            },
+            "reference_structure_constraints": {"units": [{"name": "Summary"}]},
+        },
+    )
+
+    assert [sheet["name"] for sheet in plan["sheets"]] == ["RawData", "Dashboard", "Summary"]
+
+
+def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    strategy = XlsxStrategy()
+    existing_sheet = {
+        "name": "Budget",
+        "purpose": "Track approved budget lines.",
+        "sheet_type": "summary",
+        "columns": [{"name": "Department", "type": "text"}],
+        "table_regions": [{"name": "BudgetTable", "range_hint": "A1:B10"}],
+        "formula_regions": [{"name": "BudgetFormula", "range_hint": "D2:D10"}],
+        "chart_regions": [],
+        "validation_rules": [{"kind": "required_headers", "target": "A1:B1"}],
+    }
+    existing_batch = {
+        "index": 0,
+        "sheet_start": 1,
+        "sheet_end": 1,
+        "sheet_names": ["Budget"],
+        "slide_start": 1,
+        "slide_end": 1,
+        "slide_titles": ["Budget"],
+        "slide_roles": ["summary"],
+    }
+
+    plan, issues = strategy.validate_plan(
+        plan={
+            "title": "Budget Workbook",
+            "sheet_count": 1,
+            "sheets": [existing_sheet],
+            "batches": [existing_batch],
+        },
+        goal="生成预算表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+    )
+
+    assert issues == []
+    assert plan["sheets"] == [existing_sheet]
+    assert plan["batches"] == [existing_batch]
+
+
 def test_ppt_strategy_build_input_sections_include_batch_context() -> None:
     from agent.domains.office.strategies.ppt import PptStrategy
 
@@ -550,6 +612,55 @@ async def test_office_workflow_ppt_quality_stats_required_for_create() -> None:
 
     assert result["evaluations"][0]["passed"] is False
     assert any("质量 stats" in issue["message"] for issue in result["evaluations"][0]["issues"])
+
+
+@pytest.mark.asyncio
+async def test_office_workflow_xlsx_quality_stats_required_for_write() -> None:
+    from agent.domains.office.workflow import evaluate_node
+
+    state = {
+        "format": "xlsx",
+        "operation": "create",
+        "write_required": True,
+        "intermediate_results": [
+            {
+                "output": """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"budget.xlsx","format":"xlsx","role":"primary"}],"stats":{}}
+```"""
+            }
+        ],
+    }
+
+    result = await evaluate_node(state)
+
+    assert result["evaluations"][0]["passed"] is False
+    assert any("XLSX 写入结果缺少质量 stats" in issue["message"] for issue in result["evaluations"][0]["issues"])
+
+
+@pytest.mark.asyncio
+async def test_office_qa_fix_uses_sheet_count_when_slide_count_missing() -> None:
+    from agent.domains.office.workflow import qa_fix_node
+
+    state = {
+        "format": "xlsx",
+        "operation": "create",
+        "write_required": True,
+        "qa_fix_round": 0,
+        "max_qa_fix_rounds": 2,
+        "intermediate_results": [
+            {
+                "output": """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"budget.xlsx","format":"xlsx","role":"primary"}],"stats":{"sheet_count":3}}
+```"""
+            }
+        ],
+    }
+
+    result = await qa_fix_node(state)
+
+    assert result["current_stage"] == "finalize"
+    assert result["quality_report"]["stats_summary"]["sheet_count"] == 3
+    assert result["cost_ledger"]["completed_pages"] == 3
 
 
 @pytest.mark.asyncio

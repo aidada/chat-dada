@@ -5,6 +5,28 @@ from typing import Any
 
 from agent.domains.office.strategies.default import DefaultOfficeStrategy
 
+_KNOWN_SHEET_LABELS = {
+    "rawdata",
+    "raw_data",
+    "raw-data",
+    "summary",
+    "dashboard",
+    "budget",
+    "data",
+    "metrics",
+    "kpi",
+    "overview",
+    "details",
+    "detail",
+    "report",
+    "analysis",
+    "forecast",
+    "assumptions",
+    "inputs",
+    "output",
+    "outputs",
+}
+
 
 class XlsxStrategy(DefaultOfficeStrategy):
     def build_plan(
@@ -81,17 +103,57 @@ class XlsxStrategy(DefaultOfficeStrategy):
         raw_sheets = plan.get("sheets")
         if not isinstance(raw_sheets, list) or not raw_sheets:
             issues.append("missing_sheets")
+            raw_sheets = []
 
-        normalized = self.build_plan(
-            goal=goal,
-            requested_slide_count=max(int(plan.get("sheet_count", 0) or 0), requested_slide_count),
-            build_batch_size=build_batch_size,
-            default_create_file=default_create_file,
-            merged_constraints=merged_constraints,
-        )
-        if title:
-            normalized["title"] = title
-        return normalized, issues
+        normalized_sheets: list[dict[str, Any]] = []
+        for sheet in raw_sheets:
+            if not isinstance(sheet, dict):
+                issues.append("invalid_sheet_entry")
+                continue
+            name = str(sheet.get("name", "") or "").strip()
+            if not name:
+                issues.append("invalid_sheet_name")
+                continue
+            normalized_sheets.append(
+                {
+                    "name": name,
+                    "purpose": str(sheet.get("purpose", "") or "").strip() or _sheet_purpose(name),
+                    "sheet_type": str(sheet.get("sheet_type", "") or "").strip() or _sheet_type(name),
+                    "columns": list(sheet.get("columns") or _sheet_columns(name)),
+                    "table_regions": list(sheet.get("table_regions") or _table_regions(name)),
+                    "formula_regions": list(sheet.get("formula_regions") or _formula_regions(name)),
+                    "chart_regions": list(sheet.get("chart_regions") or _chart_regions(name)),
+                    "validation_rules": list(sheet.get("validation_rules") or _validation_rules(name)),
+                }
+            )
+
+        if not normalized_sheets:
+            normalized = self.build_plan(
+                goal=goal,
+                requested_slide_count=max(int(plan.get("sheet_count", 0) or 0), requested_slide_count),
+                build_batch_size=build_batch_size,
+                default_create_file=default_create_file,
+                merged_constraints=merged_constraints,
+            )
+            if title:
+                normalized["title"] = title
+            return normalized, issues
+
+        raw_batches = plan.get("batches")
+        normalized_batches = _normalize_batches(raw_batches, normalized_sheets, build_batch_size=build_batch_size)
+        if not isinstance(raw_batches, list) or not raw_batches:
+            issues.append("missing_batches")
+
+        normalized_title = title or _infer_workbook_title(goal, default_create_file)
+        normalized_plan = {
+            "title": normalized_title,
+            "sheet_count": len(normalized_sheets),
+            "sheets": normalized_sheets,
+            "batches": normalized_batches,
+            "slide_count": len(normalized_sheets),
+            "slides": normalized_sheets,
+        }
+        return normalized_plan, issues
 
     def get_current_batch(self, plan: dict[str, Any], batch_index: int) -> dict[str, Any] | None:
         batches = list(plan.get("batches") or []) if isinstance(plan, dict) else []
@@ -253,7 +315,7 @@ def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None)
     names: list[str] = []
     for item in hard_requirements:
         name = str(item or "").strip()
-        if name and name not in names:
+        if name and _looks_like_sheet_name(name) and name not in names:
             names.append(name)
 
     if isinstance(merged_constraints, dict):
@@ -279,6 +341,26 @@ def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None)
     if "raw" in lowered or "原始" in goal:
         fallback_names.append("RawData")
     return fallback_names or ["Sheet1"]
+
+
+def _looks_like_sheet_name(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if len(text) > 24:
+        return False
+    lowered = text.lower()
+    if any(token in lowered for token in (" sheet", "rename ", "preserve ", "formula", "column", "header", "row ")):
+        return False
+    tokens = [part for part in lowered.replace("-", " ").replace("_", " ").split() if part]
+    if not tokens or len(tokens) > 2:
+        return False
+    compact = lowered.replace(" ", "")
+    if compact in _KNOWN_SHEET_LABELS:
+        return True
+    if len(tokens) == 1 and tokens[0].isalpha() and text[:1].isupper():
+        return True
+    return False
 
 
 def _sheet_type(name: str) -> str:
@@ -380,6 +462,41 @@ def _build_batches(*, sheets: list[dict[str, Any]], build_batch_size: int) -> li
             "slide_roles": [],
         }
     ]
+
+
+def _normalize_batches(
+    raw_batches: Any,
+    sheets: list[dict[str, Any]],
+    *,
+    build_batch_size: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_batches, list) or not raw_batches:
+        return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
+
+    normalized: list[dict[str, Any]] = []
+    sheet_names = [str(sheet.get("name", "") or "") for sheet in sheets]
+    sheet_count = len(sheet_names)
+    for index, batch in enumerate(raw_batches):
+        if not isinstance(batch, dict):
+            return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
+        start = int(batch.get("sheet_start", 0) or 0)
+        end = int(batch.get("sheet_end", 0) or 0)
+        names = [str(item or "") for item in (batch.get("sheet_names") or []) if str(item or "")]
+        if start <= 0 or end < start or end > sheet_count or not names:
+            return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
+        normalized.append(
+            {
+                "index": int(batch.get("index", index) or index),
+                "sheet_start": start,
+                "sheet_end": end,
+                "sheet_names": names,
+                "slide_start": int(batch.get("slide_start", start) or start),
+                "slide_end": int(batch.get("slide_end", end) or end),
+                "slide_titles": list(batch.get("slide_titles") or names),
+                "slide_roles": list(batch.get("slide_roles") or [_sheet_type(name) for name in names]),
+            }
+        )
+    return normalized
 
 
 __all__ = ["XlsxStrategy"]
