@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,16 @@ from agent.domains.office.workflow import (
     build_office_workflow_graph,
 )
 from agent.platform.streaming import stream_nested_graph
+from agent.runtime.cost_logging import (
+    append_stage_record,
+    attach_partial_progress,
+    attach_quality_summary,
+    init_cost_ledger,
+    log_cost_record,
+    summarize_cost_ledger,
+    update_completed_pages,
+)
+from agent.domains.office.core.quality_report import summarize_quality_report
 from agent.tools.officecli import ALLOWED_DIR, execute_officecli_spec, infer_office_runtime_target
 
 _log = logging.getLogger("chatdada.office.orchestrated")
@@ -233,6 +244,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
     runtime_target = infer_office_runtime_target(configurable)
     before_snapshot = _snapshot_outputs(ALLOWED_DIR) if runtime_target == "server" else {}
     _log.info("Starting Office workflow: query=%s task_id=%s", str(query)[:60], task_id)
+    finalize_started_at = time.perf_counter()
     _safe_emit("step", "Office task started...")
 
     result = await stream_nested_graph(
@@ -278,23 +290,89 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
     strategies_used = [str(item.get("strategy", "") or "") for item in strategy_trace]
     terminal_status = str(result.get("terminal_status", "") or "")
     terminal_reason = str(result.get("terminal_reason", terminal_status) or terminal_status)
+    cost_ledger = dict(result.get("cost_ledger") or {})
+    quality_report = dict(result.get("quality_report") or {})
+    quality_report_summary = summarize_quality_report(quality_report)
+    partial_progress = dict(result.get("partial_progress") or {})
+    if not cost_ledger:
+        cost_ledger = init_cost_ledger(
+            task_id=str(task_id),
+            domain="office",
+            metadata={"runtime_target": runtime_target},
+        )
+    cost_ledger = attach_quality_summary(
+        cost_ledger,
+        quality_report_summary=quality_report_summary,
+    )
+    cost_ledger = attach_partial_progress(cost_ledger, partial_progress=partial_progress)
 
     if not content_text:
+        cost_ledger = append_stage_record(
+            cost_ledger,
+            stage="finalize",
+            status="error",
+            elapsed_ms=int((time.perf_counter() - finalize_started_at) * 1000),
+            metadata={"reason": "no_content_generated"},
+        )
+        log_cost_record("task_summary", summarize_cost_ledger(cost_ledger))
         return OfficeDomainResult(
             status="error",
             result="Office 任务失败：agent 未返回结果。",
             artifact_refs=[],
-            review={"passed": False, "reason": "No content generated"},
-            budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
+            review={
+                "passed": False,
+                "reason": "No content generated",
+                "quality_report": quality_report,
+                "quality_report_summary": summarize_quality_report(quality_report),
+                "partial_progress": partial_progress,
+            },
+            budget={
+                "action": "allow",
+                "reason": f"workflow({' → '.join(strategies_used)})",
+                "cost_ledger": summarize_cost_ledger(cost_ledger),
+            },
         )
 
     if terminal_status:
+        if partial_progress:
+            completed_pages = int(partial_progress.get("completed_pages", 0) or 0)
+            cost_ledger = update_completed_pages(cost_ledger, completed_pages=completed_pages)
+        cost_ledger = append_stage_record(
+            cost_ledger,
+            stage="finalize",
+            status="blocked",
+            elapsed_ms=int((time.perf_counter() - finalize_started_at) * 1000),
+            metadata={
+                "terminal_status": terminal_status,
+                "terminal_reason": terminal_reason,
+                "partial_progress": partial_progress,
+            },
+        )
+        log_cost_record("task_summary", summarize_cost_ledger(cost_ledger))
+        detail_lines = [content_text]
+        if partial_progress.get("completed_pages"):
+            detail_lines.append(f"已完成页数: {int(partial_progress['completed_pages'])}")
+        if partial_progress.get("current_batch_slide_range"):
+            start, end = partial_progress["current_batch_slide_range"]
+            detail_lines.append(f"当前批次: slide {start}-{end}")
+        if partial_progress.get("reason"):
+            detail_lines.append(f"中止原因: {partial_progress['reason']}")
         return OfficeDomainResult(
             status="error",
-            result=content_text,
+            result="\n".join(line for line in detail_lines if line),
             artifact_refs=[],
-            review={"passed": False, "reason": terminal_reason},
-            budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
+            review={
+                "passed": False,
+                "reason": terminal_reason,
+                "quality_report": quality_report,
+                "quality_report_summary": summarize_quality_report(quality_report),
+                "partial_progress": partial_progress,
+            },
+            budget={
+                "action": "allow",
+                "reason": f"workflow({' → '.join(strategies_used)})",
+                "cost_ledger": summarize_cost_ledger(cost_ledger),
+            },
         )
 
     result_meta = extract_office_result_json(content_text)
@@ -313,6 +391,14 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
     if is_write_operation(operation) and validated and artifact_refs:
         flush_failures = await _flush_write_artifacts(artifact_refs)
         if flush_failures:
+            cost_ledger = append_stage_record(
+                cost_ledger,
+                stage="finalize",
+                status="error",
+                elapsed_ms=int((time.perf_counter() - finalize_started_at) * 1000),
+                metadata={"flush_failures": flush_failures},
+            )
+            log_cost_record("task_summary", summarize_cost_ledger(cost_ledger))
             failure_text = (
                 "Office 任务失败：文档内容已生成并通过 validate，但最终 close/flush 失败。\n"
                 + "\n".join(flush_failures)
@@ -327,8 +413,14 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
                     "operation": operation,
                     "runtime_target": runtime_target,
                     "close_failures": flush_failures,
+                    "quality_report": quality_report,
+                    "quality_report_summary": summarize_quality_report(quality_report),
                 },
-                budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
+                budget={
+                    "action": "allow",
+                    "reason": f"workflow({' → '.join(strategies_used)})",
+                    "cost_ledger": summarize_cost_ledger(cost_ledger),
+                },
             )
 
     for ref in artifact_refs:
@@ -348,6 +440,26 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
         artifact_refs=artifact_refs,
         fallback_text=content_text,
     )
+    completed_pages = 0
+    if (result_meta or {}).get("stats") and isinstance(result_meta.get("stats"), dict):
+        try:
+            completed_pages = int(result_meta["stats"].get("slide_count", 0) or 0)
+        except (TypeError, ValueError):
+            completed_pages = 0
+    if completed_pages:
+        cost_ledger = update_completed_pages(cost_ledger, completed_pages=completed_pages)
+    cost_ledger = append_stage_record(
+        cost_ledger,
+        stage="finalize",
+        status="ok" if passed else "partial",
+        elapsed_ms=int((time.perf_counter() - finalize_started_at) * 1000),
+        metadata={
+            "operation": operation,
+            "runtime_target": runtime_target,
+            "artifact_count": len(artifact_refs),
+        },
+    )
+    log_cost_record("task_summary", summarize_cost_ledger(cost_ledger))
     return OfficeDomainResult(
         status="ok",
         result=result_text,
@@ -357,6 +469,12 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
             "reason": "Office task completed" if passed else "Office task missing validated artifacts",
             "operation": operation,
             "runtime_target": runtime_target,
+            "quality_report": quality_report,
+            "quality_report_summary": summarize_quality_report(quality_report),
         },
-        budget={"action": "allow", "reason": f"workflow({' → '.join(strategies_used)})"},
+        budget={
+            "action": "allow",
+            "reason": f"workflow({' → '.join(strategies_used)})",
+            "cost_ledger": summarize_cost_ledger(cost_ledger),
+        },
     )

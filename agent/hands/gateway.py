@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, TYPE_CHECKING
 
@@ -91,6 +92,12 @@ class ToolGateway:
 
         # 每次工具调用生成唯一 ID，前端通过 toolCallId 关联 started/completed/failed
         tool_call_id = str(uuid.uuid4())
+        stage = str(call.params.get("_cost_stage", "") or "unknown")
+        public_args = {
+            str(key): value
+            for key, value in (call.params or {}).items()
+            if not str(key).startswith("_")
+        }
 
         await self._session.emit_event(
             call.task_id,
@@ -98,8 +105,9 @@ class ToolGateway:
             {
                 "toolCallId": tool_call_id,
                 "name":       call.tool_name,
-                "args":       call.params or {},
+                "args":       public_args,
                 "target":     target,
+                "stage":      stage,
             },
         )
 
@@ -111,6 +119,7 @@ class ToolGateway:
                     "toolCallId": tool_call_id,
                     "name":       call.tool_name,
                     "error":      availability_error,
+                    "stage":      stage,
                 },
             )
             return ToolResult(
@@ -131,6 +140,8 @@ class ToolGateway:
                     "name":              call.tool_name,
                     "output":            result.output,
                     "execution_time_ms": result.execution_time_ms,
+                    "stage":             stage,
+                    **_tool_result_event_metadata(result),
                 },
             )
         else:
@@ -141,6 +152,8 @@ class ToolGateway:
                     "toolCallId": tool_call_id,
                     "name":       call.tool_name,
                     "error":      result.error or "tool execution failed",
+                    "stage":      stage,
+                    **_tool_result_event_metadata(result),
                 },
             )
 
@@ -182,3 +195,20 @@ class ToolGateway:
         ]
         desktop_tools = build_desktop_langchain_tools(descriptors, self, ctx)
         return [*domain_tools, *desktop_tools]
+
+
+def _tool_result_event_metadata(result: ToolResult) -> dict[str, Any]:
+    output = str(result.output or "")
+    if not output:
+        return {}
+    try:
+        parsed = json.loads(output)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    payload: dict[str, Any] = {}
+    for key in ("kind", "command", "message"):
+        if parsed.get(key) is not None:
+            payload[key] = parsed.get(key)
+    return payload

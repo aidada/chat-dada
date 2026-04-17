@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -280,6 +280,46 @@ def test_direct_answer_prompt_empty_context_ignored():
     from agent.coordinator.prompts import build_direct_answer_prompt
     msgs = build_direct_answer_prompt("你好", "   ")
     assert len(msgs) == 2
+
+
+@pytest.mark.asyncio
+async def test_understand_goal_office_rewrite_preserves_llm_operation_hint():
+    from agent.coordinator.agent import understand_goal_node
+    from agent.coordinator.state import CoordinatorConfig
+
+    class FakeGoalLLM:
+        async def ainvoke(self, _messages):
+            return AIMessage(
+                content="""```json
+{
+  "execution_mode": "single_skill",
+  "reasoning": "用户在重写已有 PPT，应交给 Office 域处理",
+  "goal_understanding": "重写现有 PPT 并扩充到 6 页",
+  "selected_skill": "do_office",
+  "skill_input": {
+    "query": "对于chat-dada-agent-intro.pptx 重写，当前的 ppt 内容、结构都太单薄",
+    "operation_hint": "edit",
+    "file_hint": "chat-dada-agent-intro.pptx"
+  }
+}
+```"""
+            )
+
+    with patch("core.models.get_llm", return_value=FakeGoalLLM()):
+        result = await understand_goal_node(
+            {
+                "original_goal": "对于chat-dada-agent-intro.pptx 重写，当前的 ppt 内容、结构都太单薄",
+                "trace_id": "trace-office-rewrite",
+                "config": CoordinatorConfig(),
+                "clarification_history": [],
+                "source_files": [],
+            }
+        )
+
+    assert result["execution_mode"].value == "single_skill"
+    assert result["selected_skill"] == "do_office"
+    assert result["skill_input"]["operation_hint"] == "edit"
+    assert result["skill_input"]["file_hint"] == "chat-dada-agent-intro.pptx"
 
 
 @pytest.mark.asyncio

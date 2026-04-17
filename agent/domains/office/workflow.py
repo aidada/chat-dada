@@ -11,27 +11,31 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any
 
-from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.errors import GraphRecursionError
+from langchain_core.messages import AIMessage
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
-from typing_extensions import TypedDict
 
 from core.content_utils import extract_result_text
-from core.models import build_chat_model
-from deepagents import create_deep_agent
 from langgraph.config import get_config
+from agent.domains.office.core import OfficeWorkflowState, finalize_node, route_after_build, route_after_qa_fix
+from agent.domains.office.builder import run_section_builder
+from agent.domains.office.goal_normalizer import (
+    extract_explicit_filename,
+    infer_default_create_file,
+    infer_requested_slide_count,
+    normalize_goal_profile,
+    refine_filename_from_plan,
+)
+from agent.domains.office.qa import run_quality_gate
 from agent.domains.office.result_utils import (
     coerce_office_operation,
     extract_office_result_json,
     is_write_operation,
 )
-from agent.domains.office.tools import get_office_tools
+from agent.domains.office.strategies import get_strategy_for_format
 from agent.domains.research.tools import get_research_tools
-from agent.hands.deepagents_backend import resolve_deepagents_runtime
-from agent.platform.streaming import stream_nested_graph
-from agent.tools.officecli import ALLOWED_DIR, infer_office_runtime_target
-from agent.tools.officecli_skill_loader import build_officecli_skill_bundle
+from agent.tools.officecli import infer_office_runtime_target
+from agent.runtime.cost_logging import append_stage_record, init_cost_ledger
 
 _log = logging.getLogger("chatdada.office.workflow")
 
@@ -136,11 +140,30 @@ _INTENT_FILENAME_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("research", "研究"), "research"),
     (("patent", "专利"), "patent"),
     (("financial", "finance", "财务"), "financial-model"),
+    (("education", "learning", "study", "teaching", "教育", "学习"), "education"),
+    (("children", "child", "kids", "student", "students", "孩子", "儿童", "青少年"), "children"),
+    (("modern", "modernization", "new era", "新时代", "现代化"), "modern"),
 )
 _FORMAT_DEFAULT_FILENAMES = {
     "pptx": "presentation",
     "docx": "document",
     "xlsx": "workbook",
+}
+_GENERIC_FILENAME_STEMS = {
+    "ai",
+    "deck",
+    "slides",
+    "slide-deck",
+    "presentation",
+    "document",
+    "workbook",
+    "file",
+    "output",
+    "result",
+    "demo",
+    "temp",
+    "untitled",
+    "new",
 }
 
 
@@ -176,43 +199,6 @@ OFFICE_SUBAGENTS = [
         tools=_build_content_researcher_tools(),
     ),
 ]
-
-
-class OfficeWorkflowState(TypedDict, total=False):
-    goal: str
-    task_id: str
-    report_profile: str
-    format_hint: str
-    file_hint: str
-    default_create_file: str
-    requested_slide_count: int
-    source_files: list[str]
-    operation_hint: str
-
-    format: str
-    operation: str
-    allowed_source_files: list[str]
-    write_required: bool
-    runtime_target_hint: str
-
-    selected_strategy: str
-    step_history: Annotated[list[dict[str, Any]], "add"]
-
-    progress: float
-    confidence: float
-    coverage: dict[str, bool]
-    cost: float
-    max_cost: float
-    max_steps: int
-    inner_recursion_limit: int
-
-    intermediate_results: Annotated[list[dict[str, Any]], "add"]
-    evaluations: Annotated[list[dict[str, Any]], "add"]
-    final_result: str
-    terminal_status: str
-    terminal_reason: str
-
-
 from agent.platform.emit import safe_emit_progress_with_content as _safe_emit
 
 
@@ -228,6 +214,12 @@ def _extract_last_ai_text(response: Any) -> str:
 
 def _build_subagent_dicts() -> list[dict[str, Any]]:
     return [s.to_dict() for s in OFFICE_SUBAGENTS]
+
+
+# Backward-compatible helper aliases while normalization logic is migrated out of workflow.py.
+_extract_explicit_filename = extract_explicit_filename
+_infer_default_create_file = infer_default_create_file
+_infer_requested_slide_count = infer_requested_slide_count
 
 
 def _infer_format(goal: str, file_hint: str, source_files: list[str], explicit: str) -> str:
@@ -268,82 +260,6 @@ def _infer_operation(goal: str, source_files: list[str], explicit: str) -> str:
     return "inspect" if source_files else "create"
 
 
-def _extract_explicit_filename(text: str, format_name: str) -> str | None:
-    raw = str(text or "").strip()
-    if not raw:
-        return None
-
-    suffix = Path(raw).suffix.lower().lstrip(".")
-    if suffix in {"pptx", "docx", "xlsx"}:
-        candidate = Path(raw).name
-        if format_name and suffix != format_name:
-            return None
-        return candidate
-
-    match = _EXPLICIT_FILENAME_RE.search(raw)
-    if not match:
-        return None
-
-    candidate = Path(match.group(1)).name
-    suffix = Path(candidate).suffix.lower().lstrip(".")
-    if format_name and suffix != format_name:
-        return None
-    return candidate
-
-
-def _infer_default_create_file(goal: str, file_hint: str, format_name: str) -> str:
-    if not format_name:
-        return ""
-
-    explicit = _extract_explicit_filename(file_hint, format_name) or _extract_explicit_filename(goal, format_name)
-    if explicit:
-        return explicit
-
-    lowered = str(goal or "").lower()
-    stem_parts: list[str] = []
-
-    for token in _ASCII_FILENAME_TOKEN_RE.findall(lowered):
-        normalized = token.strip("-").lower()
-        if (
-            not normalized
-            or normalized in _FILENAME_STOPWORDS
-            or normalized.isdigit()
-            or normalized.endswith((".pptx", ".docx", ".xlsx"))
-        ):
-            continue
-        if normalized not in stem_parts:
-            stem_parts.append(normalized)
-        if len(stem_parts) >= 2:
-            break
-
-    for keywords, label in _INTENT_FILENAME_HINTS:
-        if any(keyword in lowered for keyword in keywords) and label not in stem_parts:
-            stem_parts.append(label)
-        if len(stem_parts) >= 3:
-            break
-
-    if not stem_parts:
-        stem_parts.append(_FORMAT_DEFAULT_FILENAMES.get(format_name, "office-file"))
-
-    stem = "-".join(stem_parts[:3])
-    stem = re.sub(r"[^a-z0-9_-]+", "-", stem).strip("-_")
-    if not stem:
-        stem = _FORMAT_DEFAULT_FILENAMES.get(format_name, "office-file")
-    stem = stem[:64].rstrip("-_") or _FORMAT_DEFAULT_FILENAMES.get(format_name, "office-file")
-    return f"{stem}.{format_name}"
-
-
-def _infer_requested_slide_count(goal: str) -> int | None:
-    match = _REQUESTED_SLIDE_COUNT_RE.search(str(goal or ""))
-    if not match:
-        return None
-    try:
-        count = int(match.group(1))
-    except (TypeError, ValueError):
-        return None
-    return count if 1 <= count <= 30 else None
-
-
 def _build_format_specific_guidance(
     *,
     goal: str,
@@ -373,6 +289,9 @@ def _build_format_specific_guidance(
 - 在第一次 create/add 之前，先在内部完成逐页规划：每页的 `slide role`、核心结论、布局类型、视觉元素、speaker notes。
 {slide_count_rule}
 {storyline_hint}
+- 先一次性规划完整 deck，再执行写入；不要每写完一页就重新思考整套 PPT。
+- 当页数 >= 8 时，必须按 section 或每批 2-3 页进行批量写入，优先使用 `officecli_batch` 一次提交整批 slide 的骨架和主要内容。
+- 优先先建立整套 slide skeleton，再分批填充内容、视觉元素、notes、transitions；不要把 create/add/validate 交织成细粒度来回循环。
 - 每页必须先定义一句 takeaway headline，避免出现只有“核心功能/痛点/总结”这种空标题。
 - 正文不要堆字：每个主内容区最多 4 个 bullet，或约 60-80 个中文字符；放不下就拆 slide。
 - 每张内容 slide 必须有至少一个非文字视觉元素：卡片、色块、流程图、时间线、图表、表格、KPI 数字、对比栏、图片之一。
@@ -427,6 +346,8 @@ _OFFICE_SYSTEM = """\
 - 结构化 `officecli` / `officecli_batch` 调用一律使用 `verb` 字段；不要在工具参数里使用 `command`。如果参考手册里的原始 `officecli batch` JSON 示例出现 `command`，转换成结构化工具调用时必须改写为 `verb`。
 - 只允许使用 OfficeCLI 工具；禁止编写或执行 Python、bash、shell 脚本来生成或修改 Office 文档。
 - 如果发生写操作，完成后必须调用 validate；若 validate 未通过，不要宣称任务成功。
+- 如果当前阶段明确说明“final validation deferred”，则本轮只允许完成指定 batch 的写入，不要提前做整套文档的最终 QA。
+- 如果当前阶段明确说明“repair run”，则只针对给定 QA 问题做有限修复，然后执行完整 QA。
 - 如果相同 command + kind + message 连续出现 2 次，停止重试并输出失败总结。
 - 一旦收到 kind=fatal_error，立即停止修复并输出失败总结。
 - 文档文件名只能是英文字母、数字、下划线、短横线和扩展名。
@@ -449,6 +370,10 @@ _OFFICE_SYSTEM = """\
 - 如果无法完成，请输出简洁失败总结，说明最后一次工具调用的 command、kind、message，不要继续调用工具。
 
 {format_specific_guidance}
+
+## 当前阶段执行说明
+
+{phase_guidance}
 
 ## OfficeCLI 参考手册
 
@@ -473,11 +398,43 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
     source_files = [str(item).strip() for item in state.get("source_files", []) if str(item).strip()]
     file_hint = str(state.get("file_hint", "") or "").strip()
     goal = str(state.get("goal", "") or "")
-    format_name = _infer_format(goal, file_hint, source_files, str(state.get("format_hint", "") or ""))
-    operation = _infer_operation(goal, source_files, str(state.get("operation_hint", "") or ""))
+    normalized = normalize_goal_profile(
+        goal=goal,
+        file_hint=file_hint,
+        source_files=source_files,
+        explicit_format=str(state.get("format_hint", "") or ""),
+        explicit_operation=str(state.get("operation_hint", "") or ""),
+    )
+    format_name = str(normalized.get("format", "") or "")
+    operation = str(normalized.get("operation", "") or "")
     runtime_target = infer_office_runtime_target(configurable)
-    default_create_file = _infer_default_create_file(goal, file_hint, format_name) if operation == "create" else ""
-    requested_slide_count = _infer_requested_slide_count(goal) if format_name == "pptx" else None
+    default_create_file = str(normalized.get("default_create_file", "") or "")
+    requested_slide_count = int(normalized.get("requested_slide_count", 0) or 0) or None
+    quality_profile = dict(normalized.get("quality_profile") or {})
+    build_batch_size = int(normalized.get("build_batch_size", 0) or 0) or 1
+    inner_limit = int(normalized.get("inner_recursion_limit", OFFICE_INNER_RECURSION_LIMIT) or OFFICE_INNER_RECURSION_LIMIT)
+    cost_ledger = init_cost_ledger(
+        task_id=str(state.get("task_id", "") or "office_domain"),
+        domain="office",
+        requested_pages=requested_slide_count,
+        metadata={
+            "operation": operation,
+            "format": format_name,
+            "runtime_target": runtime_target,
+        },
+    )
+    cost_ledger = append_stage_record(
+        cost_ledger,
+        stage="planning",
+        status="ready",
+        elapsed_ms=0,
+        metadata={
+            "requested_slide_count": requested_slide_count or 0,
+            "build_batch_size": build_batch_size,
+            "inner_recursion_limit": inner_limit,
+            "quality_profile": quality_profile,
+        },
+    )
 
     return {
         "format": format_name,
@@ -485,9 +442,28 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
         "file_hint": file_hint or default_create_file,
         "default_create_file": default_create_file,
         "requested_slide_count": requested_slide_count or 0,
+        "build_batch_size": build_batch_size,
         "allowed_source_files": source_files,
         "write_required": is_write_operation(operation),
         "runtime_target_hint": runtime_target,
+        "quality_profile": quality_profile,
+        "inner_recursion_limit": inner_limit,
+        "cost_ledger": cost_ledger,
+        "task_profile": {
+            "format": format_name,
+            "operation": operation,
+            "target_filename": default_create_file,
+            "file_hint": file_hint or default_create_file,
+            "source_files": source_files,
+            "runtime_target": runtime_target,
+            "quality_profile": quality_profile,
+        },
+        "current_stage": "planning",
+        "current_batch_index": 0,
+        "completed_pages": 0,
+        "qa_fix_round": 0,
+        "max_qa_fix_rounds": 2,
+        "repair_mode": False,
     }
 
 
@@ -516,379 +492,101 @@ async def select_strategy_node(state: OfficeWorkflowState) -> dict[str, Any]:
     }
 
 
-async def exec_sequential(state: OfficeWorkflowState) -> dict[str, Any]:
-    _safe_emit("step", "Office: Sequential execution...")
-
-    context_parts = [
-        r["output"]
-        for r in state.get("intermediate_results", [])
-        if r.get("output")
-    ]
-    context = "\n\n---\n\n".join(context_parts[-3:]) if context_parts else ""
-    latest_evaluation = (state.get("evaluations") or [])[-1] if state.get("evaluations") else {}
-    latest_issues = latest_evaluation.get("issues", []) if isinstance(latest_evaluation, dict) else []
-    qa_feedback = "\n".join(
-        f"- {str(issue.get('message', '') or '').strip()}"
-        for issue in latest_issues
-        if str(issue.get("message", "") or "").strip()
+async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
+    requested_slide_count = int(state.get("requested_slide_count", 0) or 0) or 0
+    build_batch_size = int(state.get("build_batch_size", 0) or 0) or 1
+    default_create_file = str(state.get("default_create_file", "") or "")
+    strategy_format = str(state.get("format", "") or state.get("format_hint", "") or "").strip().lower()
+    if not strategy_format:
+        suffix = Path(default_create_file).suffix.lower().lstrip(".")
+        if suffix in {"pptx", "docx", "xlsx"}:
+            strategy_format = suffix
+        elif any(token in str(state.get("goal", "") or "").lower() for token in ("ppt", "powerpoint", "presentation", "deck", "幻灯片", "演示文稿")):
+            strategy_format = "pptx"
+    strategy = get_strategy_for_format(strategy_format, operation=str(state.get("operation", "") or ""))
+    raw_plan = strategy.build_plan(
+        goal=str(state.get("goal", "") or ""),
+        requested_slide_count=requested_slide_count or 6,
+        build_batch_size=build_batch_size,
+        default_create_file=default_create_file,
     )
-    source_files = list(state.get("allowed_source_files", []) or [])
-    source_lines = "\n".join(f"- {item}" for item in source_files) if source_files else "- 无"
+    deck_plan, planner_validation_issues = strategy.validate_plan(
+        plan=raw_plan,
+        goal=str(state.get("goal", "") or ""),
+        requested_slide_count=requested_slide_count or 6,
+        build_batch_size=build_batch_size,
+        default_create_file=default_create_file,
+    )
+    if str(state.get("operation", "") or "").lower() == "create":
+        refined_filename = refine_filename_from_plan(
+            current_filename=default_create_file,
+            plan_title=str(deck_plan.get("title", "") or ""),
+            format_name=str(state.get("format", "") or ""),
+        )
+    else:
+        refined_filename = default_create_file
+    cost_ledger = append_stage_record(
+        dict(state.get("cost_ledger") or {}),
+        stage="planning",
+        status="planned",
+        elapsed_ms=0,
+        metadata={
+            "planned_slide_count": int(deck_plan.get("slide_count", 0) or 0),
+            "batch_count": len(deck_plan.get("batches", []) or []),
+            "planner_issue_count": len(planner_validation_issues),
+        },
+    )
+    return {
+        "deck_plan": deck_plan,
+        "planning_summary": {
+            "title": str(deck_plan.get("title", "") or ""),
+            "slide_count": int(deck_plan.get("slide_count", 0) or 0),
+            "batch_count": len(deck_plan.get("batches", []) or []),
+        },
+        "planner_validation_issues": planner_validation_issues,
+        "task_profile": {
+            **dict(state.get("task_profile") or {}),
+            "target_filename": refined_filename or default_create_file,
+        },
+        "current_stage": "build",
+        "current_batch_index": 0,
+        "cost_ledger": cost_ledger,
+        "default_create_file": refined_filename,
+        "file_hint": refined_filename or str(state.get("file_hint", "") or ""),
+    }
+
+
+async def build_node(state: OfficeWorkflowState) -> dict[str, Any]:
     format_hint = str(state.get("format", "") or state.get("format_hint", "") or "auto")
     operation = str(state.get("operation", "") or "create")
-    runtime_target = str(state.get("runtime_target_hint", "") or "server")
-    default_create_file = str(state.get("default_create_file", "") or "")
     requested_slide_count = int(state.get("requested_slide_count", 0) or 0) or None
-
-    skill_content = build_officecli_skill_bundle(
-        state["goal"],
-        file_hint=str(state.get("file_hint", "") or default_create_file),
-        format_hint=format_hint if format_hint != "auto" else None,
-        operation_hint=operation,
-    )
+    strategy = get_strategy_for_format(format_hint if format_hint != "auto" else "", operation=operation)
     format_specific_guidance = _build_format_specific_guidance(
         goal=str(state.get("goal", "") or ""),
         format_name=format_hint if format_hint != "auto" else "",
         operation=operation,
         requested_slide_count=requested_slide_count,
     )
-    system_prompt = _OFFICE_SYSTEM.format(
-        format_hint=format_hint,
-        operation=operation,
-        runtime_target=runtime_target,
-        default_create_file=default_create_file or "-",
-        source_files_block=source_lines,
+    return await run_section_builder(
+        state,
+        strategy=strategy,
+        system_template=_OFFICE_SYSTEM,
         format_specific_guidance=format_specific_guidance,
-        skill_content=skill_content,
-    )
-
-    try:
-        configurable = get_config().get("configurable", {}) or {}
-    except Exception:
-        configurable = {}
-    task_id = str(state.get("task_id", "") or configurable.get("thread_id", "") or "office_domain")
-    tools, backend = resolve_deepagents_runtime(
-        domain="office",
-        task_id=task_id,
-        fallback_tools=list(get_office_tools()),
-        configurable=configurable,
-    )
-
-    agent = create_deep_agent(
-        model=build_chat_model(OFFICE_MODEL_ROLE),
-        system_prompt=system_prompt,
-        tools=tools,
+        office_model_role=OFFICE_MODEL_ROLE,
         subagents=_build_subagent_dicts(),
-        backend=backend,
-        checkpointer=False,
-        name="office_sequential",
     )
 
-    input_sections = [
-        state["goal"],
-        "",
-        "执行上下文：",
-        f"- operation: {operation}",
-        f"- format: {format_hint}",
-        f"- runtime_target: {runtime_target}",
-    ]
-    if default_create_file:
-        input_sections.append(f"- default_create_file: {default_create_file}")
-    if requested_slide_count is not None:
-        input_sections.append(f"- requested_slide_count: {requested_slide_count}")
-    if source_files:
-        input_sections.append("- source_files:")
-        input_sections.extend(f"  - {item}" for item in source_files)
-    if context:
-        input_sections.extend(["", "已有上下文：", context])
-    if qa_feedback:
-        input_sections.extend(["", "上轮 QA 未通过，必须先修正这些问题：", qa_feedback])
-    input_msg = "\n".join(input_sections)
 
-    office_constraints = {
-        "allowed_source_files": source_files,
-        "allowed_output_dir": str(ALLOWED_DIR),
-        "runtime_target": runtime_target,
-        "default_create_file": default_create_file,
-    }
-    inner_limit = int(
-        state.get("inner_recursion_limit", OFFICE_INNER_RECURSION_LIMIT)
-        or OFFICE_INNER_RECURSION_LIMIT
-    )
-    try:
-        response = await stream_nested_graph(
-            agent,
-            {"messages": [HumanMessage(content=input_msg)]},
-            config={
-                "recursion_limit": inner_limit,
-                "configurable": {
-                    "nested_recursion_limit": inner_limit,
-                    "office_constraints": office_constraints,
-                },
-            },
-            extra_payload={
-                "nested_graph": "office_sequential",
-                "strategy": "sequential",
-                "source": "office_workflow",
-            },
-        )
-        output = _extract_last_ai_text(response)
-    except GraphRecursionError:
-        output = (
-            f"Office 任务已中止：内层 agent 超过 {inner_limit} 步仍未收敛，"
-            "疑似重复工具调用。请检查 officecli 返回或提示词收敛规则。"
-        )
-        _safe_emit("step", output)
-        return {
-            "intermediate_results": [{
-                "strategy": "sequential",
-                "output": output,
-                "bounded_failure": True,
-                "reason": "inner_recursion_limit",
-            }],
-            "evaluations": [{
-                "passed": False,
-                "confidence": 0.0,
-                "issues": [{
-                    "severity": "error",
-                    "message": "Office inner agent hit recursion limit",
-                    "metadata": {"limit": inner_limit},
-                }],
-            }],
-            "final_result": output,
-            "confidence": 0.0,
-            "terminal_status": "bounded_failure",
-            "terminal_reason": "inner_recursion_limit",
-        }
-    except Exception as exc:
-        output = f"Office 任务失败：内层 agent 执行异常：{exc}"
-        _log.exception("Office sequential agent failed: %s", exc)
-        _safe_emit("step", output)
-        return {
-            "intermediate_results": [{
-                "strategy": "sequential",
-                "output": output,
-                "bounded_failure": True,
-                "reason": "inner_agent_exception",
-            }],
-            "evaluations": [{
-                "passed": False,
-                "confidence": 0.0,
-                "issues": [{
-                    "severity": "error",
-                    "message": "Office inner agent raised an exception",
-                    "metadata": {"error": str(exc)},
-                }],
-            }],
-            "final_result": output,
-            "confidence": 0.0,
-            "terminal_status": "error",
-            "terminal_reason": "inner_agent_exception",
-        }
-
-    _safe_emit("step", f"Office: Sequential done ({len(output)} chars)")
-    return {
-        "intermediate_results": [{"strategy": "sequential", "output": output}],
-    }
+async def qa_fix_node(state: OfficeWorkflowState) -> dict[str, Any]:
+    format_name = str(state.get("format", "") or state.get("format_hint", "") or "")
+    operation = str(state.get("operation", "") or "")
+    strategy = get_strategy_for_format(format_name, operation=operation)
+    return run_quality_gate(state, strategy=strategy)
 
 
-async def evaluate_node(state: OfficeWorkflowState) -> dict[str, Any]:
-    terminal_status = str(state.get("terminal_status", "") or "")
-    if terminal_status:
-        evaluation = {
-            "passed": False,
-            "confidence": 0.0,
-            "issues": [{
-                "severity": "error",
-                "message": str(state.get("terminal_reason", terminal_status)),
-                "metadata": {"terminal_status": terminal_status},
-            }],
-        }
-        return {
-            "evaluations": state.get("evaluations") or [evaluation],
-            "final_result": str(state.get("final_result", "") or ""),
-            "confidence": float(state.get("confidence", 0.0) or 0.0),
-        }
-
-    results = state.get("intermediate_results", [])
-    if not results:
-        return {
-            "evaluations": [{
-                "passed": False,
-                "confidence": 0.0,
-                "issues": [{"severity": "error", "message": "策略未产出任何输出"}],
-            }],
-        }
-
-    output = str(results[-1].get("output", "") or "")
-    if not output:
-        return {
-            "evaluations": [{
-                "passed": False,
-                "confidence": 0.0,
-                "issues": [{"severity": "error", "message": "策略未产出任何输出"}],
-            }],
-        }
-
-    meta = extract_office_result_json(output)
-    if meta is None:
-        return {
-            "evaluations": [{
-                "passed": False,
-                "confidence": 0.0,
-                "issues": [{
-                    "severity": "error",
-                    "message": "最终回复缺少结构化 Office JSON 结果",
-                }],
-            }],
-        }
-
-    operation = coerce_office_operation(meta.get("operation") or state.get("operation"))
-    validated = bool(meta.get("validated", False))
-    artifacts = meta.get("artifacts") if isinstance(meta.get("artifacts"), list) else []
-    summary = str(meta.get("summary", "") or "").strip()
-    stats = meta.get("stats") if isinstance(meta.get("stats"), dict) else {}
-    issues: list[dict[str, Any]] = []
-
-    if operation != "inspect" and not artifacts:
-        issues.append({"severity": "error", "message": "写入型 Office 任务缺少 artifacts"})
-    if bool(state.get("write_required")) and not validated:
-        issues.append({"severity": "error", "message": "写入型 Office 任务未完成 validate"})
-    if operation == "inspect" and not summary and not output.strip():
-        issues.append({"severity": "error", "message": "inspect 任务缺少有效总结"})
-    issues.extend(
-        _evaluate_ppt_quality_stats(
-            format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
-            operation=operation,
-            stats=stats,
-        )
-    )
-
-    passed = not any(issue["severity"] == "error" for issue in issues)
-    evaluation = {
-        "passed": passed,
-        "confidence": 0.9 if passed else 0.0,
-        "issues": issues,
-    }
-
-    if passed:
-        _safe_emit("step", "Office review passed")
-        return {
-            "evaluations": [evaluation],
-            "final_result": output,
-            "confidence": 0.9,
-        }
-
-    _safe_emit("step", f"Office review failed ({len(issues)} issues)")
-    return {
-        "evaluations": [evaluation],
-        "confidence": 0.0,
-    }
-
-
-def _evaluate_ppt_quality_stats(
-    *,
-    format_name: str,
-    operation: str,
-    stats: dict[str, Any],
-) -> list[dict[str, Any]]:
-    if str(format_name).lower() != "pptx" or operation not in {"create", "transform"}:
-        return []
-
-    required_int_fields = (
-        "slide_count",
-        "content_slide_count",
-        "notes_slide_count",
-        "transition_slide_count",
-        "visual_slide_count",
-        "text_only_slide_count",
-        "layout_variety_count",
-        "picture_count",
-        "chart_count",
-        "table_count",
-    )
-    issues: list[dict[str, Any]] = []
-    if not isinstance(stats, dict) or not stats:
-        return [{"severity": "error", "message": "PPT 创建结果缺少质量 stats"}]
-
-    normalized: dict[str, int] = {}
-    missing_fields: list[str] = []
-    for key in required_int_fields:
-        value = stats.get(key)
-        if isinstance(value, bool) or value is None:
-            missing_fields.append(key)
-            continue
-        try:
-            normalized[key] = int(value)
-        except (TypeError, ValueError):
-            missing_fields.append(key)
-    if missing_fields:
-        issues.append(
-            {
-                "severity": "error",
-                "message": f"PPT 质量 stats 缺少或非法字段: {', '.join(missing_fields)}",
-            }
-        )
-        return issues
-
-    qa_checks = stats.get("qa_checks")
-    qa_values = {str(item).strip() for item in qa_checks} if isinstance(qa_checks, list) else set()
-    required_checks = {"view_stats", "view_annotated", "validate"}
-    if not required_checks.issubset(qa_values):
-        issues.append(
-            {
-                "severity": "error",
-                "message": "PPT QA 未完整执行：必须包含 view_stats、view_annotated、validate",
-            }
-        )
-
-    slide_count = normalized["slide_count"]
-    content_slide_count = normalized["content_slide_count"]
-    notes_slide_count = normalized["notes_slide_count"]
-    transition_slide_count = normalized["transition_slide_count"]
-    visual_slide_count = normalized["visual_slide_count"]
-    text_only_slide_count = normalized["text_only_slide_count"]
-    layout_variety_count = normalized["layout_variety_count"]
-
-    if slide_count <= 0:
-        issues.append({"severity": "error", "message": "PPT slide_count 必须大于 0"})
-        return issues
-    if content_slide_count < 0 or content_slide_count > slide_count:
-        issues.append({"severity": "error", "message": "PPT content_slide_count 不合法"})
-    if notes_slide_count < content_slide_count:
-        issues.append({"severity": "error", "message": "并非所有内容 slide 都有 speaker notes"})
-    if slide_count > 1 and transition_slide_count < slide_count - 1:
-        issues.append({"severity": "error", "message": "PPT 第 2 张及之后的 slide 缺少 transition"})
-    if visual_slide_count < max(1, content_slide_count):
-        issues.append({"severity": "error", "message": "PPT 视觉密度不足：内容 slide 缺少非文字视觉元素"})
-    if text_only_slide_count > 0:
-        issues.append({"severity": "error", "message": "PPT 仍存在 text-only slides"})
-    if slide_count >= 3 and layout_variety_count < min(3, slide_count):
-        issues.append({"severity": "error", "message": "PPT 布局变化不足，缺少版式多样性"})
-
-    return issues
-
-
-def route_to_strategy(state: OfficeWorkflowState) -> str:
-    return f"exec_{state['selected_strategy']}"
-
-
-def should_continue(state: OfficeWorkflowState) -> str:
-    if state.get("final_result"):
-        return "done"
-    if state.get("terminal_status"):
-        return "done"
-
-    max_cost = state.get("max_cost", OFFICE_MAX_COST)
-    if state.get("cost", 0.0) >= max_cost:
-        _log.warning("Office cost limit reached: $%.2f", state["cost"])
-        return "done"
-
-    max_steps = state.get("max_steps", OFFICE_MAX_STEPS)
-    if len(state.get("step_history", [])) >= max_steps:
-        _log.warning("Office step limit reached: %d", len(state["step_history"]))
-        return "done"
-    return "continue"
+# Backward-compatible aliases for existing tests and call sites.
+exec_sequential = build_node
+evaluate_node = qa_fix_node
 
 
 def build_office_workflow_graph() -> Any:
@@ -896,21 +594,25 @@ def build_office_workflow_graph() -> Any:
     graph.add_node("analyze", analyze_node)
     graph.add_node("preflight", preflight_node)
     graph.add_node("select_strategy", select_strategy_node)
-    graph.add_node("exec_sequential", exec_sequential)
-    graph.add_node("evaluate", evaluate_node)
+    graph.add_node("planning", planning_node)
+    graph.add_node("build", build_node)
+    graph.add_node("qa_fix", qa_fix_node)
+    graph.add_node("finalize", finalize_node)
 
     graph.add_edge(START, "analyze")
     graph.add_edge("analyze", "preflight")
     graph.add_edge("preflight", "select_strategy")
+    graph.add_edge("select_strategy", "planning")
+    graph.add_edge("planning", "build")
     graph.add_conditional_edges(
-        "select_strategy",
-        route_to_strategy,
-        {"exec_sequential": "exec_sequential"},
+        "build",
+        route_after_build,
+        {"build": "build", "qa_fix": "qa_fix", "finalize": "finalize"},
     )
-    graph.add_edge("exec_sequential", "evaluate")
     graph.add_conditional_edges(
-        "evaluate",
-        should_continue,
-        {"continue": "analyze", "done": END},
+        "qa_fix",
+        route_after_qa_fix,
+        {"build": "build", "finalize": "finalize"},
     )
+    graph.add_edge("finalize", END)
     return graph.compile(name="office_workflow")

@@ -7,6 +7,7 @@ from typing import Any, Literal
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field, model_validator
 
+from agent.runtime.cost_logging import log_cost_record
 from agent.tools.officecli import (
     SUPPORTED_FORMATS,
     SUPPORTED_VERBS,
@@ -97,6 +98,7 @@ async def officecli(
             "options": options,
         }
     )
+    _log_office_tool_payload("officecli", payload)
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -104,6 +106,7 @@ async def officecli(
 async def officecli_batch(commands: list[OfficeCliCommandInput]) -> str:
     """Execute multiple structured OfficeCLI commands and aggregate the results."""
     payload = await execute_officecli_specs([command.model_dump(exclude_none=True) for command in commands])
+    _log_office_tool_payload("officecli_batch", payload)
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -111,12 +114,40 @@ async def officecli_batch(commands: list[OfficeCliCommandInput]) -> str:
 async def officecli_run(command: str) -> str:
     """Execute a single raw OfficeCLI command string for compatibility flows."""
     payload = await execute_officecli_raw(command)
+    _log_office_tool_payload("officecli_run", payload)
     return json.dumps(payload, ensure_ascii=False)
 
 
 def get_office_tools():
     """Return tools available to the Office domain."""
     return [officecli, officecli_batch]
+
+
+def _log_office_tool_payload(tool_name: str, payload: dict[str, Any]) -> None:
+    try:
+        from langgraph.config import get_config
+
+        configurable = get_config().get("configurable", {}) or {}
+    except Exception:
+        configurable = {}
+
+    task_id = str(configurable.get("thread_id", "") or configurable.get("task_id", "") or "office_unknown")
+    stage = str(configurable.get("office_cost_stage", "") or "build")
+    log_cost_record(
+        "call",
+        {
+            "task_id": task_id,
+            "domain": "office",
+            "stage": stage,
+            "call_type": "tool",
+            "name": tool_name,
+            "estimated_cost_usd": 0.0,
+            "execution_time_ms": int(payload.get("execution_time_ms", 0) or 0),
+            "result_kind": str(payload.get("kind", "") or ""),
+            "command": str(payload.get("command", "") or ""),
+            "message": str(payload.get("message", "") or ""),
+        },
+    )
 
 
 __all__ = [

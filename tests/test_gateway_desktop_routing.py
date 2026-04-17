@@ -10,8 +10,11 @@ from agent.hands.desktop_manager import DesktopHandsManager
 
 
 class FakeSession:
+    def __init__(self):
+        self.emitted: list[tuple] = []
+
     async def emit_event(self, *args, **kwargs):
-        pass
+        self.emitted.append((args, kwargs))
 
 
 class FakeLocalExecutor:
@@ -148,3 +151,31 @@ class TestGatewayDesktopRouting(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sysinfo", names)
         self.assertNotIn("list_dir", names)
         self.assertNotIn("shell", names)
+
+    async def test_tool_events_include_stage_and_structured_result_metadata(self):
+        mgr = DesktopHandsManager()
+        ws = FakeWebSocket()
+        mgr.register("user_1", ws, {"tools": [{"name": "officecli", "operations": []}]})
+
+        session = FakeSession()
+        local = FakeLocalExecutor()
+        desktop = FakeDesktopExecutor()
+        desktop.execute = AsyncMock(
+            return_value=ToolResult(
+                success=True,
+                output='{"success": true, "command": "officecli create demo.pptx", "kind": "success", "message": "Created demo.pptx"}',
+            )
+        )
+        gateway = ToolGateway(local=local, session=session, desktop_manager=mgr, desktop_executor=desktop)
+
+        call = ToolCall(tool_name="officecli", params={"operation": "create", "_cost_stage": "build"}, task_id="t1")
+        ctx = ToolContext(user_id="user_1", task_id="t1")
+        result = await gateway.execute(call, ctx)
+
+        self.assertTrue(result.success)
+        started_payload = session.emitted[0][0][2]
+        completed_payload = session.emitted[1][0][2]
+        self.assertEqual(started_payload["stage"], "build")
+        self.assertEqual(completed_payload["stage"], "build")
+        self.assertEqual(completed_payload["command"], "officecli create demo.pptx")
+        self.assertEqual(completed_payload["kind"], "success")

@@ -21,6 +21,16 @@ from agent.runtime.interaction import (
     set_task_interaction_handler,
 )
 from agent.runtime.root_graph import build_root_graph
+from agent.runtime.cost_logging import (
+    attach_partial_progress,
+    attach_quality_summary,
+    build_failure_diagnostics,
+    init_cost_ledger,
+    merge_llm_usage_into_ledger,
+    merge_tool_events_into_ledger,
+    summarize_cost_ledger,
+)
+from agent.domains.office.core.quality_report import quality_report_summary_lines, summarize_quality_report
 from core.langsmith_config import build_langsmith_run_config
 from core.logger import monitor, new_trace_id
 from core.models import set_thinking_level
@@ -752,7 +762,7 @@ class TaskService:
             reset_task_interaction_handler(interaction_token)
 
         summary = monitor.get_summary(trace_id)
-        await self.record_event(task_id, EventType.SYSTEM_MONITORING.value, {"content": summary})
+        events = await self._session.get_events(task_id)
         async with SessionFactory() as session:
             usage_service = QuotaService(UserQuotaRepository(session), UsageEventRepository(session))
             llm_usage = list(summary.get("llm_usage", []) or [])
@@ -760,6 +770,77 @@ class TaskService:
             total_output_tokens = int(sum(int(item.get("output_tokens", 0) or 0) for item in llm_usage))
             primary_model = str(llm_usage[0].get("model", "") or "") if llm_usage else ""
             estimated_cost_usd = usage_service.estimate_cost_from_usage(llm_usage)
+
+            latest_snapshot = await self._session.get_task(task_id) or {}
+            budget = dict(latest_snapshot.get("budget") or {})
+            review = dict(latest_snapshot.get("review") or {})
+            artifact_refs = list(latest_snapshot.get("artifact_refs") or [])
+            quality_report = dict(review.get("quality_report") or {})
+            quality_report_summary = summarize_quality_report(quality_report)
+            cost_ledger = dict(budget.get("cost_ledger") or {})
+            partial_progress = dict(review.get("partial_progress") or cost_ledger.get("partial_progress") or {})
+            if not cost_ledger:
+                cost_ledger = init_cost_ledger(task_id=task_id, domain="office")
+            cost_ledger = merge_tool_events_into_ledger(cost_ledger, events=events)
+            cost_ledger = merge_llm_usage_into_ledger(
+                cost_ledger,
+                llm_usage=llm_usage,
+                estimate_cost=usage_service.estimate_cost_usd,
+            )
+            diagnostics = build_failure_diagnostics(events)
+            if diagnostics.get("completed_pages"):
+                cost_ledger["completed_pages"] = int(diagnostics["completed_pages"])
+            elif partial_progress.get("completed_pages"):
+                cost_ledger["completed_pages"] = int(partial_progress["completed_pages"])
+            cost_ledger = attach_partial_progress(cost_ledger, partial_progress=partial_progress)
+            cost_ledger = attach_quality_summary(
+                cost_ledger,
+                quality_report_summary=quality_report_summary,
+            )
+            budget["cost_ledger"] = summarize_cost_ledger(cost_ledger)
+            budget["monitoring_summary"] = summary
+            if quality_report:
+                budget["quality_report_summary"] = quality_report_summary
+
+            result_text = str(latest_snapshot.get("result_text", "") or "")
+            if (
+                "inner_recursion_limit" in str(review.get("reason", "") or "")
+                or "内层 agent 超过" in result_text
+                or not bool(review.get("passed", True))
+            ):
+                detail_lines = []
+                if diagnostics.get("current_stage"):
+                    detail_lines.append(f"当前阶段: {diagnostics['current_stage']}")
+                if diagnostics.get("completed_pages"):
+                    detail_lines.append(f"已推断完成页数: {diagnostics['completed_pages']}")
+                elif partial_progress.get("completed_pages"):
+                    detail_lines.append(f"已完成页数: {partial_progress['completed_pages']}")
+                last_success = diagnostics.get("last_successful_tool") or {}
+                if last_success.get("command"):
+                    detail_lines.append(f"最后一次成功工具调用: {last_success['command']}")
+                detail_lines.extend(quality_report_summary_lines(quality_report))
+                if detail_lines:
+                    result_text = f"{result_text}\n" + "\n".join(detail_lines)
+                    await self._session.set_result_text(task_id, result_text)
+
+            await self._session.update_projection(
+                task_id,
+                projection_patch={
+                    "budget": budget or None,
+                    "review": review or None,
+                    "artifact_refs": artifact_refs,
+                },
+            )
+            await self.record_event(
+                task_id,
+                EventType.SYSTEM_MONITORING.value,
+                {
+                    "content": summary,
+                    "cost_ledger": budget["cost_ledger"],
+                    "diagnostics": diagnostics,
+                    "quality_report_summary": quality_report_summary,
+                },
+            )
             await usage_service.record_task_usage(
                 user_id=user_id,
                 task_id=task_id,

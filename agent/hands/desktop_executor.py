@@ -31,12 +31,24 @@ class DesktopToolExecutor:
         self._default_timeout_s = default_timeout_s
         # invocation_id → Future that resolves with result payload
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # task_id → monotonic expiry for fast-fail after desktop timeout
+        self._timeout_cooldown_until: dict[str, float] = {}
 
     async def prepare(self, call: ToolCall, ctx: ToolContext) -> None:
         """No-op — permission checks happen on the client side."""
         return None
 
     async def execute(self, call: ToolCall, ctx: ToolContext) -> ToolResult:
+        now = time.monotonic()
+        cooldown_until = self._timeout_cooldown_until.get(call.task_id, 0.0)
+        if cooldown_until > now:
+            remaining = max(cooldown_until - now, 0.0)
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Desktop tool execution is cooling down after a previous timeout ({remaining:.1f}s remaining)",
+            )
+
         conn = self._manager.get_connection(ctx.user_id)
         if conn is None:
             return ToolResult(
@@ -75,6 +87,7 @@ class DesktopToolExecutor:
 
             result_payload = await asyncio.wait_for(future, timeout=timeout_s)
             elapsed_ms = int((time.monotonic() - start) * 1000)
+            self._timeout_cooldown_until.pop(call.task_id, None)
 
             return ToolResult(
                 success=result_payload.get("success", False),
@@ -86,10 +99,12 @@ class DesktopToolExecutor:
 
         except asyncio.TimeoutError:
             elapsed_ms = int((time.monotonic() - start) * 1000)
+            self._timeout_cooldown_until[call.task_id] = time.monotonic() + 60.0
             log.warning(
                 "Desktop tool call timed out: tool=%s inv=%s timeout=%ss",
                 call.tool_name, invocation_id, timeout_s,
             )
+            await self._send_cancel(conn, invocation_id, f"timeout after {timeout_s}s")
             return ToolResult(
                 success=False,
                 output="",
@@ -121,6 +136,20 @@ class DesktopToolExecutor:
         future = self._pending.get(invocation_id)
         if future and not future.done():
             future.set_exception(asyncio.CancelledError(reason))
+
+    async def _send_cancel(self, conn: Any, invocation_id: str, reason: str) -> None:
+        try:
+            await conn.ws.send_json({
+                "type": "tool_cancel",
+                "id": f"cancel_{invocation_id[:8]}",
+                "timestamp": _iso_now(),
+                "payload": {
+                    "invocation_id": invocation_id,
+                    "reason": reason,
+                },
+            })
+        except Exception:
+            log.debug("Failed to send desktop tool_cancel for %s", invocation_id, exc_info=True)
 
 
 def _iso_now() -> str:

@@ -154,3 +154,18 @@ class TestDeepagentsBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("User denied permission", result.output)
         self.assertFalse(local.called)
+
+    async def test_shell_can_be_disabled_for_office_domain(self):
+        manager, gateway, _local, desktop = self._make_gateway()
+        factory = build_deepagents_backend_factory(
+            user_id="user_1",
+            task_id="task_1",
+            tool_gateway=gateway,
+            desktop_manager=manager,
+            allow_shell=False,
+        )
+        backend = factory(DummyRuntime())
+        result = await backend.aexecute("echo hi")
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("disabled", result.output.lower())
+        self.assertNotIn("shell", desktop.called_tools)

@@ -49,6 +49,7 @@ _OFFICE_CAPABILITY_PATTERNS = (
     re.compile(r"(ppt|powerpoint|docx|word|xlsx|excel|演示文稿|电子表格).*(能不能|能否|可不可以|可以|会不会|是否能)", re.IGNORECASE),
 )
 _OFFICE_PATH_RE = re.compile(r"([A-Za-z]:\\|/|~|\.pptx\b|\.docx\b|\.xlsx\b)", re.IGNORECASE)
+_OFFICE_ROUTABLE_SOURCE_RE = re.compile(r"(^[A-Za-z]:\\|^/|^~)", re.IGNORECASE)
 
 
 def _normalize_model_hints(model_hints: Any) -> dict[str, dict[str, Any]] | None:
@@ -96,12 +97,18 @@ def _office_skill_input(goal: str, source_files: list[str]) -> dict[str, Any]:
     return payload
 
 
+def _normalize_office_operation_hint(skill_input: dict[str, Any]) -> str:
+    operation = str(skill_input.get("operation_hint", "") or "").strip().lower()
+    return operation if operation in {"create", "edit", "inspect", "transform"} else ""
+
+
 def _has_explicit_office_source(goal: str, skill_input: dict[str, Any]) -> bool:
     if skill_input.get("source_files"):
         return True
-    if str(skill_input.get("file_hint", "") or "").strip():
+    file_hint = str(skill_input.get("file_hint", "") or "").strip()
+    if file_hint and _OFFICE_ROUTABLE_SOURCE_RE.search(file_hint):
         return True
-    return bool(_OFFICE_PATH_RE.search(str(goal or "")))
+    return bool(_OFFICE_ROUTABLE_SOURCE_RE.search(str(goal or "")))
 
 
 def _is_edit_like_office_request(goal: str) -> bool:
@@ -114,6 +121,11 @@ def _is_edit_like_office_request(goal: str) -> bool:
 def _office_request_needs_clarification(goal: str, skill_input: dict[str, Any]) -> bool:
     text = str(goal or "").strip()
     if not text or not _mentions_office(text):
+        return False
+    operation_hint = _normalize_office_operation_hint(skill_input)
+    if operation_hint in {"edit", "inspect", "transform"}:
+        return not _has_explicit_office_source(text, skill_input)
+    if operation_hint == "create":
         return False
     if not _is_edit_like_office_request(text):
         return False
@@ -225,28 +237,8 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
             config=config,
         )
 
-    if _is_simple_office_request(goal):
-        safe_emit_progress("progress.step", {
-            "content": f"执行模式：{ExecutionMode.SINGLE_SKILL.value}",
-            "node": "understand_goal",
-            "trace_id": trace_id,
-            "execution_mode": ExecutionMode.SINGLE_SKILL.value,
-        })
-        return {
-            **_base_coordinator_result(
-                trace_id=trace_id,
-                execution_mode=ExecutionMode.SINGLE_SKILL,
-                goal_understanding="用户需要处理单独的 Office 文档交付物",
-                skill_summary=skill_summary,
-                available_skills=available_skills,
-                config=config,
-            ),
-            "selected_skill": "do_office",
-            "skill_input": _office_skill_input(goal, source_files),
-        }
-
     capability_summary = _desktop_capability_summary(state)
-    messages = build_understand_goal_prompt(goal, skill_summary, capability_summary)
+    messages = build_understand_goal_prompt(goal, skill_summary, capability_summary, source_files)
 
     # 调用 LLM
     try:
