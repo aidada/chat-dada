@@ -399,13 +399,15 @@ def _looks_like_sheet_name(value: str) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
+    if not _is_legal_sheet_name(text):
+        return False
     lowered = text.lower()
     if any(token in lowered for token in _SHEET_NAME_REJECT_TOKENS):
         return False
-    if any(mark in text for mark in (".", ";", ":", "?", "!", "。", "；", "：", "？", "！")):
-        return False
     normalized = lowered.replace("-", " ").replace("_", " ").replace("(", " ").replace(")", " ").replace("/", " ")
-    normalized = normalized.replace(",", " ")
+    normalized = normalized.replace(",", " ").replace(".", " ").replace(";", " ").replace(":", " ")
+    normalized = normalized.replace("?", " ").replace("!", " ")
+    normalized = normalized.replace("。", " ").replace("；", " ").replace("：", " ").replace("？", " ").replace("！", " ")
     tokens = [part for part in normalized.split() if part]
     if not tokens or len(tokens) > 6:
         return False

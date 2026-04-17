@@ -294,7 +294,15 @@ def test_xlsx_strategy_accepts_numeric_and_light_punctuation_sheet_names() -> No
         default_create_file="budget.xlsx",
         merged_constraints={
             "goal_constraints": {
-                "hard_requirements": ["Q1 Summary", "2026 Budget", "Sales FY25", "Summary (Final)"]
+                "hard_requirements": [
+                    "Q1 Summary",
+                    "2026 Budget",
+                    "Sales FY25",
+                    "Summary (Final)",
+                    "Q1 v1.0",
+                    "Ops;2026",
+                    "Sales!",
+                ]
             },
         },
     )
@@ -304,6 +312,9 @@ def test_xlsx_strategy_accepts_numeric_and_light_punctuation_sheet_names() -> No
         "2026 Budget",
         "Sales FY25",
         "Summary (Final)",
+        "Q1 v1.0",
+        "Ops;2026",
+        "Sales!",
     ]
 
 
