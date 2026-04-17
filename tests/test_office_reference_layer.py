@@ -173,3 +173,14 @@ def test_resolve_reference_constraints_normalizes_required_fields() -> None:
     assert merged["existing_document_profile"]["format"] == "docx"
     assert merged["existing_document_profile"]["units"] == []
     assert merged["existing_document_profile"]["protected_units"] == ["RawData"]
+
+
+def test_resolve_reference_constraints_uses_style_format_for_goal_fallback() -> None:
+    merged = resolve_reference_constraints(
+        goal_constraints={"hard_requirements": ["rename summary sheet"]},
+        reference_structure_constraints={"units": [{"name": "Summary"}]},
+        reference_style_constraints={"format": "pptx", "style_tokens": {"theme": "blue"}},
+        existing_document_profile={"protected_units": ["RawData"]},
+    )
+
+    assert merged["goal_constraints"]["format"] == "pptx"

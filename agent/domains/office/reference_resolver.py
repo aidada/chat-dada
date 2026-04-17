@@ -49,6 +49,9 @@ def resolve_reference_constraints(
     if not goal_format_name:
         document_format = str(document_payload.get("format", "") or "")
         goal_format_name = document_format if document_format.strip() else ""
+    if not goal_format_name:
+        style_format = str(style_payload.get("format", "") or "")
+        goal_format_name = style_format if style_format.strip() else ""
     goal_payload: GoalConstraints = build_goal_constraints(
         format_name=goal_format_name,
         operation=str(goal_source.get("operation", "") or ""),
