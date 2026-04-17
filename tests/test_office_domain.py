@@ -346,6 +346,24 @@ def test_xlsx_strategy_rejects_forbidden_character_sheet_name() -> None:
     assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary"]
 
 
+def test_xlsx_strategy_build_plan_dedupes_case_insensitive_sheet_names() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": ["Summary", "summary", "Dashboard"],
+            },
+        },
+    )
+
+    assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary", "Dashboard"]
+
+
 def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 
@@ -389,6 +407,51 @@ def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> 
     assert plan["batches"] == [existing_batch]
 
 
+def test_xlsx_strategy_validate_plan_rebuilds_case_insensitive_duplicate_sheet_names() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    strategy = XlsxStrategy()
+    plan, issues = strategy.validate_plan(
+        plan={
+            "title": "Workbook",
+            "sheet_count": 2,
+            "sheets": [
+                {
+                    "name": "Summary",
+                    "purpose": "Top-level metrics.",
+                    "sheet_type": "summary",
+                    "columns": [],
+                    "table_regions": [],
+                    "formula_regions": [],
+                    "chart_regions": [],
+                    "validation_rules": [],
+                },
+                {
+                    "name": "summary",
+                    "purpose": "Duplicate metrics.",
+                    "sheet_type": "summary",
+                    "columns": [],
+                    "table_regions": [],
+                    "formula_regions": [],
+                    "chart_regions": [],
+                    "validation_rules": [],
+                },
+            ],
+            "batches": [],
+        },
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "reference_structure_constraints": {"units": [{"name": "Summary"}, {"name": "Dashboard"}]},
+        },
+    )
+
+    assert "duplicate_sheet_name" in issues
+    assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary", "Dashboard"]
+
+
 def test_xlsx_strategy_validate_plan_rebuilds_invalid_preserved_sheet_name() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 
@@ -422,6 +485,60 @@ def test_xlsx_strategy_validate_plan_rebuilds_invalid_preserved_sheet_name() -> 
 
     assert "invalid_sheet_name" in issues
     assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary"]
+
+
+def test_xlsx_strategy_validate_plan_falls_back_on_malformed_numeric_fields() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    strategy = XlsxStrategy()
+    plan, issues = strategy.validate_plan(
+        plan={
+            "title": "Workbook",
+            "sheet_count": "three",
+            "sheets": [
+                {
+                    "name": "Summary",
+                    "purpose": "Top-level metrics.",
+                    "sheet_type": "summary",
+                    "columns": [],
+                    "table_regions": [],
+                    "formula_regions": [],
+                    "chart_regions": [],
+                    "validation_rules": [],
+                }
+            ],
+            "batches": [
+                {
+                    "index": 0,
+                    "sheet_start": "first",
+                    "sheet_end": "last",
+                    "sheet_names": ["Summary"],
+                }
+            ],
+        },
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "reference_structure_constraints": {"units": [{"name": "Summary"}, {"name": "Dashboard"}]},
+        },
+    )
+
+    assert issues == []
+    assert plan["sheet_count"] == 1
+    assert plan["batches"] == [
+        {
+            "index": 0,
+            "sheet_start": 1,
+            "sheet_end": 1,
+            "sheet_names": ["Summary"],
+            "slide_start": 1,
+            "slide_end": 1,
+            "slide_titles": ["Summary"],
+            "slide_roles": ["summary"],
+        }
+    ]
 
 
 def test_xlsx_strategy_validate_plan_normalizes_stale_alias_fields_in_preserved_batch() -> None:

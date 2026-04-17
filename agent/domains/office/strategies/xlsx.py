@@ -123,14 +123,24 @@ class XlsxStrategy(DefaultOfficeStrategy):
             raw_sheets = []
 
         normalized_sheets: list[dict[str, Any]] = []
+        seen_sheet_names: set[str] = set()
+        sheet_shape_invalid = False
         for sheet in raw_sheets:
             if not isinstance(sheet, dict):
                 issues.append("invalid_sheet_entry")
+                sheet_shape_invalid = True
                 continue
             name = str(sheet.get("name", "") or "").strip()
             if not _is_legal_sheet_name(name):
                 issues.append("invalid_sheet_name")
+                sheet_shape_invalid = True
                 continue
+            name_key = _sheet_name_key(name)
+            if name_key in seen_sheet_names:
+                issues.append("duplicate_sheet_name")
+                sheet_shape_invalid = True
+                continue
+            seen_sheet_names.add(name_key)
             normalized_sheets.append(
                 {
                     "name": name,
@@ -144,10 +154,10 @@ class XlsxStrategy(DefaultOfficeStrategy):
                 }
             )
 
-        if not normalized_sheets:
+        if sheet_shape_invalid or not normalized_sheets:
             normalized = self.build_plan(
                 goal=goal,
-                requested_slide_count=max(int(plan.get("sheet_count", 0) or 0), requested_slide_count),
+                requested_slide_count=max(_coerce_int(plan.get("sheet_count"), default=0), requested_slide_count),
                 build_batch_size=build_batch_size,
                 default_create_file=default_create_file,
                 merged_constraints=merged_constraints,
@@ -332,10 +342,13 @@ def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None)
                 hard_requirements = list(raw_requirements)
 
     names: list[str] = []
+    seen_names: set[str] = set()
     for item in hard_requirements:
         name = str(item or "").strip()
-        if _is_legal_sheet_name(name) and _looks_like_sheet_name(name) and name not in names:
+        name_key = _sheet_name_key(name)
+        if _is_legal_sheet_name(name) and _looks_like_sheet_name(name) and name_key not in seen_names:
             names.append(name)
+            seen_names.add(name_key)
 
     if isinstance(merged_constraints, dict):
         structure_constraints = merged_constraints.get("reference_structure_constraints")
@@ -345,8 +358,10 @@ def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None)
                 if not isinstance(unit, dict):
                     continue
                 name = str(unit.get("name", "") or "").strip()
-                if _is_legal_sheet_name(name) and name not in names:
+                name_key = _sheet_name_key(name)
+                if _is_legal_sheet_name(name) and name_key not in seen_names:
                     names.append(name)
+                    seen_names.add(name_key)
 
     if names:
         return names
@@ -396,6 +411,10 @@ def _is_legal_sheet_name(value: str) -> bool:
     if len(text) > 31:
         return False
     return not any(char in _EXCEL_FORBIDDEN_SHEET_CHARS for char in text)
+
+
+def _sheet_name_key(value: str) -> str:
+    return str(value or "").strip().lower()
 
 
 def _sheet_type(name: str) -> str:
@@ -514,8 +533,8 @@ def _normalize_batches(
     for index, batch in enumerate(raw_batches):
         if not isinstance(batch, dict):
             return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
-        start = int(batch.get("sheet_start", 0) or 0)
-        end = int(batch.get("sheet_end", 0) or 0)
+        start = _coerce_int(batch.get("sheet_start"), default=0)
+        end = _coerce_int(batch.get("sheet_end"), default=0)
         names = _coerce_batch_list(batch, "sheet_names")
         if start <= 0 or end < start or end > sheet_count or not names:
             return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
@@ -525,7 +544,7 @@ def _normalize_batches(
             return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
         normalized.append(
             {
-                "index": int(batch.get("index", index) or index),
+                "index": _coerce_int(batch.get("index"), default=index),
                 "sheet_start": start,
                 "sheet_end": end,
                 "sheet_names": names,
@@ -556,6 +575,15 @@ def _coerce_batch_list(container: dict[str, Any], key: str) -> list[str]:
     if isinstance(value, list):
         return [str(item or "") for item in value if str(item or "")]
     return []
+
+
+def _coerce_int(value: Any, *, default: int) -> int:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 __all__ = ["XlsxStrategy"]
