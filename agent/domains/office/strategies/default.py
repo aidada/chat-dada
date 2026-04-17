@@ -42,6 +42,7 @@ class DefaultOfficeStrategy:
         requested_slide_count: int,
         build_batch_size: int,
         default_create_file: str,
+        merged_constraints: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
         issues: list[str] = []
         if not isinstance(plan, dict):

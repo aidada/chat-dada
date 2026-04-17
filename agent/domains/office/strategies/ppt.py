@@ -87,6 +87,7 @@ class PptStrategy:
         requested_slide_count: int,
         build_batch_size: int,
         default_create_file: str,
+        merged_constraints: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
         if not isinstance(plan, dict):
             fallback = self.build_plan(
@@ -94,6 +95,7 @@ class PptStrategy:
                 requested_slide_count=requested_slide_count,
                 build_batch_size=build_batch_size,
                 default_create_file=default_create_file,
+                merged_constraints=merged_constraints,
             )
             return fallback, ["plan_not_dict"]
 
@@ -106,6 +108,7 @@ class PptStrategy:
             requested_slide_count=target_slide_count,
             build_batch_size=build_batch_size,
             default_create_file=default_create_file,
+            merged_constraints=merged_constraints,
         )
         fallback_slides = list(fallback.get("slides") or [])
 

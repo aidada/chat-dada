@@ -111,29 +111,55 @@ async def test_office_planning_node_refines_generic_filename_from_plan_title() -
 
 @pytest.mark.asyncio
 async def test_planning_node_carries_reference_constraints_into_task_profile() -> None:
+    from agent.domains.office.strategies.ppt import PptStrategy
     from agent.domains.office.workflow import planning_node
 
-    result = await planning_node(
-        {
-            "goal": "按参考案例生成 8 页产品介绍 PPT",
-            "format": "pptx",
-            "operation": "create",
-            "requested_slide_count": 8,
-            "build_batch_size": 3,
-            "default_create_file": "product-intro.pptx",
-            "task_profile": {"reference_files": ["example.pptx"]},
-            "goal_constraints": {"goal": "按参考案例生成 8 页产品介绍 PPT"},
-            "reference_structure_constraints": {"units": [{"name": "封面"}]},
-            "reference_style_constraints": {"style_tokens": {"theme": "blue"}},
-            "cost_ledger": {},
-        }
-    )
+    class IncompletePlanPptStrategy(PptStrategy):
+        def __init__(self) -> None:
+            self._build_plan_calls = 0
+
+        def build_plan(self, **kwargs):
+            self._build_plan_calls += 1
+            plan = super().build_plan(**kwargs)
+            if self._build_plan_calls == 1:
+                return {
+                    **plan,
+                    "slides": [{"index": 1}, {"index": 2}],
+                    "batches": [],
+                }
+            return plan
+
+    with patch(
+        "agent.domains.office.workflow.get_strategy_for_format",
+        return_value=IncompletePlanPptStrategy(),
+    ):
+        result = await planning_node(
+            {
+                "goal": "按参考案例生成 8 页产品介绍 PPT",
+                "format": "pptx",
+                "operation": "create",
+                "requested_slide_count": 8,
+                "build_batch_size": 3,
+                "default_create_file": "product-intro.pptx",
+                "task_profile": {"reference_files": ["example.pptx"]},
+                "goal_constraints": {"goal": "按参考案例生成 8 页产品介绍 PPT"},
+                "reference_structure_constraints": {"units": [{"name": "封面"}, {"name": "问题"}, {"name": "方案"}]},
+                "reference_style_constraints": {"style_tokens": {"theme": "blue"}},
+                "cost_ledger": {},
+            }
+        )
 
     assert result["task_profile"]["target_filename"].endswith(".pptx")
     assert result["task_profile"]["merged_constraints"]["goal_constraints"]["goal"] == "按参考案例生成 8 页产品介绍 PPT"
-    assert result["task_profile"]["merged_constraints"]["reference_structure_constraints"]["units"] == [{"name": "封面"}]
+    assert result["task_profile"]["merged_constraints"]["reference_structure_constraints"]["units"] == [
+        {"name": "封面"},
+        {"name": "问题"},
+        {"name": "方案"},
+    ]
     assert result["task_profile"]["merged_constraints"]["reference_style_constraints"]["style_tokens"] == {"theme": "blue"}
     assert result["planning_summary"]["slide_count"] == 8
+    assert result["deck_plan"]["slides"][0]["title"] == "封面"
+    assert result["deck_plan"]["slides"][1]["title"] == "问题"
 
 
 @pytest.mark.asyncio

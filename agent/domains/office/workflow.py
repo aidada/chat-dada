@@ -544,6 +544,7 @@ async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
         requested_slide_count=requested_slide_count or 6,
         build_batch_size=build_batch_size,
         default_create_file=default_create_file,
+        merged_constraints=merged_constraints,
     )
     if str(state.get("operation", "") or "").lower() == "create":
         refined_filename = refine_filename_from_plan(
