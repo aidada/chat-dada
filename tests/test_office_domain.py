@@ -307,6 +307,45 @@ def test_xlsx_strategy_accepts_numeric_and_light_punctuation_sheet_names() -> No
     ]
 
 
+def test_xlsx_strategy_rejects_overlong_sheet_name() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    long_name = "Budget Forecast For International Sales 2026"
+    plan = XlsxStrategy().build_plan(
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": [long_name],
+            },
+            "reference_structure_constraints": {"units": [{"name": "Summary"}]},
+        },
+    )
+
+    assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary"]
+
+
+def test_xlsx_strategy_rejects_forbidden_character_sheet_name() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": ["Budget/2026"],
+            },
+            "reference_structure_constraints": {"units": [{"name": "Summary"}]},
+        },
+    )
+
+    assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary"]
+
+
 def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 
@@ -348,6 +387,41 @@ def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> 
     assert issues == []
     assert plan["sheets"] == [existing_sheet]
     assert plan["batches"] == [existing_batch]
+
+
+def test_xlsx_strategy_validate_plan_rebuilds_invalid_preserved_sheet_name() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    strategy = XlsxStrategy()
+    plan, issues = strategy.validate_plan(
+        plan={
+            "title": "Workbook",
+            "sheet_count": 1,
+            "sheets": [
+                {
+                    "name": "Budget/2026",
+                    "purpose": "Track budget.",
+                    "sheet_type": "summary",
+                    "columns": [],
+                    "table_regions": [],
+                    "formula_regions": [],
+                    "chart_regions": [],
+                    "validation_rules": [],
+                }
+            ],
+            "batches": [],
+        },
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "reference_structure_constraints": {"units": [{"name": "Summary"}]},
+        },
+    )
+
+    assert "invalid_sheet_name" in issues
+    assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary"]
 
 
 def test_xlsx_strategy_validate_plan_normalizes_stale_alias_fields_in_preserved_batch() -> None:

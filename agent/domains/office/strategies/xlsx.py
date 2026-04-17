@@ -42,6 +42,7 @@ _SHEET_NAME_REJECT_TOKENS = (
     "header",
     "row ",
 )
+_EXCEL_FORBIDDEN_SHEET_CHARS = set("[]:*?/\\")
 
 
 class XlsxStrategy(DefaultOfficeStrategy):
@@ -127,7 +128,7 @@ class XlsxStrategy(DefaultOfficeStrategy):
                 issues.append("invalid_sheet_entry")
                 continue
             name = str(sheet.get("name", "") or "").strip()
-            if not name:
+            if not _is_legal_sheet_name(name):
                 issues.append("invalid_sheet_name")
                 continue
             normalized_sheets.append(
@@ -333,7 +334,7 @@ def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None)
     names: list[str] = []
     for item in hard_requirements:
         name = str(item or "").strip()
-        if name and _looks_like_sheet_name(name) and name not in names:
+        if _is_legal_sheet_name(name) and _looks_like_sheet_name(name) and name not in names:
             names.append(name)
 
     if isinstance(merged_constraints, dict):
@@ -344,7 +345,7 @@ def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None)
                 if not isinstance(unit, dict):
                     continue
                 name = str(unit.get("name", "") or "").strip()
-                if name and name not in names:
+                if _is_legal_sheet_name(name) and name not in names:
                     names.append(name)
 
     if names:
@@ -364,8 +365,6 @@ def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None)
 def _looks_like_sheet_name(value: str) -> bool:
     text = str(value or "").strip()
     if not text:
-        return False
-    if len(text) > 48:
         return False
     lowered = text.lower()
     if any(token in lowered for token in _SHEET_NAME_REJECT_TOKENS):
@@ -388,6 +387,15 @@ def _looks_like_sheet_name(value: str) -> bool:
     if len(tokens) == 1 and any(char.isalnum() for char in text) and text[:1].isupper():
         return True
     return False
+
+
+def _is_legal_sheet_name(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if len(text) > 31:
+        return False
+    return not any(char in _EXCEL_FORBIDDEN_SHEET_CHARS for char in text)
 
 
 def _sheet_type(name: str) -> str:
