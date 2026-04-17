@@ -461,7 +461,7 @@ def _sheet_columns(name: str) -> list[dict[str, str]]:
 
 
 def _table_regions(name: str) -> list[dict[str, str]]:
-    return [{"name": f"{name}Table", "range_hint": "A1:C20"}]
+    return [{"name": f"{_structural_identifier(name)}Table", "range_hint": "A1:C20"}]
 
 
 def _formula_regions(name: str) -> list[dict[str, str]]:
@@ -554,12 +554,7 @@ def _normalize_batches(
                 "slide_roles": [str(sheet.get("sheet_type", "") or "") for sheet in expected_slice],
             }
         )
-    expected_ranges = [(position, position) for position in range(1, sheet_count + 1)]
-    normalized_ranges = [
-        (int(batch.get("sheet_start", 0) or 0), int(batch.get("sheet_end", 0) or 0))
-        for batch in normalized
-    ]
-    if normalized_ranges != expected_ranges:
+    if not _has_full_batch_coverage(normalized, sheet_count=sheet_count):
         return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
     return normalized
 
@@ -591,6 +586,24 @@ def _coerce_int(value: Any, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _has_full_batch_coverage(batches: list[dict[str, Any]], *, sheet_count: int) -> bool:
+    if sheet_count <= 0:
+        return not batches
+    cursor = 1
+    for batch in batches:
+        start = _coerce_int(batch.get("sheet_start"), default=0)
+        end = _coerce_int(batch.get("sheet_end"), default=0)
+        if start != cursor or end < start:
+            return False
+        cursor = end + 1
+    return cursor == sheet_count + 1
+
+
+def _structural_identifier(value: str) -> str:
+    chars = [char for char in str(value or "") if char.isalnum()]
+    return "".join(chars) or "Sheet"
 
 
 __all__ = ["XlsxStrategy"]

@@ -717,6 +717,112 @@ def test_xlsx_strategy_validate_plan_rebuilds_gap_or_overlap_in_preserved_batche
     ]
 
 
+def test_xlsx_strategy_validate_plan_preserves_valid_multi_sheet_batch_set() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    strategy = XlsxStrategy()
+    existing_sheets = [
+        {
+            "name": "RawData",
+            "purpose": "Store source records.",
+            "sheet_type": "raw_data",
+            "columns": [],
+            "table_regions": [],
+            "formula_regions": [],
+            "chart_regions": [],
+            "validation_rules": [],
+        },
+        {
+            "name": "Summary",
+            "purpose": "Top-level metrics.",
+            "sheet_type": "summary",
+            "columns": [],
+            "table_regions": [],
+            "formula_regions": [],
+            "chart_regions": [],
+            "validation_rules": [],
+        },
+        {
+            "name": "Dashboard",
+            "purpose": "Present KPI charts.",
+            "sheet_type": "dashboard",
+            "columns": [],
+            "table_regions": [],
+            "formula_regions": [],
+            "chart_regions": [],
+            "validation_rules": [],
+        },
+    ]
+
+    plan, issues = strategy.validate_plan(
+        plan={
+            "title": "Workbook",
+            "sheet_count": 3,
+            "sheets": existing_sheets,
+            "batches": [
+                {
+                    "index": 0,
+                    "sheet_start": 1,
+                    "sheet_end": 2,
+                    "sheet_names": ["RawData", "Summary"],
+                },
+                {
+                    "index": 1,
+                    "sheet_start": 3,
+                    "sheet_end": 3,
+                    "sheet_names": ["Dashboard"],
+                },
+            ],
+        },
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+    )
+
+    assert issues == []
+    assert plan["batches"] == [
+        {
+            "index": 0,
+            "sheet_start": 1,
+            "sheet_end": 2,
+            "sheet_names": ["RawData", "Summary"],
+            "slide_start": 1,
+            "slide_end": 2,
+            "slide_titles": ["RawData", "Summary"],
+            "slide_roles": ["raw_data", "summary"],
+        },
+        {
+            "index": 1,
+            "sheet_start": 3,
+            "sheet_end": 3,
+            "sheet_names": ["Dashboard"],
+            "slide_start": 3,
+            "slide_end": 3,
+            "slide_titles": ["Dashboard"],
+            "slide_roles": ["dashboard"],
+        },
+    ]
+
+
+def test_xlsx_strategy_sanitizes_table_region_identifier_from_multi_word_sheet_name() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成区域销售预算表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="regional-sales.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": ["Regional Sales Summary"],
+            },
+        },
+    )
+
+    assert plan["sheets"][0]["table_regions"] == [{"name": "RegionalSalesSummaryTable", "range_hint": "A1:C20"}]
+
+
 def test_xlsx_strategy_validate_plan_normalizes_stale_alias_fields_in_preserved_batch() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 
