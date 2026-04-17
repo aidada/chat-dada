@@ -154,10 +154,10 @@ def test_resolve_reference_constraints_deep_copies_nested_inputs() -> None:
 
 def test_resolve_reference_constraints_normalizes_required_fields() -> None:
     merged = resolve_reference_constraints(
-        goal_constraints={"hard_requirements": ["rename summary sheet"]},
-        reference_structure_constraints={"format": "pptx", "units": [{"name": "Summary"}]},
-        reference_style_constraints={"format": "pptx", "style_tokens": {"theme": "blue"}},
-        existing_document_profile={"format": "docx", "protected_units": ["RawData"]},
+        goal_constraints={"format": " PPTX ", "hard_requirements": ["rename summary sheet"]},
+        reference_structure_constraints={"format": " PPTX ", "units": [{"name": "Summary"}]},
+        reference_style_constraints={"format": " PPTX ", "style_tokens": {"theme": "blue"}},
+        existing_document_profile={"format": " DOCX ", "protected_units": ["RawData"]},
     )
 
     assert merged["goal_constraints"] == {

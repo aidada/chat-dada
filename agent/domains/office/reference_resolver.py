@@ -17,6 +17,10 @@ from agent.domains.office.reference_models import (
 )
 
 
+def _canonical_format(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
 def resolve_reference_constraints(
     *,
     goal_constraints: dict[str, Any],
@@ -28,30 +32,29 @@ def resolve_reference_constraints(
     style_source = dict(reference_style_constraints or {})
     document_source = dict(existing_document_profile or {})
     structure_payload: ReferenceStructureConstraints = build_reference_structure_constraints(
-        format_name=str(structure_source.get("format", "") or ""),
+        format_name=_canonical_format(structure_source.get("format", "")),
         units=deepcopy(structure_source.get("units", []) or []),
     )
     style_payload: ReferenceStyleConstraints = build_reference_style_constraints(
-        format_name=str(style_source.get("format", "") or ""),
+        format_name=_canonical_format(style_source.get("format", "")),
         style_tokens=deepcopy(style_source.get("style_tokens", {}) or {}),
     )
     document_payload: ExistingDocumentProfile = build_existing_document_profile(
-        format_name=str(document_source.get("format", "") or ""),
+        format_name=_canonical_format(document_source.get("format", "")),
         units=deepcopy(document_source.get("units", []) or []),
         protected_units=deepcopy(document_source.get("protected_units", []) or []),
     )
     goal_source = dict(goal_constraints or {})
-    goal_format_raw = str(goal_source.get("format", "") or "")
-    goal_format_name = goal_format_raw if goal_format_raw.strip() else ""
+    goal_format_name = _canonical_format(goal_source.get("format", ""))
     if not goal_format_name:
-        structure_format = str(structure_payload.get("format", "") or "")
-        goal_format_name = structure_format if structure_format.strip() else ""
+        structure_format = _canonical_format(structure_payload.get("format", ""))
+        goal_format_name = structure_format
     if not goal_format_name:
-        document_format = str(document_payload.get("format", "") or "")
-        goal_format_name = document_format if document_format.strip() else ""
+        document_format = _canonical_format(document_payload.get("format", ""))
+        goal_format_name = document_format
     if not goal_format_name:
-        style_format = str(style_payload.get("format", "") or "")
-        goal_format_name = style_format if style_format.strip() else ""
+        style_format = _canonical_format(style_payload.get("format", ""))
+        goal_format_name = style_format
     goal_payload: GoalConstraints = build_goal_constraints(
         format_name=goal_format_name,
         operation=str(goal_source.get("operation", "") or ""),
