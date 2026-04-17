@@ -15,7 +15,7 @@ class PptStrategy:
     ) -> dict[str, Any]:
         slide_count = max(int(requested_slide_count or 0), 1)
         title = _infer_deck_title(goal, default_create_file)
-        slide_titles = _build_slide_titles(slide_count)
+        slide_titles = _build_reference_aligned_slide_titles(slide_count, merged_constraints)
         slides = [
             {
                 "index": idx + 1,
@@ -484,6 +484,30 @@ def _build_slide_titles(slide_count: int) -> list[str]:
     for idx in range(len(base) + 1, slide_count + 1):
         titles.append(f"扩展内容 {idx - len(base)}")
     return titles
+
+
+def _build_reference_aligned_slide_titles(
+    slide_count: int,
+    merged_constraints: dict[str, Any] | None,
+) -> list[str]:
+    reference_titles: list[str] = []
+    structure_constraints = merged_constraints.get("reference_structure_constraints") if isinstance(merged_constraints, dict) else {}
+    units = structure_constraints.get("units") if isinstance(structure_constraints, dict) else []
+    if isinstance(units, list):
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            title = str(unit.get("name", "") or "").strip()
+            if title:
+                reference_titles.append(title)
+            if len(reference_titles) >= slide_count:
+                break
+
+    if len(reference_titles) >= slide_count:
+        return reference_titles[:slide_count]
+
+    fallback_titles = _build_slide_titles(slide_count)
+    return reference_titles + fallback_titles[len(reference_titles):]
 
 
 def _slide_role(index: int, slide_count: int) -> str:

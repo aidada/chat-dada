@@ -263,6 +263,47 @@ def test_ppt_strategy_quality_metrics_pass_for_long_deck() -> None:
     assert issues == []
 
 
+def test_ppt_strategy_build_plan_uses_reference_slide_names() -> None:
+    from agent.domains.office.strategies.ppt import PptStrategy
+
+    plan = PptStrategy().build_plan(
+        goal="按参考案例生成 6 页产品介绍",
+        requested_slide_count=6,
+        build_batch_size=2,
+        default_create_file="product-intro.pptx",
+        merged_constraints={
+            "reference_structure_constraints": {"units": [{"name": "封面"}, {"name": "问题"}, {"name": "方案"}]},
+            "reference_style_constraints": {"style_tokens": {"theme": "blue"}},
+        },
+    )
+
+    assert plan["slides"][0]["title"] == "封面"
+    assert plan["slides"][1]["title"] == "问题"
+
+
+def test_ppt_quality_report_can_record_reference_deviation() -> None:
+    from agent.domains.office.strategies.ppt import PptStrategy
+
+    issues = PptStrategy().evaluate_quality_stats(
+        operation="create",
+        stats={
+            "slide_count": 6,
+            "content_slide_count": 4,
+            "notes_slide_count": 4,
+            "transition_slide_count": 5,
+            "visual_slide_count": 4,
+            "text_only_slide_count": 0,
+            "layout_variety_count": 3,
+            "picture_count": 1,
+            "chart_count": 1,
+            "table_count": 0,
+            "qa_checks": ["view_stats", "view_annotated", "validate"],
+        },
+    )
+
+    assert issues == []
+
+
 @pytest.mark.asyncio
 async def test_office_domain_server_artifact_falls_back_to_outputs_snapshot(tmp_path) -> None:
     from agent.domains.office.orchestrated import run_office_domain_orchestrated
