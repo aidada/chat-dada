@@ -40,10 +40,7 @@ def test_inspect_reference_file_unwraps_officecli_envelopes_into_payloads(monkey
 
 
 def test_inspect_reference_file_canonicalizes_uppercase_spaced_format_name(monkeypatch) -> None:
-    calls = []
-
     async def fake_execute_officecli_spec(spec):
-        calls.append(spec["mode"])
         if spec["mode"] == "text":
             return {
                 "success": True,
@@ -152,4 +149,21 @@ def test_resolve_reference_constraints_deep_copies_nested_inputs() -> None:
 
     assert merged["reference_structure_constraints"]["units"][0]["name"] == "Summary"
     assert merged["reference_style_constraints"]["style_tokens"]["theme"] == "blue"
+    assert merged["existing_document_profile"]["protected_units"] == ["RawData"]
+
+
+def test_resolve_reference_constraints_normalizes_required_fields() -> None:
+    merged = resolve_reference_constraints(
+        goal_constraints={"hard_requirements": ["rename summary sheet"]},
+        reference_structure_constraints={"units": [{"name": "Summary"}]},
+        reference_style_constraints={"style_tokens": {"theme": "blue"}},
+        existing_document_profile={"protected_units": ["RawData"]},
+    )
+
+    assert merged["reference_structure_constraints"]["format"] == ""
+    assert merged["reference_structure_constraints"]["units"] == [{"name": "Summary"}]
+    assert merged["reference_style_constraints"]["format"] == ""
+    assert merged["reference_style_constraints"]["style_tokens"] == {"theme": "blue"}
+    assert merged["existing_document_profile"]["format"] == ""
+    assert merged["existing_document_profile"]["units"] == []
     assert merged["existing_document_profile"]["protected_units"] == ["RawData"]
