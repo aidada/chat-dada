@@ -39,15 +39,79 @@ def test_inspect_reference_file_unwraps_officecli_envelopes_into_payloads(monkey
     assert profiled["stats"] == {"slide_count": 2, "layout_variety_count": 2}
 
 
+def test_inspect_reference_file_canonicalizes_uppercase_spaced_format_name(monkeypatch) -> None:
+    calls = []
+
+    async def fake_execute_officecli_spec(spec):
+        calls.append(spec["mode"])
+        if spec["mode"] == "text":
+            return {
+                "success": True,
+                "kind": "success",
+                "exit_status": 0,
+                "message": "text ready",
+                "raw_stdout": json.dumps("sheet text"),
+                "raw_stderr": "",
+            }
+        return {
+            "success": True,
+            "kind": "success",
+            "exit_status": 0,
+            "message": "issues ready",
+            "raw_stdout": json.dumps({"text": "sheet issues"}),
+            "raw_stderr": "",
+        }
+
+    monkeypatch.setattr(reference_inspector, "execute_officecli_spec", fake_execute_officecli_spec)
+
+    profiled = asyncio.run(reference_inspector.inspect_reference_file(format_name=" XLSX ", file_path="book.xlsx"))
+
+    assert calls == ["text", "issues"]
+    assert profiled["text"] == "sheet text"
+    assert profiled["issues"]["text"] == "sheet issues"
+    assert profiled["issues"]["message"] == "issues ready"
+
+
+def test_inspect_reference_file_falls_back_when_json_top_level_type_is_wrong(monkeypatch) -> None:
+    async def fake_execute_officecli_spec(spec):
+        if spec["mode"] == "outline":
+            return {
+                "success": True,
+                "kind": "success",
+                "exit_status": 0,
+                "message": "outline ready",
+                "raw_stdout": json.dumps({"title": "Intro"}),
+                "raw_stderr": "",
+            }
+        return {
+            "success": True,
+            "kind": "success",
+            "exit_status": 0,
+            "message": "stats ready",
+            "raw_stdout": json.dumps(["unexpected"]),
+            "raw_stderr": "",
+        }
+
+    monkeypatch.setattr(reference_inspector, "execute_officecli_spec", fake_execute_officecli_spec)
+
+    profiled = asyncio.run(reference_inspector.inspect_reference_file(format_name="pptx", file_path="deck.pptx"))
+
+    assert profiled["outline"] == []
+    assert profiled["stats"]["slide_count"] == 0
+    assert profiled["stats"]["layout_variety_count"] == 0
+
+
 def test_profile_reference_payload_for_ppt_extracts_structure_and_style() -> None:
     profiled = profile_reference_payload(
-        format_name="pptx",
+        format_name=" PPTX ",
         inspect_payload={
             "outline": [{"title": "Intro"}, {"title": "Plan"}],
             "stats": {"slide_count": 2, "layout_variety_count": 2},
         },
     )
 
+    assert profiled["structure"]["format"] == "pptx"
+    assert profiled["style"]["format"] == "pptx"
     assert profiled["structure"]["units"][0]["name"] == "Intro"
     assert profiled["style"]["style_tokens"]["slide_count"] == 2
 
