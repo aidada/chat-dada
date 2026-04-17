@@ -24,7 +24,7 @@ def _attach_fidelity_deviations(
 def _extract_completed_units(stats: dict[str, Any], fallback: int) -> int:
     if not isinstance(stats, dict):
         return fallback
-    for key in ("slide_count", "sheet_count"):
+    for key in ("slide_count", "sheet_count", "section_count"):
         try:
             value = int(stats.get(key, 0) or 0)
         except (TypeError, ValueError):
