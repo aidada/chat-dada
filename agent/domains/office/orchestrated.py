@@ -443,7 +443,12 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
     completed_pages = 0
     if (result_meta or {}).get("stats") and isinstance(result_meta.get("stats"), dict):
         try:
-            completed_pages = int(result_meta["stats"].get("slide_count", 0) or 0)
+            stats = result_meta["stats"]
+            completed_pages = int(
+                stats.get("slide_count", 0)
+                or stats.get("sheet_count", 0)
+                or 0
+            )
         except (TypeError, ValueError):
             completed_pages = 0
     if completed_pages:

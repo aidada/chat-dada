@@ -1421,6 +1421,31 @@ async def test_office_domain_server_artifact_falls_back_to_outputs_snapshot(tmp_
 
 
 @pytest.mark.asyncio
+async def test_office_domain_xlsx_finalize_counts_sheet_count_as_completed_pages() -> None:
+    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+
+    payload = """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"budget.xlsx","format":"xlsx","role":"primary"}],"stats":{"sheet_count":3}}
+```"""
+
+    with (
+        patch(
+            "agent.domains.office.orchestrated.stream_nested_graph",
+            new=AsyncMock(return_value={"final_result": payload, "step_history": [{"strategy": "sequential"}]}),
+        ),
+        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch(
+            "agent.domains.office.orchestrated.execute_officecli_spec",
+            new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close budget.xlsx"}),
+        ),
+    ):
+        result = await run_office_domain_orchestrated({"query": "做一个预算表", "task_id": "office_xlsx_finalize"})
+
+    assert result.status == "ok"
+    assert result.budget["cost_ledger"]["completed_pages"] == 3
+
+
+@pytest.mark.asyncio
 async def test_office_domain_desktop_artifact_uses_returned_local_path() -> None:
     from agent.domains.office.orchestrated import run_office_domain_orchestrated
 
