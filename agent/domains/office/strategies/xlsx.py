@@ -372,7 +372,8 @@ def _looks_like_sheet_name(value: str) -> bool:
         return False
     if any(mark in text for mark in (".", ",", ";", ":", "?", "!", "，", "。", "；", "：", "？", "！")):
         return False
-    tokens = [part for part in lowered.replace("-", " ").replace("_", " ").split() if part]
+    normalized = lowered.replace("-", " ").replace("_", " ").replace("(", " ").replace(")", " ").replace("/", " ")
+    tokens = [part for part in normalized.split() if part]
     if not tokens or len(tokens) > 4:
         return False
     compact = lowered.replace(" ", "")
@@ -380,9 +381,11 @@ def _looks_like_sheet_name(value: str) -> bool:
         return True
     if any("\u4e00" <= char <= "\u9fff" for char in text):
         return len(text) <= 12
-    if all(token.isalpha() for token in tokens):
+    if all(all(char.isalnum() for char in token) for token in tokens) and any(
+        any(char.isalpha() for char in token) for token in tokens
+    ):
         return True
-    if len(tokens) == 1 and text[:1].isupper():
+    if len(tokens) == 1 and any(char.isalnum() for char in text) and text[:1].isupper():
         return True
     return False
 
@@ -518,8 +521,8 @@ def _normalize_batches(
                 "sheet_start": start,
                 "sheet_end": end,
                 "sheet_names": names,
-                "slide_start": int(batch.get("slide_start", start) or start),
-                "slide_end": int(batch.get("slide_end", end) or end),
+                "slide_start": start,
+                "slide_end": end,
                 "slide_titles": [str(sheet.get("name", "") or "") for sheet in expected_slice],
                 "slide_roles": [str(sheet.get("sheet_type", "") or "") for sheet in expected_slice],
             }

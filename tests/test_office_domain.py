@@ -284,6 +284,29 @@ def test_xlsx_strategy_ignores_string_hard_requirements_value() -> None:
     assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary"]
 
 
+def test_xlsx_strategy_accepts_numeric_and_light_punctuation_sheet_names() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成财务预算表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": ["Q1 Summary", "2026 Budget", "Sales FY25", "Summary (Final)"]
+            },
+        },
+    )
+
+    assert [sheet["name"] for sheet in plan["sheets"]] == [
+        "Q1 Summary",
+        "2026 Budget",
+        "Sales FY25",
+        "Summary (Final)",
+    ]
+
+
 def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 
@@ -359,6 +382,62 @@ def test_xlsx_strategy_validate_plan_normalizes_stale_alias_fields_in_preserved_
                     "slide_end": 1,
                     "slide_titles": ["Old Title"],
                     "slide_roles": ["worksheet"],
+                }
+            ],
+        },
+        goal="生成预算表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+    )
+
+    assert issues == []
+    assert plan["batches"] == [
+        {
+            "index": 0,
+            "sheet_start": 1,
+            "sheet_end": 1,
+            "sheet_names": ["Budget"],
+            "slide_start": 1,
+            "slide_end": 1,
+            "slide_titles": ["Budget"],
+            "slide_roles": ["summary"],
+        }
+    ]
+
+
+def test_xlsx_strategy_validate_plan_normalizes_stale_alias_ranges_in_preserved_batch() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    strategy = XlsxStrategy()
+    existing_sheets = [
+        {
+            "name": "Budget",
+            "purpose": "Track approved budget lines.",
+            "sheet_type": "summary",
+            "columns": [],
+            "table_regions": [],
+            "formula_regions": [],
+            "chart_regions": [],
+            "validation_rules": [],
+        }
+    ]
+
+    plan, issues = strategy.validate_plan(
+        plan={
+            "title": "Budget Workbook",
+            "sheet_count": 1,
+            "sheets": existing_sheets,
+            "batches": [
+                {
+                    "index": 0,
+                    "sheet_start": 1,
+                    "sheet_end": 1,
+                    "sheet_names": ["Budget"],
+                    "slide_start": 7,
+                    "slide_end": 9,
+                    "slide_titles": ["Budget"],
+                    "slide_roles": ["summary"],
                 }
             ],
         },
