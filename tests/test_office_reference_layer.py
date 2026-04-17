@@ -101,14 +101,14 @@ def test_profile_reference_payload_for_ppt_extracts_structure_and_style() -> Non
     profiled = profile_reference_payload(
         format_name=" PPTX ",
         inspect_payload={
-            "outline": [{"title": "Intro"}, {"title": "Plan"}],
+            "outline": [{"title": "Intro"}, {"title": "   "}, {"title": "Plan"}],
             "stats": {"slide_count": 2, "layout_variety_count": 2},
         },
     )
 
     assert profiled["structure"]["format"] == "pptx"
     assert profiled["style"]["format"] == "pptx"
-    assert profiled["structure"]["units"][0]["name"] == "Intro"
+    assert profiled["structure"]["units"] == [{"name": "Intro"}, {"name": "Plan"}]
     assert profiled["style"]["style_tokens"]["slide_count"] == 2
 
 
@@ -155,15 +155,21 @@ def test_resolve_reference_constraints_deep_copies_nested_inputs() -> None:
 def test_resolve_reference_constraints_normalizes_required_fields() -> None:
     merged = resolve_reference_constraints(
         goal_constraints={"hard_requirements": ["rename summary sheet"]},
-        reference_structure_constraints={"units": [{"name": "Summary"}]},
-        reference_style_constraints={"style_tokens": {"theme": "blue"}},
-        existing_document_profile={"protected_units": ["RawData"]},
+        reference_structure_constraints={"format": "pptx", "units": [{"name": "Summary"}]},
+        reference_style_constraints={"format": "pptx", "style_tokens": {"theme": "blue"}},
+        existing_document_profile={"format": "docx", "protected_units": ["RawData"]},
     )
 
-    assert merged["reference_structure_constraints"]["format"] == ""
+    assert merged["goal_constraints"] == {
+        "format": "pptx",
+        "operation": "",
+        "goal": "",
+        "hard_requirements": ["rename summary sheet"],
+    }
+    assert merged["reference_structure_constraints"]["format"] == "pptx"
     assert merged["reference_structure_constraints"]["units"] == [{"name": "Summary"}]
-    assert merged["reference_style_constraints"]["format"] == ""
+    assert merged["reference_style_constraints"]["format"] == "pptx"
     assert merged["reference_style_constraints"]["style_tokens"] == {"theme": "blue"}
-    assert merged["existing_document_profile"]["format"] == ""
+    assert merged["existing_document_profile"]["format"] == "docx"
     assert merged["existing_document_profile"]["units"] == []
     assert merged["existing_document_profile"]["protected_units"] == ["RawData"]

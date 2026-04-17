@@ -16,9 +16,10 @@ def profile_reference_payload(*, format_name: str, inspect_payload: dict[str, An
         outline = inspect_payload.get("outline", [])
         stats = inspect_payload.get("stats", {})
         units = [
-            {"name": str(item.get("title", "") or "")}
+            {"name": title}
             for item in outline
             if isinstance(item, dict)
+            if (title := str(item.get("title", "") or "").strip())
         ]
         structure: ReferenceStructureConstraints = build_reference_structure_constraints(
             format_name=normalized_format_name,
