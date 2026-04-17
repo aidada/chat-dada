@@ -281,27 +281,33 @@ def test_ppt_strategy_build_plan_uses_reference_slide_names() -> None:
     assert plan["slides"][1]["title"] == "问题"
 
 
-def test_ppt_quality_report_can_record_reference_deviation() -> None:
-    from agent.domains.office.strategies.ppt import PptStrategy
+@pytest.mark.asyncio
+async def test_ppt_quality_report_can_record_reference_deviation() -> None:
+    from agent.domains.office.workflow import qa_fix_node
 
-    issues = PptStrategy().evaluate_quality_stats(
-        operation="create",
-        stats={
-            "slide_count": 6,
-            "content_slide_count": 4,
-            "notes_slide_count": 4,
-            "transition_slide_count": 5,
-            "visual_slide_count": 4,
-            "text_only_slide_count": 0,
-            "layout_variety_count": 3,
-            "picture_count": 1,
-            "chart_count": 1,
-            "table_count": 0,
-            "qa_checks": ["view_stats", "view_annotated", "validate"],
-        },
-    )
+    state = {
+        "format": "pptx",
+        "operation": "create",
+        "write_required": True,
+        "qa_fix_round": 0,
+        "max_qa_fix_rounds": 2,
+        "fidelity_deviations": [{"kind": "reference_style_deviation", "message": "theme fallback"}],
+        "intermediate_results": [
+            {
+                "output": """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"deck.pptx","format":"pptx","role":"primary"}],"stats":{"slide_count":6,"content_slide_count":4,"notes_slide_count":4,"transition_slide_count":5,"visual_slide_count":4,"text_only_slide_count":0,"layout_variety_count":3,"picture_count":1,"chart_count":1,"table_count":0,"qa_checks":["view_stats","view_annotated","validate"]}}
+```"""
+            }
+        ],
+    }
 
-    assert issues == []
+    result = await qa_fix_node(state)
+
+    assert result["current_stage"] == "finalize"
+    assert result["quality_report"]["status"] == "passed"
+    assert result["quality_report"]["fidelity_deviations"] == [
+        {"kind": "reference_style_deviation", "message": "theme fallback"}
+    ]
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,18 @@ from agent.domains.office.strategies.base import OfficeFormatStrategy
 from agent.runtime.cost_logging import append_stage_record, attach_partial_progress, attach_quality_summary, update_completed_pages
 
 
+def _attach_fidelity_deviations(
+    report: dict[str, Any],
+    state: OfficeWorkflowState,
+) -> dict[str, Any]:
+    deviations = state.get("fidelity_deviations")
+    if not isinstance(deviations, list) or not deviations:
+        return report
+    decorated = dict(report)
+    decorated["fidelity_deviations"] = list(deviations)
+    return decorated
+
+
 def run_qa_fix_stage(
     state: OfficeWorkflowState,
     *,
@@ -33,7 +45,8 @@ def run_qa_fix_stage(
             elapsed_ms=0,
             metadata={"terminal_status": terminal_status},
         )
-        quality_report = build_quality_report(
+        quality_report = _attach_fidelity_deviations(
+            build_quality_report(
             format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
             operation=str(state.get("operation", "") or ""),
             validated=False,
@@ -44,6 +57,8 @@ def run_qa_fix_stage(
             qa_fix_round=int(state.get("qa_fix_round", 0) or 0),
             max_qa_fix_rounds=int(state.get("max_qa_fix_rounds", 0) or 0),
             terminal_reason=str(state.get("terminal_reason", terminal_status) or terminal_status),
+            ),
+            state,
         )
         return {
             "evaluations": state.get("evaluations") or [evaluation],
@@ -73,17 +88,20 @@ def run_qa_fix_stage(
             "current_stage": "finalize",
             "terminal_status": "error",
             "terminal_reason": "no_strategy_output",
-            "quality_report": build_quality_report(
-                format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
-                operation=str(state.get("operation", "") or ""),
-                validated=False,
-                artifacts=[],
-                summary="",
-                stats={},
-                issues=[{"severity": "error", "message": "策略未产出任何输出"}],
-                qa_fix_round=int(state.get("qa_fix_round", 0) or 0),
-                max_qa_fix_rounds=int(state.get("max_qa_fix_rounds", 0) or 0),
-                terminal_reason="no_strategy_output",
+            "quality_report": _attach_fidelity_deviations(
+                build_quality_report(
+                    format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
+                    operation=str(state.get("operation", "") or ""),
+                    validated=False,
+                    artifacts=[],
+                    summary="",
+                    stats={},
+                    issues=[{"severity": "error", "message": "策略未产出任何输出"}],
+                    qa_fix_round=int(state.get("qa_fix_round", 0) or 0),
+                    max_qa_fix_rounds=int(state.get("max_qa_fix_rounds", 0) or 0),
+                    terminal_reason="no_strategy_output",
+                ),
+                state,
             ),
         }
 
@@ -106,17 +124,20 @@ def run_qa_fix_stage(
             "current_stage": "finalize",
             "terminal_status": "error",
             "terminal_reason": "empty_strategy_output",
-            "quality_report": build_quality_report(
-                format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
-                operation=str(state.get("operation", "") or ""),
-                validated=False,
-                artifacts=[],
-                summary="",
-                stats={},
-                issues=[{"severity": "error", "message": "策略未产出任何输出"}],
-                qa_fix_round=int(state.get("qa_fix_round", 0) or 0),
-                max_qa_fix_rounds=int(state.get("max_qa_fix_rounds", 0) or 0),
-                terminal_reason="empty_strategy_output",
+            "quality_report": _attach_fidelity_deviations(
+                build_quality_report(
+                    format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
+                    operation=str(state.get("operation", "") or ""),
+                    validated=False,
+                    artifacts=[],
+                    summary="",
+                    stats={},
+                    issues=[{"severity": "error", "message": "策略未产出任何输出"}],
+                    qa_fix_round=int(state.get("qa_fix_round", 0) or 0),
+                    max_qa_fix_rounds=int(state.get("max_qa_fix_rounds", 0) or 0),
+                    terminal_reason="empty_strategy_output",
+                ),
+                state,
             ),
         }
 
@@ -142,17 +163,20 @@ def run_qa_fix_stage(
             "current_stage": "finalize",
             "terminal_status": "error",
             "terminal_reason": "missing_structured_office_json",
-            "quality_report": build_quality_report(
-                format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
-                operation=str(state.get("operation", "") or ""),
-                validated=False,
-                artifacts=[],
-                summary=output,
-                stats={},
-                issues=[{"severity": "error", "message": "最终回复缺少结构化 Office JSON 结果"}],
-                qa_fix_round=int(state.get("qa_fix_round", 0) or 0),
-                max_qa_fix_rounds=int(state.get("max_qa_fix_rounds", 0) or 0),
-                terminal_reason="missing_structured_office_json",
+            "quality_report": _attach_fidelity_deviations(
+                build_quality_report(
+                    format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
+                    operation=str(state.get("operation", "") or ""),
+                    validated=False,
+                    artifacts=[],
+                    summary=output,
+                    stats={},
+                    issues=[{"severity": "error", "message": "最终回复缺少结构化 Office JSON 结果"}],
+                    qa_fix_round=int(state.get("qa_fix_round", 0) or 0),
+                    max_qa_fix_rounds=int(state.get("max_qa_fix_rounds", 0) or 0),
+                    terminal_reason="missing_structured_office_json",
+                ),
+                state,
             ),
         }
 
@@ -172,16 +196,19 @@ def run_qa_fix_stage(
     issues.extend(strategy.evaluate_quality_stats(operation=operation, stats=stats))
 
     passed = not any(issue["severity"] == "error" for issue in issues)
-    quality_report = build_quality_report(
-        format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
-        operation=operation,
-        validated=validated,
-        artifacts=list(artifacts or []),
-        summary=summary,
-        stats=stats,
-        issues=issues,
-        qa_fix_round=int(state.get("qa_fix_round", 0) or 0),
-        max_qa_fix_rounds=int(state.get("max_qa_fix_rounds", 0) or 0),
+    quality_report = _attach_fidelity_deviations(
+        build_quality_report(
+            format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
+            operation=operation,
+            validated=validated,
+            artifacts=list(artifacts or []),
+            summary=summary,
+            stats=stats,
+            issues=issues,
+            qa_fix_round=int(state.get("qa_fix_round", 0) or 0),
+            max_qa_fix_rounds=int(state.get("max_qa_fix_rounds", 0) or 0),
+        ),
+        state,
     )
     evaluation = {
         "passed": passed,
@@ -243,17 +270,20 @@ def run_qa_fix_stage(
             "terminal_reason": "qa_fix_round_exhausted",
             "final_result": "Office QA 未通过：修复轮次已耗尽，任务在 qa_fix 阶段停止。",
             "partial_progress": partial_progress,
-            "quality_report": build_quality_report(
-                format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
-                operation=operation,
-                validated=validated,
-                artifacts=list(artifacts or []),
-                summary=summary,
-                stats=stats,
-                issues=issues,
-                qa_fix_round=next_round,
-                max_qa_fix_rounds=max_qa_fix_rounds,
-                terminal_reason="qa_fix_round_exhausted",
+            "quality_report": _attach_fidelity_deviations(
+                build_quality_report(
+                    format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
+                    operation=operation,
+                    validated=validated,
+                    artifacts=list(artifacts or []),
+                    summary=summary,
+                    stats=stats,
+                    issues=issues,
+                    qa_fix_round=next_round,
+                    max_qa_fix_rounds=max_qa_fix_rounds,
+                    terminal_reason="qa_fix_round_exhausted",
+                ),
+                state,
             ),
         }
 
