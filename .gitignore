@@ -89,3 +89,6 @@ __pycache__/
 
 # Logs
 logs/*.log*
+
+# Local git worktrees
+.worktrees/
