@@ -109,6 +109,33 @@ async def test_office_planning_node_refines_generic_filename_from_plan_title() -
     assert result["default_create_file"] != "ai.pptx"
 
 
+@pytest.mark.asyncio
+async def test_planning_node_carries_reference_constraints_into_task_profile() -> None:
+    from agent.domains.office.workflow import planning_node
+
+    result = await planning_node(
+        {
+            "goal": "按参考案例生成 8 页产品介绍 PPT",
+            "format": "pptx",
+            "operation": "create",
+            "requested_slide_count": 8,
+            "build_batch_size": 3,
+            "default_create_file": "product-intro.pptx",
+            "task_profile": {"reference_files": ["example.pptx"]},
+            "goal_constraints": {"goal": "按参考案例生成 8 页产品介绍 PPT"},
+            "reference_structure_constraints": {"units": [{"name": "封面"}]},
+            "reference_style_constraints": {"style_tokens": {"theme": "blue"}},
+            "cost_ledger": {},
+        }
+    )
+
+    assert result["task_profile"]["target_filename"].endswith(".pptx")
+    assert result["task_profile"]["merged_constraints"]["goal_constraints"]["goal"] == "按参考案例生成 8 页产品介绍 PPT"
+    assert result["task_profile"]["merged_constraints"]["reference_structure_constraints"]["units"] == [{"name": "封面"}]
+    assert result["task_profile"]["merged_constraints"]["reference_style_constraints"]["style_tokens"] == {"theme": "blue"}
+    assert result["planning_summary"]["slide_count"] == 8
+
+
 def test_office_route_after_build_loops_until_all_batches_written() -> None:
     from agent.domains.office.workflow import route_after_build
 

@@ -11,6 +11,7 @@ class PptStrategy:
         requested_slide_count: int,
         build_batch_size: int,
         default_create_file: str,
+        merged_constraints: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         slide_count = max(int(requested_slide_count or 0), 1)
         title = _infer_deck_title(goal, default_create_file)
@@ -396,12 +397,14 @@ def build_deck_plan(
     requested_slide_count: int,
     build_batch_size: int,
     default_create_file: str,
+    merged_constraints: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return _PPT_STRATEGY.build_plan(
         goal=goal,
         requested_slide_count=requested_slide_count,
         build_batch_size=build_batch_size,
         default_create_file=default_create_file,
+        merged_constraints=merged_constraints,
     )
 
 

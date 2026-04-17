@@ -26,6 +26,7 @@ from agent.domains.office.goal_normalizer import (
     normalize_goal_profile,
     refine_filename_from_plan,
 )
+from agent.domains.office.reference_resolver import resolve_reference_constraints
 from agent.domains.office.qa import run_quality_gate
 from agent.domains.office.result_utils import (
     coerce_office_operation,
@@ -396,12 +397,15 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
         configurable = {}
 
     source_files = [str(item).strip() for item in state.get("source_files", []) if str(item).strip()]
+    task_profile = dict(state.get("task_profile") or {})
+    raw_reference_files = state.get("reference_files", task_profile.get("reference_files", [])) or []
     file_hint = str(state.get("file_hint", "") or "").strip()
     goal = str(state.get("goal", "") or "")
     normalized = normalize_goal_profile(
         goal=goal,
         file_hint=file_hint,
         source_files=source_files,
+        reference_files=[str(item) for item in raw_reference_files],
         explicit_format=str(state.get("format_hint", "") or ""),
         explicit_operation=str(state.get("operation_hint", "") or ""),
     )
@@ -413,6 +417,7 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
     quality_profile = dict(normalized.get("quality_profile") or {})
     build_batch_size = int(normalized.get("build_batch_size", 0) or 0) or 1
     inner_limit = int(normalized.get("inner_recursion_limit", OFFICE_INNER_RECURSION_LIMIT) or OFFICE_INNER_RECURSION_LIMIT)
+    reference_files = [str(item).strip() for item in normalized.get("reference_files", []) if str(item).strip()]
     cost_ledger = init_cost_ledger(
         task_id=str(state.get("task_id", "") or "office_domain"),
         domain="office",
@@ -444,6 +449,7 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
         "requested_slide_count": requested_slide_count or 0,
         "build_batch_size": build_batch_size,
         "allowed_source_files": source_files,
+        "reference_files": reference_files,
         "write_required": is_write_operation(operation),
         "runtime_target_hint": runtime_target,
         "quality_profile": quality_profile,
@@ -455,6 +461,7 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
             "target_filename": default_create_file,
             "file_hint": file_hint or default_create_file,
             "source_files": source_files,
+            "reference_files": reference_files,
             "runtime_target": runtime_target,
             "quality_profile": quality_profile,
         },
@@ -504,11 +511,32 @@ async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
         elif any(token in str(state.get("goal", "") or "").lower() for token in ("ppt", "powerpoint", "presentation", "deck", "幻灯片", "演示文稿")):
             strategy_format = "pptx"
     strategy = get_strategy_for_format(strategy_format, operation=str(state.get("operation", "") or ""))
+    merged_constraints = resolve_reference_constraints(
+        goal_constraints={
+            **dict(state.get("goal_constraints") or {}),
+            "format": strategy_format,
+            "operation": str(state.get("operation", "") or ""),
+            "goal": str(state.get("goal", "") or ""),
+        },
+        reference_structure_constraints={
+            **dict(state.get("reference_structure_constraints") or {}),
+            "format": strategy_format,
+        },
+        reference_style_constraints={
+            **dict(state.get("reference_style_constraints") or {}),
+            "format": strategy_format,
+        },
+        existing_document_profile={
+            **dict(state.get("existing_document_profile") or {}),
+            "format": strategy_format,
+        },
+    )
     raw_plan = strategy.build_plan(
         goal=str(state.get("goal", "") or ""),
         requested_slide_count=requested_slide_count or 6,
         build_batch_size=build_batch_size,
         default_create_file=default_create_file,
+        merged_constraints=merged_constraints,
     )
     deck_plan, planner_validation_issues = strategy.validate_plan(
         plan=raw_plan,
@@ -525,6 +553,11 @@ async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
         )
     else:
         refined_filename = default_create_file
+    next_task_profile = {
+        **dict(state.get("task_profile") or {}),
+        "target_filename": refined_filename or default_create_file,
+        "merged_constraints": merged_constraints,
+    }
     cost_ledger = append_stage_record(
         dict(state.get("cost_ledger") or {}),
         stage="planning",
@@ -544,10 +577,7 @@ async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
             "batch_count": len(deck_plan.get("batches", []) or []),
         },
         "planner_validation_issues": planner_validation_issues,
-        "task_profile": {
-            **dict(state.get("task_profile") or {}),
-            "target_filename": refined_filename or default_create_file,
-        },
+        "task_profile": next_task_profile,
         "current_stage": "build",
         "current_batch_index": 0,
         "cost_ledger": cost_ledger,

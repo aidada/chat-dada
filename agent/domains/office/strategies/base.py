@@ -11,6 +11,7 @@ class OfficeFormatStrategy(Protocol):
         requested_slide_count: int,
         build_batch_size: int,
         default_create_file: str,
+        merged_constraints: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     def summarize_plan(self, plan: dict[str, Any]) -> str: ...

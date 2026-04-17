@@ -13,6 +13,7 @@ class DefaultOfficeStrategy:
         requested_slide_count: int,
         build_batch_size: int,
         default_create_file: str,
+        merged_constraints: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         title = str(goal or "").replace("\n", " ").strip()[:80] or str(default_create_file or "").rsplit(".", 1)[0] or "Office task"
         return {

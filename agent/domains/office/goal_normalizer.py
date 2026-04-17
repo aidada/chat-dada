@@ -250,6 +250,16 @@ def infer_requested_slide_count(goal: str) -> int | None:
     return count if 1 <= count <= 30 else None
 
 
+def normalize_reference_files(reference_files: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for item in reference_files or []:
+        candidate = str(item or "").strip()
+        if not candidate or candidate in normalized:
+            continue
+        normalized.append(candidate)
+    return normalized
+
+
 def infer_quality_profile(goal: str, *, format_name: str) -> dict[str, Any]:
     lowered = str(goal or "").lower()
     wants_animations = any(token in lowered for token in ("动画", "animation", "animated", "transition", "转场"))
@@ -336,11 +346,13 @@ def normalize_goal_profile(
     goal: str,
     file_hint: str,
     source_files: list[str],
+    reference_files: list[str],
     explicit_format: str,
     explicit_operation: str,
 ) -> dict[str, Any]:
     format_name = infer_format(goal, file_hint, source_files, explicit_format)
     operation = infer_operation(goal, source_files, explicit_operation)
+    normalized_reference_files = normalize_reference_files(reference_files)
     default_create_file = infer_default_create_file(goal, file_hint, format_name) if operation == "create" else ""
     requested_slide_count = infer_requested_slide_count(goal) if format_name == "pptx" else None
     quality_profile = infer_quality_profile(goal, format_name=format_name)
@@ -360,6 +372,7 @@ def normalize_goal_profile(
         "operation": operation,
         "default_create_file": default_create_file,
         "requested_slide_count": requested_slide_count or 0,
+        "reference_files": normalized_reference_files,
         "quality_profile": quality_profile,
         "build_batch_size": build_batch_size,
         "inner_recursion_limit": inner_limit,
