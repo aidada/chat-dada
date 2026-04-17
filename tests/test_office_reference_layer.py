@@ -1,5 +1,42 @@
+import asyncio
+import json
+
+from agent.domains.office import reference_inspector
 from agent.domains.office.reference_profiler import profile_reference_payload
 from agent.domains.office.reference_resolver import resolve_reference_constraints
+
+
+def test_inspect_reference_file_unwraps_officecli_envelopes_into_payloads(monkeypatch) -> None:
+    envelopes = iter(
+        [
+            {
+                "success": True,
+                "kind": "success",
+                "exit_status": 0,
+                "message": "outline ready",
+                "raw_stdout": json.dumps([{"title": "Intro"}, {"title": "Plan"}]),
+                "raw_stderr": "",
+            },
+            {
+                "success": True,
+                "kind": "success",
+                "exit_status": 0,
+                "message": "stats ready",
+                "raw_stdout": json.dumps({"slide_count": 2, "layout_variety_count": 2}),
+                "raw_stderr": "",
+            },
+        ]
+    )
+
+    async def fake_execute_officecli_spec(spec):
+        return next(envelopes)
+
+    monkeypatch.setattr(reference_inspector, "execute_officecli_spec", fake_execute_officecli_spec)
+
+    profiled = asyncio.run(reference_inspector.inspect_reference_file(format_name="pptx", file_path="deck.pptx"))
+
+    assert profiled["outline"] == [{"title": "Intro"}, {"title": "Plan"}]
+    assert profiled["stats"] == {"slide_count": 2, "layout_variety_count": 2}
 
 
 def test_profile_reference_payload_for_ppt_extracts_structure_and_style() -> None:
@@ -15,6 +52,13 @@ def test_profile_reference_payload_for_ppt_extracts_structure_and_style() -> Non
     assert profiled["style"]["style_tokens"]["slide_count"] == 2
 
 
+def test_profile_reference_payload_for_non_ppt_defaults_to_empty_constraints() -> None:
+    profiled = profile_reference_payload(format_name="docx", inspect_payload={"unexpected": True})
+
+    assert profiled["structure"]["units"] == []
+    assert profiled["style"]["style_tokens"] == {}
+
+
 def test_resolve_reference_constraints_keeps_goal_first() -> None:
     merged = resolve_reference_constraints(
         goal_constraints={"hard_requirements": ["rename summary sheet"]},
@@ -25,3 +69,24 @@ def test_resolve_reference_constraints_keeps_goal_first() -> None:
 
     assert merged["goal_constraints"]["hard_requirements"] == ["rename summary sheet"]
     assert merged["conflict_resolution"]["priority_order"] == ["goal", "reference"]
+
+
+def test_resolve_reference_constraints_deep_copies_nested_inputs() -> None:
+    structure_constraints = {"units": [{"name": "Summary"}]}
+    style_constraints = {"style_tokens": {"theme": "blue"}}
+    document_profile = {"protected_units": ["RawData"]}
+
+    merged = resolve_reference_constraints(
+        goal_constraints={"hard_requirements": ["rename summary sheet"]},
+        reference_structure_constraints=structure_constraints,
+        reference_style_constraints=style_constraints,
+        existing_document_profile=document_profile,
+    )
+
+    structure_constraints["units"][0]["name"] = "Changed"
+    style_constraints["style_tokens"]["theme"] = "green"
+    document_profile["protected_units"][0] = "Changed"
+
+    assert merged["reference_structure_constraints"]["units"][0]["name"] == "Summary"
+    assert merged["reference_style_constraints"]["style_tokens"]["theme"] == "blue"
+    assert merged["existing_document_profile"]["protected_units"] == ["RawData"]
