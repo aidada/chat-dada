@@ -128,6 +128,11 @@ class XlsxStrategy(DefaultOfficeStrategy):
         used_structural_ids: dict[str, int] = {}
         for sheet in raw_sheets:
             if not isinstance(sheet, dict):
+                continue
+            preserved_table_regions = _coerce_list_field(sheet, "table_regions", fallback=[])
+            _seed_structural_ids_from_regions(preserved_table_regions, used_structural_ids=used_structural_ids)
+        for sheet in raw_sheets:
+            if not isinstance(sheet, dict):
                 issues.append("invalid_sheet_entry")
                 sheet_shape_invalid = True
                 continue
@@ -144,7 +149,6 @@ class XlsxStrategy(DefaultOfficeStrategy):
             seen_sheet_names.add(name_key)
             has_explicit_table_regions = "table_regions" in sheet
             preserved_table_regions = _coerce_list_field(sheet, "table_regions", fallback=[])
-            _seed_structural_ids_from_regions(preserved_table_regions, used_structural_ids=used_structural_ids)
             normalized_sheets.append(
                 {
                     "name": name,

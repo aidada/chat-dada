@@ -934,6 +934,55 @@ def test_xlsx_strategy_validate_plan_avoids_collision_with_preserved_table_regio
     assert plan["sheets"][1]["table_regions"] == [{"name": "SalesTable_2", "range_hint": "A1:C20"}]
 
 
+def test_xlsx_strategy_validate_plan_avoids_collision_when_preserved_identifier_comes_later() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    strategy = XlsxStrategy()
+    plan, issues = strategy.validate_plan(
+        plan={
+            "title": "Workbook",
+            "sheet_count": 2,
+            "sheets": [
+                {
+                    "name": "Sales",
+                    "purpose": "Generated sales data.",
+                    "sheet_type": "worksheet",
+                    "columns": [],
+                    "formula_regions": [],
+                    "chart_regions": [],
+                    "validation_rules": [],
+                },
+                {
+                    "name": "Sales!",
+                    "purpose": "Preserved sales data.",
+                    "sheet_type": "worksheet",
+                    "columns": [],
+                    "table_regions": [{"name": "SalesTable", "range_hint": "A1:C20"}],
+                    "formula_regions": [],
+                    "chart_regions": [],
+                    "validation_rules": [],
+                },
+            ],
+            "batches": [
+                {
+                    "index": 0,
+                    "sheet_start": 1,
+                    "sheet_end": 2,
+                    "sheet_names": ["Sales", "Sales!"],
+                }
+            ],
+        },
+        goal="生成销售分析表",
+        requested_slide_count=0,
+        build_batch_size=2,
+        default_create_file="sales.xlsx",
+    )
+
+    assert issues == []
+    assert plan["sheets"][0]["table_regions"] == [{"name": "SalesTable_2", "range_hint": "A1:C20"}]
+    assert plan["sheets"][1]["table_regions"] == [{"name": "SalesTable", "range_hint": "A1:C20"}]
+
+
 def test_xlsx_strategy_validate_plan_normalizes_stale_alias_fields_in_preserved_batch() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 
