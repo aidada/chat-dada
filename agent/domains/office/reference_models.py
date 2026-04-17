@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from typing_extensions import TypedDict
@@ -63,8 +64,8 @@ def build_reference_structure_constraints(
     units: list[dict[str, Any]] | None = None,
 ) -> ReferenceStructureConstraints:
     return {
-        "format": str(format_name or "").lower(),
-        "units": list(units or []),
+        "format": str(format_name or ""),
+        "units": deepcopy(units or []),
     }
 
 
@@ -74,8 +75,8 @@ def build_reference_style_constraints(
     style_tokens: dict[str, Any] | None = None,
 ) -> ReferenceStyleConstraints:
     return {
-        "format": str(format_name or "").lower(),
-        "style_tokens": dict(style_tokens or {}),
+        "format": str(format_name or ""),
+        "style_tokens": deepcopy(style_tokens or {}),
     }
 
 
@@ -86,9 +87,9 @@ def build_existing_document_profile(
     protected_units: list[str] | None = None,
 ) -> ExistingDocumentProfile:
     return {
-        "format": str(format_name or "").lower(),
-        "units": list(units or []),
-        "protected_units": list(protected_units or []),
+        "format": str(format_name or ""),
+        "units": deepcopy(units or []),
+        "protected_units": deepcopy(protected_units or []),
     }
 
 

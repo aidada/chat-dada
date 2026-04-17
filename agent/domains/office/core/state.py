@@ -5,7 +5,6 @@ from typing import Annotated, Any
 from typing_extensions import TypedDict
 
 from agent.domains.office.reference_models import (
-    ConflictResolution,
     ExistingDocumentProfile,
     FidelityDeviation,
     GoalConstraints,

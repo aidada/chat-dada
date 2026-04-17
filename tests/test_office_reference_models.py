@@ -7,7 +7,7 @@ from agent.domains.office.reference_models import (
 )
 
 
-def test_build_goal_constraints_normalizes_case_and_copies_lists() -> None:
+def test_build_goal_constraints_preserves_user_values_and_copies_lists() -> None:
     hard_requirements = ["preserve formulas", "rename summary sheet"]
 
     payload = build_goal_constraints(
@@ -26,7 +26,7 @@ def test_build_goal_constraints_normalizes_case_and_copies_lists() -> None:
     assert payload["hard_requirements"] is not hard_requirements
 
 
-def test_build_reference_structure_constraints_normalizes_and_copies_units() -> None:
+def test_build_reference_structure_constraints_preserves_format_and_copies_units() -> None:
     units = [{"name": "Executive Summary"}]
 
     payload = build_reference_structure_constraints(
@@ -36,13 +36,13 @@ def test_build_reference_structure_constraints_normalizes_and_copies_units() -> 
 
     units.append({"name": "Appendix"})
 
-    assert payload["format"] == "docx"
+    assert payload["format"] == "DOCX"
     assert payload["units"] == [{"name": "Executive Summary"}]
     assert len(units) == 2
     assert payload["units"] is not units
 
 
-def test_build_reference_style_constraints_normalizes_and_copies_tokens() -> None:
+def test_build_reference_style_constraints_preserves_format_and_copies_tokens() -> None:
     style_tokens = {"tone": "Formal", "spacing": "1.15"}
 
     payload = build_reference_style_constraints(
@@ -53,13 +53,13 @@ def test_build_reference_style_constraints_normalizes_and_copies_tokens() -> Non
     style_tokens["tone"] = "casual"
     payload["style_tokens"]["spacing"] = "1.5"
 
-    assert payload["format"] == "pptx"
+    assert payload["format"] == "PPTX"
     assert payload["style_tokens"] == {"tone": "Formal", "spacing": "1.5"}
     assert style_tokens == {"tone": "casual", "spacing": "1.15"}
     assert payload["style_tokens"] is not style_tokens
 
 
-def test_build_existing_document_profile_tracks_protected_units_and_copies_inputs() -> None:
+def test_build_existing_document_profile_preserves_format_and_copies_inputs() -> None:
     units = [{"name": "Executive Summary"}]
     protected_units = ["Appendix"]
 
@@ -72,7 +72,7 @@ def test_build_existing_document_profile_tracks_protected_units_and_copies_input
     units.append({"name": "Appendix"})
     protected_units.append("References")
 
-    assert profile["format"] == "docx"
+    assert profile["format"] == "DOCX"
     assert profile["units"] == [{"name": "Executive Summary"}]
     assert profile["protected_units"] == ["Appendix"]
     assert profile["units"] is not units
