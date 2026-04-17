@@ -50,8 +50,8 @@ def build_goal_constraints(
     hard_requirements: list[str] | None = None,
 ) -> GoalConstraints:
     return {
-        "format": str(format_name or "").lower(),
-        "operation": str(operation or "").lower(),
+        "format": str(format_name or ""),
+        "operation": str(operation or ""),
         "goal": str(goal or "").strip(),
         "hard_requirements": list(hard_requirements or []),
     }

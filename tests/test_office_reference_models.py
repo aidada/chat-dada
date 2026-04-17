@@ -19,8 +19,8 @@ def test_build_goal_constraints_normalizes_case_and_copies_lists() -> None:
 
     hard_requirements.append("add chart")
 
-    assert payload["format"] == "xlsx"
-    assert payload["operation"] == "edit"
+    assert payload["format"] == "XLSX"
+    assert payload["operation"] == "EDIT"
     assert payload["goal"] == "按用户规范修改预算表"
     assert payload["hard_requirements"] == ["preserve formulas", "rename summary sheet"]
     assert payload["hard_requirements"] is not hard_requirements

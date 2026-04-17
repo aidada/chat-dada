@@ -34,7 +34,6 @@ class OfficeWorkflowState(TypedDict, total=False):
     reference_structure_constraints: ReferenceStructureConstraints
     reference_style_constraints: ReferenceStyleConstraints
     existing_document_profile: ExistingDocumentProfile
-    conflict_resolution: ConflictResolution
     fidelity_deviations: list[FidelityDeviation]
     deck_plan: dict[str, Any]
     planning_summary: dict[str, Any]
