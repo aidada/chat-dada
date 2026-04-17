@@ -842,6 +842,49 @@ def test_xlsx_strategy_sanitizes_numeric_leading_table_region_identifier() -> No
     assert plan["sheets"][0]["table_regions"] == [{"name": "tbl_2026BudgetTable", "range_hint": "A1:C20"}]
 
 
+def test_xlsx_strategy_generates_unique_table_region_identifiers_for_colliding_sheet_names() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": ["A B", "AB"],
+            },
+        },
+    )
+
+    assert [sheet["name"] for sheet in plan["sheets"]] == ["A B", "AB"]
+    assert plan["sheets"][0]["table_regions"] == [{"name": "ABTable", "range_hint": "A1:C20"}]
+    assert plan["sheets"][1]["table_regions"] == [{"name": "ABTable_2", "range_hint": "A1:C20"}]
+
+
+def test_xlsx_strategy_ignores_descriptive_reference_unit_names() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成预算分析表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+        merged_constraints={
+            "reference_structure_constraints": {
+                "units": [
+                    {"name": "preserve formulas and existing formatting"},
+                    {"name": "Summary"},
+                    {"name": "rename summary sheet to final"},
+                    {"name": "Dashboard"},
+                ]
+            },
+        },
+    )
+
+    assert [sheet["name"] for sheet in plan["sheets"]] == ["Summary", "Dashboard"]
+
+
 def test_xlsx_strategy_validate_plan_normalizes_stale_alias_fields_in_preserved_batch() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 

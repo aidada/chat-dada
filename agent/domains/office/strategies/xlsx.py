@@ -125,6 +125,7 @@ class XlsxStrategy(DefaultOfficeStrategy):
         normalized_sheets: list[dict[str, Any]] = []
         seen_sheet_names: set[str] = set()
         sheet_shape_invalid = False
+        used_structural_ids: dict[str, int] = {}
         for sheet in raw_sheets:
             if not isinstance(sheet, dict):
                 issues.append("invalid_sheet_entry")
@@ -147,7 +148,11 @@ class XlsxStrategy(DefaultOfficeStrategy):
                     "purpose": str(sheet.get("purpose", "") or "").strip() or _sheet_purpose(name),
                     "sheet_type": str(sheet.get("sheet_type", "") or "").strip() or _sheet_type(name),
                     "columns": _coerce_list_field(sheet, "columns", fallback=_sheet_columns(name)),
-                    "table_regions": _coerce_list_field(sheet, "table_regions", fallback=_table_regions(name)),
+                    "table_regions": _coerce_list_field(
+                        sheet,
+                        "table_regions",
+                        fallback=_table_regions(name, used_structural_ids=used_structural_ids),
+                    ),
                     "formula_regions": _coerce_list_field(sheet, "formula_regions", fallback=_formula_regions(name)),
                     "chart_regions": _coerce_list_field(sheet, "chart_regions", fallback=_chart_regions(name)),
                     "validation_rules": _coerce_list_field(sheet, "validation_rules", fallback=_validation_rules(name)),
@@ -317,19 +322,22 @@ def _infer_workbook_title(goal: str, default_create_file: str) -> str:
 
 def _build_sheets(*, goal: str, merged_constraints: dict[str, Any] | None) -> list[dict[str, Any]]:
     names = _derive_sheet_names(goal=goal, merged_constraints=merged_constraints)
-    return [
-        {
-            "name": name,
-            "purpose": _sheet_purpose(name),
-            "sheet_type": _sheet_type(name),
-            "columns": _sheet_columns(name),
-            "table_regions": _table_regions(name),
-            "formula_regions": _formula_regions(name),
-            "chart_regions": _chart_regions(name),
-            "validation_rules": _validation_rules(name),
-        }
-        for name in names
-    ]
+    used_structural_ids: dict[str, int] = {}
+    sheets: list[dict[str, Any]] = []
+    for name in names:
+        sheets.append(
+            {
+                "name": name,
+                "purpose": _sheet_purpose(name),
+                "sheet_type": _sheet_type(name),
+                "columns": _sheet_columns(name),
+                "table_regions": _table_regions(name, used_structural_ids=used_structural_ids),
+                "formula_regions": _formula_regions(name),
+                "chart_regions": _chart_regions(name),
+                "validation_rules": _validation_rules(name),
+            }
+        )
+    return sheets
 
 
 def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None) -> list[str]:
@@ -359,7 +367,7 @@ def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None)
                     continue
                 name = str(unit.get("name", "") or "").strip()
                 name_key = _sheet_name_key(name)
-                if _is_legal_sheet_name(name) and name_key not in seen_names:
+                if _is_legal_sheet_name(name) and _looks_like_sheet_name(name) and name_key not in seen_names:
                     names.append(name)
                     seen_names.add(name_key)
 
@@ -460,8 +468,12 @@ def _sheet_columns(name: str) -> list[dict[str, str]]:
     ]
 
 
-def _table_regions(name: str) -> list[dict[str, str]]:
-    return [{"name": f"{_structural_identifier(name)}Table", "range_hint": "A1:C20"}]
+def _table_regions(name: str, *, used_structural_ids: dict[str, int]) -> list[dict[str, str]]:
+    base_identifier = f"{_structural_identifier(name)}Table"
+    count = used_structural_ids.get(base_identifier, 0) + 1
+    used_structural_ids[base_identifier] = count
+    identifier = base_identifier if count == 1 else f"{base_identifier}_{count}"
+    return [{"name": identifier, "range_hint": "A1:C20"}]
 
 
 def _formula_regions(name: str) -> list[dict[str, str]]:
