@@ -26,6 +26,22 @@ _KNOWN_SHEET_LABELS = {
     "output",
     "outputs",
 }
+_SHEET_NAME_REJECT_TOKENS = (
+    "rename ",
+    "preserve ",
+    "update ",
+    "change ",
+    "keep ",
+    "include ",
+    "contains ",
+    "should ",
+    "must ",
+    "need ",
+    "formula",
+    "column",
+    "header",
+    "row ",
+)
 
 
 class XlsxStrategy(DefaultOfficeStrategy):
@@ -119,11 +135,11 @@ class XlsxStrategy(DefaultOfficeStrategy):
                     "name": name,
                     "purpose": str(sheet.get("purpose", "") or "").strip() or _sheet_purpose(name),
                     "sheet_type": str(sheet.get("sheet_type", "") or "").strip() or _sheet_type(name),
-                    "columns": list(sheet.get("columns") or _sheet_columns(name)),
-                    "table_regions": list(sheet.get("table_regions") or _table_regions(name)),
-                    "formula_regions": list(sheet.get("formula_regions") or _formula_regions(name)),
-                    "chart_regions": list(sheet.get("chart_regions") or _chart_regions(name)),
-                    "validation_rules": list(sheet.get("validation_rules") or _validation_rules(name)),
+                    "columns": _coerce_list_field(sheet, "columns", fallback=_sheet_columns(name)),
+                    "table_regions": _coerce_list_field(sheet, "table_regions", fallback=_table_regions(name)),
+                    "formula_regions": _coerce_list_field(sheet, "formula_regions", fallback=_formula_regions(name)),
+                    "chart_regions": _coerce_list_field(sheet, "chart_regions", fallback=_chart_regions(name)),
+                    "validation_rules": _coerce_list_field(sheet, "validation_rules", fallback=_validation_rules(name)),
                 }
             )
 
@@ -347,18 +363,24 @@ def _looks_like_sheet_name(value: str) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
-    if len(text) > 24:
+    if len(text) > 48:
         return False
     lowered = text.lower()
-    if any(token in lowered for token in (" sheet", "rename ", "preserve ", "formula", "column", "header", "row ")):
+    if any(token in lowered for token in _SHEET_NAME_REJECT_TOKENS):
+        return False
+    if any(mark in text for mark in (".", ",", ";", ":", "?", "!", "，", "。", "；", "：", "？", "！")):
         return False
     tokens = [part for part in lowered.replace("-", " ").replace("_", " ").split() if part]
-    if not tokens or len(tokens) > 2:
+    if not tokens or len(tokens) > 4:
         return False
     compact = lowered.replace(" ", "")
     if compact in _KNOWN_SHEET_LABELS:
         return True
-    if len(tokens) == 1 and tokens[0].isalpha() and text[:1].isupper():
+    if any("\u4e00" <= char <= "\u9fff" for char in text):
+        return len(text) <= 12
+    if all(token.isalpha() for token in tokens):
+        return True
+    if len(tokens) == 1 and text[:1].isupper():
         return True
     return False
 
@@ -481,8 +503,11 @@ def _normalize_batches(
             return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
         start = int(batch.get("sheet_start", 0) or 0)
         end = int(batch.get("sheet_end", 0) or 0)
-        names = [str(item or "") for item in (batch.get("sheet_names") or []) if str(item or "")]
+        names = _coerce_batch_list(batch, "sheet_names")
         if start <= 0 or end < start or end > sheet_count or not names:
+            return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
+        expected_names = sheet_names[start - 1:end]
+        if names != expected_names:
             return _build_batches(sheets=sheets, build_batch_size=build_batch_size)
         normalized.append(
             {
@@ -492,11 +517,31 @@ def _normalize_batches(
                 "sheet_names": names,
                 "slide_start": int(batch.get("slide_start", start) or start),
                 "slide_end": int(batch.get("slide_end", end) or end),
-                "slide_titles": list(batch.get("slide_titles") or names),
-                "slide_roles": list(batch.get("slide_roles") or [_sheet_type(name) for name in names]),
+                "slide_titles": _coerce_batch_list(batch, "slide_titles") or names,
+                "slide_roles": _coerce_batch_list(batch, "slide_roles") or [_sheet_type(name) for name in names],
             }
         )
     return normalized
+
+
+def _coerce_list_field(container: dict[str, Any], key: str, *, fallback: list[Any]) -> list[Any]:
+    if key not in container:
+        return list(fallback)
+    value = container.get(key)
+    if isinstance(value, list):
+        return list(value)
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return []
+    return []
+
+
+def _coerce_batch_list(container: dict[str, Any], key: str) -> list[str]:
+    value = container.get(key)
+    if isinstance(value, list):
+        return [str(item or "") for item in value if str(item or "")]
+    return []
 
 
 __all__ = ["XlsxStrategy"]

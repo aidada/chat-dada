@@ -244,6 +244,27 @@ def test_xlsx_strategy_ignores_non_sheet_like_hard_requirements() -> None:
     assert [sheet["name"] for sheet in plan["sheets"]] == ["RawData", "Dashboard", "Summary"]
 
 
+def test_xlsx_strategy_accepts_realistic_multi_word_sheet_name() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    plan = XlsxStrategy().build_plan(
+        goal="生成区域销售预算表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="regional-sales.xlsx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": ["Regional Sales Summary", "preserve formulas", "Monthly Budget Forecast"]
+            },
+        },
+    )
+
+    assert [sheet["name"] for sheet in plan["sheets"]] == [
+        "Regional Sales Summary",
+        "Monthly Budget Forecast",
+    ]
+
+
 def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 
@@ -285,6 +306,137 @@ def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> 
     assert issues == []
     assert plan["sheets"] == [existing_sheet]
     assert plan["batches"] == [existing_batch]
+
+
+def test_xlsx_strategy_validate_plan_rebuilds_inconsistent_preserved_batch() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    strategy = XlsxStrategy()
+    existing_sheets = [
+        {
+            "name": "RawData",
+            "purpose": "Store source records.",
+            "sheet_type": "raw_data",
+            "columns": [],
+            "table_regions": [],
+            "formula_regions": [],
+            "chart_regions": [],
+            "validation_rules": [],
+        },
+        {
+            "name": "Summary",
+            "purpose": "Aggregate metrics.",
+            "sheet_type": "summary",
+            "columns": [],
+            "table_regions": [],
+            "formula_regions": [],
+            "chart_regions": [],
+            "validation_rules": [],
+        },
+    ]
+
+    plan, issues = strategy.validate_plan(
+        plan={
+            "title": "Workbook",
+            "sheet_count": 2,
+            "sheets": existing_sheets,
+            "batches": [
+                {
+                    "index": 0,
+                    "sheet_start": 1,
+                    "sheet_end": 2,
+                    "sheet_names": ["Summary", "RawData"],
+                    "slide_start": 1,
+                    "slide_end": 2,
+                    "slide_titles": ["Summary", "RawData"],
+                    "slide_roles": ["summary", "raw_data"],
+                }
+            ],
+        },
+        goal="生成预算表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+    )
+
+    assert issues == []
+    assert plan["batches"] == [
+        {
+            "index": 0,
+            "sheet_start": 1,
+            "sheet_end": 1,
+            "sheet_names": ["RawData"],
+            "slide_start": 1,
+            "slide_end": 1,
+            "slide_titles": ["RawData"],
+            "slide_roles": ["raw_data"],
+        },
+        {
+            "index": 1,
+            "sheet_start": 2,
+            "sheet_end": 2,
+            "sheet_names": ["Summary"],
+            "slide_start": 2,
+            "slide_end": 2,
+            "slide_titles": ["Summary"],
+            "slide_roles": ["summary"],
+        },
+    ]
+
+
+def test_xlsx_strategy_validate_plan_does_not_expand_string_list_fields() -> None:
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
+
+    strategy = XlsxStrategy()
+    plan, issues = strategy.validate_plan(
+        plan={
+            "title": "Workbook",
+            "sheet_count": 1,
+            "sheets": [
+                {
+                    "name": "Budget",
+                    "purpose": "Track budget.",
+                    "sheet_type": "summary",
+                    "columns": "ABC",
+                    "table_regions": "A1:C10",
+                    "formula_regions": "E2:E10",
+                    "chart_regions": "H2:M16",
+                    "validation_rules": "required_headers",
+                }
+            ],
+            "batches": [
+                {
+                    "index": 0,
+                    "sheet_start": 1,
+                    "sheet_end": 1,
+                    "sheet_names": "Budget",
+                }
+            ],
+        },
+        goal="生成预算表",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="budget.xlsx",
+    )
+
+    assert issues == []
+    assert plan["sheets"][0]["columns"] == []
+    assert plan["sheets"][0]["table_regions"] == []
+    assert plan["sheets"][0]["formula_regions"] == []
+    assert plan["sheets"][0]["chart_regions"] == []
+    assert plan["sheets"][0]["validation_rules"] == []
+    assert plan["batches"] == [
+        {
+            "index": 0,
+            "sheet_start": 1,
+            "sheet_end": 1,
+            "sheet_names": ["Budget"],
+            "slide_start": 1,
+            "slide_end": 1,
+            "slide_titles": ["Budget"],
+            "slide_roles": ["summary"],
+        }
+    ]
 
 
 def test_ppt_strategy_build_input_sections_include_batch_context() -> None:
