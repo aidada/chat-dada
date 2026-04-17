@@ -215,21 +215,6 @@ def _collect_headings(*, merged_constraints: dict[str, Any] | None) -> list[str]
             seen.add(key)
             headings.append(heading)
 
-    structure_constraints = dict((merged_constraints or {}).get("reference_structure_constraints") or {})
-    units = structure_constraints.get("units")
-    if isinstance(units, list):
-        for unit in units:
-            if not isinstance(unit, dict):
-                continue
-            heading = str(unit.get("name", "") or "").strip()
-            if not heading:
-                continue
-            key = heading.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            headings.append(heading)
-
     return headings
 
 

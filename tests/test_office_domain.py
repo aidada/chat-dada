@@ -235,12 +235,15 @@ def test_docx_strategy_builds_section_plan_from_goal_and_reference() -> None:
         default_create_file="project-plan.docx",
         merged_constraints={
             "goal_constraints": {"hard_requirements": ["背景", "目标", "实施计划", "风险控制"]},
-            "reference_structure_constraints": {"units": [{"name": "背景"}, {"name": "目标"}]},
+            "reference_structure_constraints": {
+                "units": [{"name": "背景"}, {"name": "目标"}, {"name": "附录"}, {"name": "致谢"}]
+            },
             "reference_style_constraints": {"style_tokens": {"heading_style": "Heading1"}},
         },
     )
 
     assert plan["section_count"] == 4
+    assert [section["heading"] for section in plan["sections"]] == ["背景", "目标", "实施计划", "风险控制"]
     assert plan["sections"][0]["heading"] == "背景"
     assert plan["sections"][2]["content_mode"] == "mixed"
 
