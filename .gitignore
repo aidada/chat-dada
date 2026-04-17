@@ -71,6 +71,8 @@
 !infra/**
 !agent_runtime/
 !agent_runtime/**
+!agent/
+!agent/**
 
 # Virtual environment
 .venv/
