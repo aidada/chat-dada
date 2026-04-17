@@ -142,16 +142,19 @@ class XlsxStrategy(DefaultOfficeStrategy):
                 sheet_shape_invalid = True
                 continue
             seen_sheet_names.add(name_key)
+            has_explicit_table_regions = "table_regions" in sheet
+            preserved_table_regions = _coerce_list_field(sheet, "table_regions", fallback=[])
+            _seed_structural_ids_from_regions(preserved_table_regions, used_structural_ids=used_structural_ids)
             normalized_sheets.append(
                 {
                     "name": name,
                     "purpose": str(sheet.get("purpose", "") or "").strip() or _sheet_purpose(name),
                     "sheet_type": str(sheet.get("sheet_type", "") or "").strip() or _sheet_type(name),
                     "columns": _coerce_list_field(sheet, "columns", fallback=_sheet_columns(name)),
-                    "table_regions": _coerce_list_field(
-                        sheet,
-                        "table_regions",
-                        fallback=_table_regions(name, used_structural_ids=used_structural_ids),
+                    "table_regions": (
+                        preserved_table_regions
+                        if has_explicit_table_regions
+                        else _table_regions(name, used_structural_ids=used_structural_ids)
                     ),
                     "formula_regions": _coerce_list_field(sheet, "formula_regions", fallback=_formula_regions(name)),
                     "chart_regions": _coerce_list_field(sheet, "chart_regions", fallback=_chart_regions(name)),
@@ -620,6 +623,27 @@ def _structural_identifier(value: str) -> str:
     if identifier[0].isdigit():
         return f"tbl_{identifier}"
     return identifier
+
+
+def _seed_structural_ids_from_regions(
+    regions: list[dict[str, Any]],
+    *,
+    used_structural_ids: dict[str, int],
+) -> None:
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        name = str(region.get("name", "") or "").strip()
+        if not name:
+            continue
+        base_identifier = name
+        suffix_count = 1
+        if "_" in name:
+            stem, suffix = name.rsplit("_", 1)
+            if suffix.isdigit():
+                base_identifier = stem
+                suffix_count = int(suffix)
+        used_structural_ids[base_identifier] = max(used_structural_ids.get(base_identifier, 0), suffix_count)
 
 
 __all__ = ["XlsxStrategy"]
