@@ -2,6 +2,45 @@ from __future__ import annotations
 
 from typing import Any
 
+from typing_extensions import TypedDict
+
+
+class GoalConstraints(TypedDict):
+    format: str
+    operation: str
+    goal: str
+    hard_requirements: list[str]
+
+
+class ReferenceStructureConstraints(TypedDict):
+    format: str
+    units: list[dict[str, Any]]
+
+
+class ReferenceStyleConstraints(TypedDict):
+    format: str
+    style_tokens: dict[str, Any]
+
+
+class ExistingDocumentProfile(TypedDict):
+    format: str
+    units: list[dict[str, Any]]
+    protected_units: list[str]
+
+
+class ConflictResolution(TypedDict):
+    priority_order: list[str]
+    record_deviations: bool
+
+
+class FidelityDeviation(TypedDict, total=False):
+    kind: str
+    message: str
+    field: str
+    expected: Any
+    actual: Any
+    details: dict[str, Any]
+
 
 def build_goal_constraints(
     *,
@@ -9,7 +48,7 @@ def build_goal_constraints(
     operation: str,
     goal: str,
     hard_requirements: list[str] | None = None,
-) -> dict[str, Any]:
+) -> GoalConstraints:
     return {
         "format": str(format_name or "").lower(),
         "operation": str(operation or "").lower(),
@@ -22,7 +61,7 @@ def build_reference_structure_constraints(
     *,
     format_name: str,
     units: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+) -> ReferenceStructureConstraints:
     return {
         "format": str(format_name or "").lower(),
         "units": list(units or []),
@@ -33,7 +72,7 @@ def build_reference_style_constraints(
     *,
     format_name: str,
     style_tokens: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> ReferenceStyleConstraints:
     return {
         "format": str(format_name or "").lower(),
         "style_tokens": dict(style_tokens or {}),
@@ -45,7 +84,7 @@ def build_existing_document_profile(
     format_name: str,
     units: list[dict[str, Any]] | None = None,
     protected_units: list[str] | None = None,
-) -> dict[str, Any]:
+) -> ExistingDocumentProfile:
     return {
         "format": str(format_name or "").lower(),
         "units": list(units or []),
@@ -53,7 +92,7 @@ def build_existing_document_profile(
     }
 
 
-def build_conflict_resolution() -> dict[str, Any]:
+def build_conflict_resolution() -> ConflictResolution:
     return {
         "priority_order": ["goal", "reference"],
         "record_deviations": True,

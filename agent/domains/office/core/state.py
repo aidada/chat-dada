@@ -4,6 +4,15 @@ from typing import Annotated, Any
 
 from typing_extensions import TypedDict
 
+from agent.domains.office.reference_models import (
+    ConflictResolution,
+    ExistingDocumentProfile,
+    FidelityDeviation,
+    GoalConstraints,
+    ReferenceStyleConstraints,
+    ReferenceStructureConstraints,
+)
+
 
 class OfficeWorkflowState(TypedDict, total=False):
     goal: str
@@ -21,11 +30,12 @@ class OfficeWorkflowState(TypedDict, total=False):
     cost_ledger: dict[str, Any]
     current_stage: str
     task_profile: dict[str, Any]
-    goal_constraints: dict[str, Any]
-    reference_structure_constraints: dict[str, Any]
-    reference_style_constraints: dict[str, Any]
-    existing_document_profile: dict[str, Any]
-    fidelity_deviations: list[dict[str, Any]]
+    goal_constraints: GoalConstraints
+    reference_structure_constraints: ReferenceStructureConstraints
+    reference_style_constraints: ReferenceStyleConstraints
+    existing_document_profile: ExistingDocumentProfile
+    conflict_resolution: ConflictResolution
+    fidelity_deviations: list[FidelityDeviation]
     deck_plan: dict[str, Any]
     planning_summary: dict[str, Any]
     planner_validation_issues: list[str]
