@@ -285,15 +285,44 @@ class XlsxStrategy(DefaultOfficeStrategy):
         *,
         operation: str,
         stats: dict[str, Any],
+        plan: dict[str, Any] | None = None,
+        merged_constraints: dict[str, Any] | None = None,
+        result_meta: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if operation not in {"create", "edit", "transform"}:
             return []
         if not isinstance(stats, dict) or not stats:
             return [{"severity": "error", "message": "XLSX 写入结果缺少质量 stats"}]
+        issues: list[dict[str, Any]] = []
         sheet_count = _coerce_int(stats.get("sheet_count"), default=0)
         if sheet_count <= 0:
             return [{"severity": "error", "message": "XLSX 质量 stats 缺少有效的 sheet_count"}]
-        return []
+        expected_sheet_names = _expected_sheet_names(plan=plan, merged_constraints=merged_constraints)
+        if not expected_sheet_names:
+            return issues
+
+        actual_sheet_names = _coerce_string_list(stats.get("sheet_names"))
+        if not actual_sheet_names:
+            issues.append({"severity": "error", "message": "XLSX 缺少 sheet_names，无法验证预期工作簿拓扑"})
+            return issues
+
+        actual_keys = [_sheet_name_key(name) for name in actual_sheet_names]
+        expected_keys = [_sheet_name_key(name) for name in expected_sheet_names]
+        missing_sheet_names = [name for name in expected_sheet_names if _sheet_name_key(name) not in actual_keys]
+        if missing_sheet_names:
+            issues.append(
+                {
+                    "severity": "error",
+                    "message": f"XLSX 缺少预期 sheet: {', '.join(missing_sheet_names)}",
+                }
+            )
+
+        if sheet_count < len(expected_sheet_names):
+            issues.append({"severity": "error", "message": "XLSX sheet_count 小于预期工作簿拓扑"})
+        elif actual_keys[: len(expected_keys)] != expected_keys:
+            issues.append({"severity": "error", "message": "XLSX sheet_names 与预期工作簿拓扑不一致"})
+
+        return issues
 
     def advance_after_build(
         self,
@@ -394,6 +423,33 @@ def _derive_sheet_names(*, goal: str, merged_constraints: dict[str, Any] | None)
     if "raw" in lowered or "原始" in goal:
         fallback_names.append("RawData")
     return fallback_names or ["Sheet1"]
+
+
+def _expected_sheet_names(*, plan: dict[str, Any] | None, merged_constraints: dict[str, Any] | None) -> list[str]:
+    expected_names: list[str] = []
+    seen_names: set[str] = set()
+
+    for sheet in list((plan or {}).get("sheets") or []):
+        if not isinstance(sheet, dict):
+            continue
+        name = str(sheet.get("name", "") or "").strip()
+        if not name:
+            continue
+        name_key = _sheet_name_key(name)
+        if name_key in seen_names:
+            continue
+        seen_names.add(name_key)
+        expected_names.append(name)
+
+    if isinstance(merged_constraints, dict) and merged_constraints:
+        for name in _derive_sheet_names(goal="", merged_constraints=merged_constraints):
+            name_key = _sheet_name_key(name)
+            if name_key in seen_names:
+                continue
+            seen_names.add(name_key)
+            expected_names.append(name)
+
+    return expected_names
 
 
 def _looks_like_sheet_name(value: str) -> bool:
@@ -603,6 +659,12 @@ def _coerce_batch_list(container: dict[str, Any], key: str) -> list[str]:
     if isinstance(value, list):
         return [str(item or "") for item in value if str(item or "")]
     return []
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item or "").strip() for item in value if str(item or "").strip()]
 
 
 def _coerce_int(value: Any, *, default: int) -> int:

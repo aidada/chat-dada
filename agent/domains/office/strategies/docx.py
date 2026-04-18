@@ -160,12 +160,57 @@ class DocxStrategy(DefaultOfficeStrategy):
         *,
         operation: str,
         stats: dict[str, Any],
+        plan: dict[str, Any] | None = None,
+        merged_constraints: dict[str, Any] | None = None,
+        result_meta: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if operation not in _WRITE_OPERATIONS:
             return []
         if not isinstance(stats, dict) or not stats:
             return [{"severity": "error", "message": "DOCX 写入结果缺少质量 stats"}]
-        return []
+        issues: list[dict[str, Any]] = []
+        if _coerce_positive_int(stats.get("section_count")) is None:
+            issues.append({"severity": "error", "message": "DOCX 质量 stats 缺少有效的 section_count"})
+
+        protected_units = _coerce_string_list(
+            dict((merged_constraints or {}).get("existing_document_profile") or {}).get("protected_units"),
+            fallback=[],
+        )
+        if not protected_units:
+            return issues
+
+        protected_units_preserved = _coerce_optional_bool(
+            stats.get("protected_units_preserved")
+            if "protected_units_preserved" in stats
+            else (result_meta or {}).get("protected_units_preserved")
+        )
+        if protected_units_preserved is False:
+            issues.append({"severity": "error", "message": "DOCX protected sections 未保留"})
+            return issues
+
+        observed_headings = _coerce_string_list(stats.get("section_headings"), fallback=[])
+        if not observed_headings:
+            observed_headings = _coerce_string_list((result_meta or {}).get("section_headings"), fallback=[])
+
+        if observed_headings:
+            observed_keys = {heading.casefold() for heading in observed_headings}
+            missing_units = [unit for unit in protected_units if unit.casefold() not in observed_keys]
+            if missing_units:
+                issues.append(
+                    {
+                        "severity": "error",
+                        "message": f"DOCX protected sections 缺失或被修改: {', '.join(missing_units)}",
+                    }
+                )
+        elif protected_units_preserved is not True:
+            issues.append(
+                {
+                    "severity": "error",
+                    "message": "DOCX 缺少 protected sections 保留证明；请返回 protected_units_preserved 或 section_headings",
+                }
+            )
+
+        return issues
 
     def build_input_sections(
         self,
@@ -316,6 +361,20 @@ def _coerce_string_list(value: Any, *, fallback: list[str]) -> list[str]:
         return list(fallback)
     normalized = [str(item or "").strip() for item in value if str(item or "").strip()]
     return normalized or list(fallback)
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None
+    return normalized if normalized > 0 else None
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
 
 
 def _normalize_content_mode(value: Any) -> str:

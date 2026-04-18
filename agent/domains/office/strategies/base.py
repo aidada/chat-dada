@@ -60,6 +60,9 @@ class OfficeFormatStrategy(Protocol):
         *,
         operation: str,
         stats: dict[str, Any],
+        plan: dict[str, Any] | None = None,
+        merged_constraints: dict[str, Any] | None = None,
+        result_meta: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def advance_after_build(

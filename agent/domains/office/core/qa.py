@@ -198,6 +198,13 @@ def run_qa_fix_stage(
     artifacts = meta.get("artifacts") if isinstance(meta.get("artifacts"), list) else []
     summary = str(meta.get("summary", "") or "").strip()
     stats = meta.get("stats") if isinstance(meta.get("stats"), dict) else {}
+    plan = state.get("deck_plan") if isinstance(state.get("deck_plan"), dict) else None
+    task_profile = state.get("task_profile") if isinstance(state.get("task_profile"), dict) else {}
+    merged_constraints = (
+        task_profile.get("merged_constraints")
+        if isinstance(task_profile.get("merged_constraints"), dict)
+        else None
+    )
     issues: list[dict[str, Any]] = []
 
     if operation != "inspect" and not artifacts:
@@ -206,7 +213,15 @@ def run_qa_fix_stage(
         issues.append({"severity": "error", "message": "写入型 Office 任务未完成 validate"})
     if operation == "inspect" and not summary and not output.strip():
         issues.append({"severity": "error", "message": "inspect 任务缺少有效总结"})
-    issues.extend(strategy.evaluate_quality_stats(operation=operation, stats=stats))
+    issues.extend(
+        strategy.evaluate_quality_stats(
+            operation=operation,
+            stats=stats,
+            plan=plan,
+            merged_constraints=merged_constraints,
+            result_meta=meta,
+        )
+    )
 
     passed = not any(issue["severity"] == "error" for issue in issues)
     quality_report = _attach_fidelity_deviations(

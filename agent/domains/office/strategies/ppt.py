@@ -286,6 +286,9 @@ class PptStrategy:
         *,
         operation: str,
         stats: dict[str, Any],
+        plan: dict[str, Any] | None = None,
+        merged_constraints: dict[str, Any] | None = None,
+        result_meta: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if operation not in {"create", "transform"}:
             return []

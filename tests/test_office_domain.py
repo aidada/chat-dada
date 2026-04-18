@@ -2216,6 +2216,139 @@ async def test_office_qa_fix_uses_sheet_count_when_slide_count_missing() -> None
 
 
 @pytest.mark.asyncio
+async def test_office_qa_fix_rejects_docx_missing_section_count() -> None:
+    from agent.domains.office.workflow import qa_fix_node
+
+    state = {
+        "format": "docx",
+        "operation": "edit",
+        "write_required": True,
+        "qa_fix_round": 0,
+        "max_qa_fix_rounds": 1,
+        "intermediate_results": [
+            {
+                "output": """```json
+{"operation":"edit","validated":true,"summary":"done","artifacts":[{"filename":"plan.docx","format":"docx","role":"primary"}],"stats":{"section_headings":["执行摘要","实施计划"]}}
+```"""
+            }
+        ],
+    }
+
+    result = await qa_fix_node(state)
+
+    assert result["current_stage"] == "build"
+    assert result["repair_mode"] is True
+    assert any("section_count" in issue["message"] for issue in result["quality_report"]["issues"])
+
+
+@pytest.mark.asyncio
+async def test_office_qa_fix_rejects_docx_when_protected_units_are_not_preserved() -> None:
+    from agent.domains.office.workflow import qa_fix_node
+
+    state = {
+        "format": "docx",
+        "operation": "edit",
+        "write_required": True,
+        "qa_fix_round": 0,
+        "max_qa_fix_rounds": 1,
+        "task_profile": {
+            "merged_constraints": {
+                "existing_document_profile": {
+                    "protected_units": ["附录", "致谢"],
+                }
+            }
+        },
+        "intermediate_results": [
+            {
+                "output": """```json
+{"operation":"edit","validated":true,"summary":"done","artifacts":[{"filename":"plan.docx","format":"docx","role":"primary"}],"stats":{"section_count":2,"section_headings":["执行摘要","实施计划"],"protected_units_preserved":false}}
+```"""
+            }
+        ],
+    }
+
+    result = await qa_fix_node(state)
+
+    assert result["current_stage"] == "build"
+    assert result["repair_mode"] is True
+    assert any("protected" in issue["message"] for issue in result["quality_report"]["issues"])
+
+
+@pytest.mark.asyncio
+async def test_office_qa_fix_rejects_xlsx_when_expected_sheet_names_are_missing() -> None:
+    from agent.domains.office.workflow import qa_fix_node
+
+    state = {
+        "format": "xlsx",
+        "operation": "create",
+        "write_required": True,
+        "qa_fix_round": 0,
+        "max_qa_fix_rounds": 1,
+        "task_profile": {
+            "merged_constraints": {
+                "goal_constraints": {
+                    "hard_requirements": ["Inputs", "Calculations", "Dashboard"],
+                }
+            }
+        },
+        "deck_plan": {
+            "sheet_count": 3,
+            "sheets": [{"name": "Inputs"}, {"name": "Calculations"}, {"name": "Dashboard"}],
+        },
+        "intermediate_results": [
+            {
+                "output": """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"budget.xlsx","format":"xlsx","role":"primary"}],"stats":{"sheet_count":2,"sheet_names":["Inputs","Dashboard"]}}
+```"""
+            }
+        ],
+    }
+
+    result = await qa_fix_node(state)
+
+    assert result["current_stage"] == "build"
+    assert result["repair_mode"] is True
+    assert any("Calculations" in issue["message"] for issue in result["quality_report"]["issues"])
+
+
+@pytest.mark.asyncio
+async def test_office_qa_fix_accepts_xlsx_when_expected_sheet_topology_is_present() -> None:
+    from agent.domains.office.workflow import qa_fix_node
+
+    state = {
+        "format": "xlsx",
+        "operation": "create",
+        "write_required": True,
+        "qa_fix_round": 0,
+        "max_qa_fix_rounds": 1,
+        "task_profile": {
+            "merged_constraints": {
+                "goal_constraints": {
+                    "hard_requirements": ["Inputs", "Calculations", "Dashboard"],
+                }
+            }
+        },
+        "deck_plan": {
+            "sheet_count": 3,
+            "sheets": [{"name": "Inputs"}, {"name": "Calculations"}, {"name": "Dashboard"}],
+        },
+        "intermediate_results": [
+            {
+                "output": """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"budget.xlsx","format":"xlsx","role":"primary"}],"stats":{"sheet_count":3,"sheet_names":["Inputs","Calculations","Dashboard"]}}
+```"""
+            }
+        ],
+    }
+
+    result = await qa_fix_node(state)
+
+    assert result["current_stage"] == "finalize"
+    assert result["quality_report"]["status"] == "passed"
+    assert result["quality_report"]["stats_summary"]["sheet_count"] == 3
+
+
+@pytest.mark.asyncio
 async def test_office_workflow_ppt_quality_stats_pass_with_complete_metrics() -> None:
     from agent.domains.office.workflow import evaluate_node
 
