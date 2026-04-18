@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from unittest.mock import AsyncMock, patch
+from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -1485,14 +1486,55 @@ async def test_ppt_quality_report_can_record_reference_deviation() -> None:
     ]
 
 
+async def _run_build_stage_with_captured_context(
+    state: dict[str, Any],
+    *,
+    strategy: Any,
+    format_specific_guidance: str = "",
+) -> tuple[dict[str, Any], dict[str, str]]:
+    from agent.domains.office.core.build import run_build_stage
+
+    captured: dict[str, str] = {}
+
+    def fake_create_deep_agent(**kwargs: Any) -> object:
+        captured["system_prompt"] = str(kwargs["system_prompt"])
+        return object()
+
+    async def fake_stream_nested_graph(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        payload = _args[1] if len(_args) > 1 else kwargs.get("inputs", {})
+        messages = list(payload.get("messages", []) or []) if isinstance(payload, dict) else []
+        captured["input_msg"] = str(getattr(messages[0], "content", "") or "") if messages else ""
+        return {"messages": [AIMessage(content="build complete")]}
+
+    with (
+        patch("agent.domains.office.core.build.get_config", return_value={"configurable": {}}),
+        patch("agent.domains.office.core.build.resolve_deepagents_runtime", return_value=([], object())),
+        patch("agent.domains.office.core.build.build_chat_model", return_value=object()),
+        patch("agent.domains.office.core.build.build_officecli_skill_bundle", return_value="officecli skill bundle"),
+        patch("agent.domains.office.core.build.create_deep_agent", side_effect=fake_create_deep_agent),
+        patch("agent.domains.office.core.build.stream_nested_graph", new=AsyncMock(side_effect=fake_stream_nested_graph)),
+    ):
+        result = await run_build_stage(
+            state,
+            strategy=strategy,
+            system_template="{format_hint}{operation}{runtime_target}{default_create_file}{source_files_block}{format_specific_guidance}{phase_guidance}{skill_content}",
+            format_specific_guidance=format_specific_guidance,
+            office_model_role="orchestrator",
+            subagents=[],
+        )
+
+    return result, captured
+
+
 @pytest.mark.asyncio
-async def test_ppt_reference_edit_build_prompt_keeps_goal_first_target_and_reference_files_in_context() -> None:
+async def test_ppt_reference_edit_build_stage_surfaces_goal_sources_batch_context_and_stage_transition() -> None:
     from agent.domains.office.strategies.ppt import PptStrategy
 
     goal = "参考品牌案例的视觉风格，更新季度复盘 PPT，并突出 AI 自动化带来的 ROI。"
     target_file = "/Users/test/Downloads/qbr-edit.pptx"
     reference_file = "/Users/test/Downloads/reference-style.pptx"
-    deck_plan = PptStrategy().build_plan(
+    strategy = PptStrategy()
+    deck_plan = strategy.build_plan(
         goal=goal,
         requested_slide_count=4,
         build_batch_size=2,
@@ -1503,36 +1545,47 @@ async def test_ppt_reference_edit_build_prompt_keeps_goal_first_target_and_refer
             }
         },
     )
-    sections = PptStrategy().build_input_sections(
-        goal=goal,
-        operation="edit",
-        format_hint="pptx",
-        runtime_target="desktop",
-        default_create_file="qbr-edit.pptx",
-        requested_slide_count=4,
-        build_batch_size=2,
-        source_files=[target_file, reference_file],
-        context="",
-        qa_feedback="",
-        plan=deck_plan,
-        current_batch_index=0,
-        repair_mode=False,
-    )
+    state = {
+        "goal": goal,
+        "task_id": "ppt_reference_edit_build",
+        "format": "pptx",
+        "operation": "edit",
+        "runtime_target_hint": "desktop",
+        "default_create_file": "qbr-edit.pptx",
+        "requested_slide_count": 4,
+        "build_batch_size": 2,
+        "deck_plan": deck_plan,
+        "current_batch_index": 0,
+        "completed_pages": 0,
+        "allowed_source_files": [target_file, reference_file],
+        "repair_mode": False,
+        "inner_recursion_limit": 12,
+        "intermediate_results": [],
+        "evaluations": [],
+        "cost_ledger": {"task_id": "ppt_reference_edit_build", "domain": "office"},
+    }
 
-    rendered = "\n".join(sections)
-    assert rendered.splitlines()[0] == goal
-    assert "- operation: edit" in rendered
-    assert "- source_files:" in rendered
-    assert f"  - {target_file}" in rendered
-    assert f"  - {reference_file}" in rendered
-    assert "- current_batch_slide_range: 1-2" in rendered
-    assert "- current_batch_slide_titles: 封面, ROI 机会" in rendered
+    result, captured = await _run_build_stage_with_captured_context(state, strategy=strategy)
+
+    input_msg = captured["input_msg"]
+    phase_guidance = captured["system_prompt"]
+    assert input_msg.splitlines()[0] == goal
+    assert "- operation: edit" in input_msg
+    assert "- source_files:" in input_msg
+    assert f"  - {target_file}" in input_msg
+    assert f"  - {reference_file}" in input_msg
+    assert "- current_batch_slide_range: 1-2" in input_msg
+    assert "- current_batch_slide_titles: 封面, ROI 机会" in input_msg
+    assert "- 当前阶段: build" in phase_guidance
+    assert "- 只处理 slide 1-2。" in phase_guidance
+    assert result["current_stage"] == "build"
+    assert result["current_batch_index"] == 1
 
 
 @pytest.mark.asyncio
-async def test_xlsx_reference_create_build_prompt_carries_planned_sheet_topology_into_execution_context() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+async def test_xlsx_reference_create_build_stage_carries_planned_workbook_topology_into_execution_context() -> None:
     from agent.domains.office.workflow import planning_node
+    from agent.domains.office.strategies.xlsx import XlsxStrategy
 
     goal = "参考财务模板创建预算工作簿，包含 Inputs、Calculations、Dashboard 三张表。"
     planning_result = await planning_node(
@@ -1553,36 +1606,48 @@ async def test_xlsx_reference_create_build_prompt_carries_planned_sheet_topology
             "cost_ledger": {},
         }
     )
-    sections = XlsxStrategy().build_input_sections(
-        goal=goal,
-        operation="create",
-        format_hint="xlsx",
-        runtime_target="desktop",
-        default_create_file=planning_result["task_profile"]["target_filename"],
-        requested_slide_count=0,
-        build_batch_size=2,
-        source_files=["/Users/test/Downloads/finance-template.xlsx"],
-        context="",
-        qa_feedback="",
-        plan=planning_result["deck_plan"],
-        current_batch_index=0,
-        repair_mode=False,
-        merged_constraints=planning_result["task_profile"]["merged_constraints"],
-    )
+    strategy = XlsxStrategy()
+    state = {
+        "goal": goal,
+        "task_id": "xlsx_reference_create_build",
+        "format": "xlsx",
+        "operation": "create",
+        "runtime_target_hint": "desktop",
+        "default_create_file": planning_result["task_profile"]["target_filename"],
+        "requested_slide_count": 0,
+        "build_batch_size": 2,
+        "deck_plan": planning_result["deck_plan"],
+        "task_profile": planning_result["task_profile"],
+        "current_batch_index": 0,
+        "completed_pages": 0,
+        "allowed_source_files": ["/Users/test/Downloads/finance-template.xlsx"],
+        "repair_mode": False,
+        "inner_recursion_limit": 12,
+        "intermediate_results": [],
+        "evaluations": [],
+        "cost_ledger": {"task_id": "xlsx_reference_create_build", "domain": "office"},
+    }
 
-    rendered = "\n".join(sections)
-    assert rendered.splitlines()[0] == goal
-    assert "- workbook_plan:" in rendered
-    assert "sheet[1] Inputs (worksheet)" in rendered
-    assert "sheet[2] Calculations (worksheet)" in rendered
-    assert "sheet[3] Dashboard (dashboard)" in rendered
-    assert "- current_batch_sheet_range: 1-2" in rendered
-    assert "- source_files:" in rendered
-    assert "  - /Users/test/Downloads/finance-template.xlsx" in rendered
+    result, captured = await _run_build_stage_with_captured_context(state, strategy=strategy)
+
+    input_msg = captured["input_msg"]
+    phase_guidance = captured["system_prompt"]
+    assert input_msg.splitlines()[0] == goal
+    assert "- workbook_plan:" in input_msg
+    assert "sheet[1] Inputs (worksheet)" in input_msg
+    assert "sheet[2] Calculations (worksheet)" in input_msg
+    assert "sheet[3] Dashboard (dashboard)" in input_msg
+    assert "- current_batch_sheet_range: 1-2" in input_msg
+    assert "- source_files:" in input_msg
+    assert "  - /Users/test/Downloads/finance-template.xlsx" in input_msg
+    assert "- 当前阶段: build" in phase_guidance
+    assert "- 只处理 sheet 1-2。" in phase_guidance
+    assert result["current_stage"] == "build"
+    assert result["current_batch_index"] == 1
 
 
 @pytest.mark.asyncio
-async def test_docx_reference_edit_build_prompt_surfaces_target_and_protected_sections() -> None:
+async def test_docx_protected_section_build_stage_surfaces_target_and_protected_sections_into_execution_context() -> None:
     from agent.domains.office.strategies.docx import DocxStrategy
     from agent.domains.office.workflow import planning_node
 
@@ -1617,29 +1682,42 @@ async def test_docx_reference_edit_build_prompt_surfaces_target_and_protected_se
                 "cost_ledger": {},
             }
         )
-    sections = DocxStrategy().build_input_sections(
-        goal="参考方案模板，更新项目方案中的执行摘要和实施计划，并保留附录与致谢。",
-        operation="edit",
-        format_hint="docx",
-        runtime_target="desktop",
-        default_create_file=planning_result["task_profile"]["target_filename"],
-        requested_slide_count=0,
-        build_batch_size=1,
-        source_files=["/Users/test/Downloads/project-plan.docx"],
-        context="",
-        qa_feedback="",
-        plan=planning_result["deck_plan"],
-        current_batch_index=0,
-        repair_mode=False,
-        merged_constraints=planning_result["task_profile"]["merged_constraints"],
-    )
 
-    rendered = "\n".join(sections)
-    assert rendered.splitlines()[0] == "参考方案模板，更新项目方案中的执行摘要和实施计划，并保留附录与致谢。"
-    assert "section[1] 执行摘要 (mixed)" in rendered
-    assert "section[2] 实施计划 (mixed)" in rendered
-    assert "- target_sections: 执行摘要, 实施计划" in rendered
-    assert "- protected_sections: 附录, 致谢" in rendered
+    strategy = DocxStrategy()
+    state = {
+        "goal": "参考方案模板，更新项目方案中的执行摘要和实施计划，并保留附录与致谢。",
+        "task_id": "docx_protected_section_build",
+        "format": "docx",
+        "operation": "edit",
+        "runtime_target_hint": "desktop",
+        "default_create_file": planning_result["task_profile"]["target_filename"],
+        "requested_slide_count": 0,
+        "build_batch_size": 1,
+        "deck_plan": planning_result["deck_plan"],
+        "task_profile": planning_result["task_profile"],
+        "current_batch_index": 0,
+        "completed_pages": 0,
+        "allowed_source_files": ["/Users/test/Downloads/project-plan.docx"],
+        "repair_mode": False,
+        "inner_recursion_limit": 12,
+        "intermediate_results": [],
+        "evaluations": [],
+        "cost_ledger": {"task_id": "docx_protected_section_build", "domain": "office"},
+    }
+
+    result, captured = await _run_build_stage_with_captured_context(state, strategy=strategy)
+
+    input_msg = captured["input_msg"]
+    phase_guidance = captured["system_prompt"]
+    assert input_msg.splitlines()[0] == "参考方案模板，更新项目方案中的执行摘要和实施计划，并保留附录与致谢。"
+    assert "- operation: edit" in input_msg
+    assert "section[1] 执行摘要 (mixed)" in input_msg
+    assert "section[2] 实施计划 (mixed)" in input_msg
+    assert "- target_sections: 执行摘要, 实施计划" in input_msg
+    assert "- protected_sections: 附录, 致谢" in input_msg
+    assert "- 当前阶段: build" in phase_guidance
+    assert result["current_stage"] == "qa_fix"
+    assert result["current_batch_index"] == 1
 
 
 @pytest.mark.asyncio
