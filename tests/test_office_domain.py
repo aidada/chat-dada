@@ -1575,6 +1575,9 @@ async def test_ppt_reference_edit_build_stage_surfaces_goal_sources_batch_contex
         assert office_constraints.get("runtime_target") == "desktop"
         assert office_constraints.get("default_create_file") == "qbr-edit.pptx"
         assert "- operation: edit" in input_msg
+        assert "- source_files:" in input_msg
+        assert f"  - {target_file}" in input_msg
+        assert f"  - {reference_file}" in input_msg
         assert "- current_batch_index: 0" in input_msg
         assert "- current_batch_slide_range: 1-2" in input_msg
         assert "- current_batch_slide_titles: 封面, ROI 机会" in input_msg
@@ -1637,6 +1640,8 @@ async def test_xlsx_reference_create_build_stage_carries_planned_workbook_topolo
     def gate(input_msg: str, config: dict[str, Any]) -> None:
         office_constraints = dict(config.get("configurable", {}).get("office_constraints") or {})
         assert office_constraints.get("allowed_source_files") == ["/Users/test/Downloads/finance-template.xlsx"]
+        assert "- source_files:" in input_msg
+        assert "  - /Users/test/Downloads/finance-template.xlsx" in input_msg
         assert "- workbook_plan:" in input_msg
         assert "sheet[1] Inputs (worksheet)" in input_msg
         assert "sheet[2] Calculations (worksheet)" in input_msg
@@ -1714,7 +1719,12 @@ async def test_docx_protected_section_build_stage_surfaces_target_and_protected_
     def gate(input_msg: str, config: dict[str, Any]) -> None:
         office_constraints = dict(config.get("configurable", {}).get("office_constraints") or {})
         assert office_constraints.get("allowed_source_files") == ["/Users/test/Downloads/project-plan.docx"]
+        assert "- source_files:" in input_msg
+        assert "  - /Users/test/Downloads/project-plan.docx" in input_msg
         assert "- operation: edit" in input_msg
+        assert "- plan_summary:" in input_msg
+        assert "section[1] 执行摘要 (mixed)" in input_msg
+        assert "section[2] 实施计划 (mixed)" in input_msg
         assert "- target_sections: 执行摘要, 实施计划" in input_msg
         assert "- protected_sections: 附录, 致谢" in input_msg
 
