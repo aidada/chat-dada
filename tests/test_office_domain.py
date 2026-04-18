@@ -1491,10 +1491,11 @@ async def _run_build_stage_with_captured_context(
     *,
     strategy: Any,
     format_specific_guidance: str = "",
-) -> tuple[dict[str, Any], dict[str, str]]:
+    gate: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     from agent.domains.office.core.build import run_build_stage
 
-    captured: dict[str, str] = {}
+    captured: dict[str, Any] = {}
 
     def fake_create_deep_agent(**kwargs: Any) -> object:
         captured["system_prompt"] = str(kwargs["system_prompt"])
@@ -1502,8 +1503,11 @@ async def _run_build_stage_with_captured_context(
 
     async def fake_stream_nested_graph(*_args: Any, **kwargs: Any) -> dict[str, Any]:
         payload = _args[1] if len(_args) > 1 else kwargs.get("inputs", {})
+        config = kwargs.get("config", {})
         messages = list(payload.get("messages", []) or []) if isinstance(payload, dict) else []
         captured["input_msg"] = str(getattr(messages[0], "content", "") or "") if messages else ""
+        captured["config"] = config
+        gate(captured["input_msg"], config)
         return {"messages": [AIMessage(content="build complete")]}
 
     with (
@@ -1565,17 +1569,19 @@ async def test_ppt_reference_edit_build_stage_surfaces_goal_sources_batch_contex
         "cost_ledger": {"task_id": "ppt_reference_edit_build", "domain": "office"},
     }
 
-    result, captured = await _run_build_stage_with_captured_context(state, strategy=strategy)
+    def gate(input_msg: str, config: dict[str, Any]) -> None:
+        office_constraints = dict(config.get("configurable", {}).get("office_constraints") or {})
+        assert office_constraints.get("allowed_source_files") == [target_file, reference_file]
+        assert office_constraints.get("runtime_target") == "desktop"
+        assert office_constraints.get("default_create_file") == "qbr-edit.pptx"
+        assert "- operation: edit" in input_msg
+        assert "- current_batch_index: 0" in input_msg
+        assert "- current_batch_slide_range: 1-2" in input_msg
+        assert "- current_batch_slide_titles: 封面, ROI 机会" in input_msg
 
-    input_msg = captured["input_msg"]
+    result, captured = await _run_build_stage_with_captured_context(state, strategy=strategy, gate=gate)
+
     phase_guidance = captured["system_prompt"]
-    assert input_msg.splitlines()[0] == goal
-    assert "- operation: edit" in input_msg
-    assert "- source_files:" in input_msg
-    assert f"  - {target_file}" in input_msg
-    assert f"  - {reference_file}" in input_msg
-    assert "- current_batch_slide_range: 1-2" in input_msg
-    assert "- current_batch_slide_titles: 封面, ROI 机会" in input_msg
     assert "- 当前阶段: build" in phase_guidance
     assert "- 只处理 slide 1-2。" in phase_guidance
     assert result["current_stage"] == "build"
@@ -1628,18 +1634,18 @@ async def test_xlsx_reference_create_build_stage_carries_planned_workbook_topolo
         "cost_ledger": {"task_id": "xlsx_reference_create_build", "domain": "office"},
     }
 
-    result, captured = await _run_build_stage_with_captured_context(state, strategy=strategy)
+    def gate(input_msg: str, config: dict[str, Any]) -> None:
+        office_constraints = dict(config.get("configurable", {}).get("office_constraints") or {})
+        assert office_constraints.get("allowed_source_files") == ["/Users/test/Downloads/finance-template.xlsx"]
+        assert "- workbook_plan:" in input_msg
+        assert "sheet[1] Inputs (worksheet)" in input_msg
+        assert "sheet[2] Calculations (worksheet)" in input_msg
+        assert "sheet[3] Dashboard (dashboard)" in input_msg
+        assert "- current_batch_sheet_range: 1-2" in input_msg
 
-    input_msg = captured["input_msg"]
+    result, captured = await _run_build_stage_with_captured_context(state, strategy=strategy, gate=gate)
+
     phase_guidance = captured["system_prompt"]
-    assert input_msg.splitlines()[0] == goal
-    assert "- workbook_plan:" in input_msg
-    assert "sheet[1] Inputs (worksheet)" in input_msg
-    assert "sheet[2] Calculations (worksheet)" in input_msg
-    assert "sheet[3] Dashboard (dashboard)" in input_msg
-    assert "- current_batch_sheet_range: 1-2" in input_msg
-    assert "- source_files:" in input_msg
-    assert "  - /Users/test/Downloads/finance-template.xlsx" in input_msg
     assert "- 当前阶段: build" in phase_guidance
     assert "- 只处理 sheet 1-2。" in phase_guidance
     assert result["current_stage"] == "build"
@@ -1705,16 +1711,16 @@ async def test_docx_protected_section_build_stage_surfaces_target_and_protected_
         "cost_ledger": {"task_id": "docx_protected_section_build", "domain": "office"},
     }
 
-    result, captured = await _run_build_stage_with_captured_context(state, strategy=strategy)
+    def gate(input_msg: str, config: dict[str, Any]) -> None:
+        office_constraints = dict(config.get("configurable", {}).get("office_constraints") or {})
+        assert office_constraints.get("allowed_source_files") == ["/Users/test/Downloads/project-plan.docx"]
+        assert "- operation: edit" in input_msg
+        assert "- target_sections: 执行摘要, 实施计划" in input_msg
+        assert "- protected_sections: 附录, 致谢" in input_msg
 
-    input_msg = captured["input_msg"]
+    result, captured = await _run_build_stage_with_captured_context(state, strategy=strategy, gate=gate)
+
     phase_guidance = captured["system_prompt"]
-    assert input_msg.splitlines()[0] == "参考方案模板，更新项目方案中的执行摘要和实施计划，并保留附录与致谢。"
-    assert "- operation: edit" in input_msg
-    assert "section[1] 执行摘要 (mixed)" in input_msg
-    assert "section[2] 实施计划 (mixed)" in input_msg
-    assert "- target_sections: 执行摘要, 实施计划" in input_msg
-    assert "- protected_sections: 附录, 致谢" in input_msg
     assert "- 当前阶段: build" in phase_guidance
     assert result["current_stage"] == "qa_fix"
     assert result["current_batch_index"] == 1
