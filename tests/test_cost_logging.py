@@ -9,7 +9,7 @@ from agent.runtime.cost_logging import (
     merge_tool_events_into_ledger,
     summarize_cost_ledger,
 )
-from agent.domains.office.core.quality_report import (
+from agent.workflows.office.core.quality_report import (
     build_quality_report,
     quality_report_summary_lines,
     summarize_quality_report,
@@ -100,6 +100,53 @@ def test_quality_report_summary_and_lines_include_key_stats() -> None:
     assert summary["error_count"] == 1
     assert any("质量状态: hard_fail" == line for line in lines)
     assert any("slides=6" in line for line in lines)
+
+
+def test_quality_report_summary_includes_fidelity_deviations() -> None:
+    report = build_quality_report(
+        format_name="pptx",
+        operation="create",
+        validated=True,
+        artifacts=[{"name": "deck.pptx"}],
+        summary="done",
+        stats={"slide_count": 6},
+        issues=[],
+        qa_fix_round=0,
+        max_qa_fix_rounds=2,
+        terminal_reason="",
+    )
+    report["fidelity_deviations"] = [{"kind": "style_deviation", "message": "theme fallback"}]
+
+    summary = summarize_quality_report(report)
+
+    assert summary["fidelity_deviation_count"] == 1
+
+
+def test_quality_report_summary_lines_render_from_merged_summary_payload() -> None:
+    lines = quality_report_summary_lines(
+        {
+            "status": "hard_fail",
+            "passed": False,
+            "issue_count": 1,
+            "error_count": 1,
+            "warning_count": 0,
+            "slide_count": 6,
+            "visual_slide_count": 4,
+            "text_only_slide_count": 1,
+            "layout_variety_count": 3,
+            "fidelity_deviation_count": 1,
+            "terminal_reason": "inner_recursion_limit",
+        }
+    )
+
+    assert any("slides=6" in line for line in lines)
+    assert any("保真偏差: 1 个" == line for line in lines)
+    assert any("质量终止原因: inner_recursion_limit" == line for line in lines)
+
+
+def test_quality_report_summary_lines_return_empty_for_empty_input() -> None:
+    assert quality_report_summary_lines(None) == []
+    assert quality_report_summary_lines({}) == []
 
 
 def test_cost_ledger_summary_includes_quality_report_summary() -> None:

@@ -164,7 +164,7 @@ agent/coordinator/
 │   └── GraphInterrupt 时手动序列化 _dag_resume_state（6 个字段）
 └── skills.py → 全局 skill_registry
 │
-agent/domains/
+agent/workflows/
 ├── */orchestrated.py                 ← 当前真正暴露给 Coordinator 的 domain skill runner 入口
 │   └── 由 skill_registry.discover_skills() 自动注册为 do_<domain>
 ├── research/worker.py + tools.py     ← 唯一直接 import agent.tools 的位置
@@ -749,10 +749,10 @@ Brain / Harness 不可以直接调用：
 | `domain/conversations/service.py` | 新增 ConversationService（承接 9 个 Conversation 方法） |
 | `agent/coordinator/agent.py` | `_safe_emit` + `direct_answer` 的 ad-hoc token writer 统一迁到 SessionRuntime |
 | `agent/coordinator/executor.py` | `_safe_emit` → `session.emit_progress()`（进度类）或 `session.emit_event()`（业务类） |
-| `agent/domains/zero_report/agent.py` | 同上 |
-| `agent/domains/patent/agent.py` | 同上 |
-| `agent/domains/ppt/agent.py` | 清理遗留兼容入口里的 `_safe_emit` 死代码 |
-| `agent/domains/ppt/workflow.py` | 同上 |
+| `agent/workflows/zero_report/agent.py` | 同上 |
+| `agent/workflows/patent/agent.py` | 同上 |
+| `agent/workflows/ppt/agent.py` | 清理遗留兼容入口里的 `_safe_emit` 死代码 |
+| `agent/workflows/ppt/workflow.py` | 同上 |
 | `agent/platform/streaming.py` | 保留 `stream_nested_graph()` 的 transport 级透传；明确它不是业务事件写入点 |
 | `web/runtime.py` | 初始化 SessionRuntime + ConversationService 并注入 |
 | `web/routers/` | Conversation 路由从 `task_service.store.xxx` 改为 `conversation_service.xxx` |
@@ -766,10 +766,10 @@ Brain / Harness 不可以直接调用：
 > - `agent/coordinator/agent.py` 的 `_safe_emit()`
 > - `agent/coordinator/agent.py` 的 `direct_answer` token 流式 writer
 > - `agent/coordinator/executor.py` 的 `_safe_emit()`
-> - `agent/domains/patent/agent.py` 的 `_safe_emit()`
-> - `agent/domains/zero_report/agent.py` 的 `_safe_emit()`
-> - `agent/domains/ppt/workflow.py` 的 `_safe_emit()`
-> - `agent/domains/ppt/agent.py` 的遗留 `_safe_emit()`
+> - `agent/workflows/patent/agent.py` 的 `_safe_emit()`
+> - `agent/workflows/zero_report/agent.py` 的 `_safe_emit()`
+> - `agent/workflows/ppt/workflow.py` 的 `_safe_emit()`
+> - `agent/workflows/ppt/agent.py` 的遗留 `_safe_emit()`
 >
 > 这些调用都只写 LangGraph `get_stream_writer()` 流，不入 DB/Redis。v3.1 的 `session.emit_event()` 写 DB+Redis。如果把所有 writer 都改为 `session.emit_event()`，会导致大量中间进度事件（streaming_content、dag_progress 等）涌入 DB，不合理。
 
@@ -849,15 +849,15 @@ class SessionRuntime:
 - `TaskService`
 - `root_graph`
 - `Coordinator`
-- `skill_registry` 暴露的 domain skill runner（主要来自 `agent/domains/*/orchestrated.py`）
+- `skill_registry` 暴露的 domain skill runner（主要来自 `agent/workflows/*/orchestrated.py`）
 
-> **实现口径修正**：`agent/domains/*` 在当前系统里更准确的角色不是“顶层直接运行的 domain agent”，
+> **实现口径修正**：`agent/workflows/*` 在当前系统里更准确的角色不是“顶层直接运行的 domain agent”，
 > 而是“被 Coordinator/DAG 选择并调用的 domain skill runner”。
 > 也就是说：
 >
 > - 顶层编排入口是 `Coordinator`
 > - `Coordinator` 通过 `skill_registry` 选择 `do_research` / `do_patent` / `do_ppt` / `do_zero_report`
-> - 这些 skill 的实际 runner 来自 `agent/domains/*/orchestrated.py`
+> - 这些 skill 的实际 runner 来自 `agent/workflows/*/orchestrated.py`
 > - domain 内部仍然可以再创建 nested graph、deepagents agent/subagent，这属于 skill 内部实现，不是顶层调度模型
 
 它们共同负责：
@@ -1016,7 +1016,7 @@ v3.1 这里还新增一条强约束：
 
 > **代码现状修正**：
 >
-> - `agent/domains/*/orchestrated.py` 才是当前被 `skill_registry` 注册、供 DAG 选择调用的 domain skill runner 入口
+> - `agent/workflows/*/orchestrated.py` 才是当前被 `skill_registry` 注册、供 DAG 选择调用的 domain skill runner 入口
 > - `research/worker.py` + `research/tools.py` 确实是唯一直接 `import agent.tools` 的位置
 > - 但 `patent/agent.py`、`zero_report/agent.py`、`ppt/workflow.py` 在构造 deepagents agent/subagent 时，也直接把 `get_*_tools()` 的结果绑定进 `tools` 字段
 > - `research/orchestrated.py` 本身调用的是 `stream_nested_graph(_graph, ...)`，不是直接工具耦合点
@@ -1027,12 +1027,12 @@ v3.1 这里还新增一条强约束：
 > 2. 把 deepagents 域从“直接绑定本地 tool list”迁到“绑定 gateway 生成的 deepagents-compatible tool adapters”
 
 ```python
-# 改前（agent/domains/research/worker.py）
+# 改前（agent/workflows/research/worker.py）
 from agent.tools.brave_search import run as run_brave_search
 from agent.tools.academic_search import run as search_academic
 results = await run_brave_search(query)
 
-# 改前（agent/domains/research/tools.py）
+# 改前（agent/workflows/research/tools.py）
 from agent.tools.exa_search import run as search_exa
 from agent.tools.research_notes import save_research_note, recall_research_notes
 
@@ -1052,7 +1052,7 @@ await session.emit_event(state["task_id"], EventType.SKILL_FINISHED, {...})
 ```
 
 ```python
-# 改前（agent/domains/patent/agent.py）
+# 改前（agent/workflows/patent/agent.py）
 tools = get_patent_tools()
 return create_deep_agent(
     ...,
@@ -1103,11 +1103,11 @@ Domain skill runner / 域内编排层 不可以直接调用：
 | `agent/tools/local_executor.py` | 服务端工具统一适配 |
 | `agent/tools/remote_executor.py` | 桌面端 transport executor |
 | `agent/gateway/tool_gateway.py` | 统一路由与唯一事件权威点 |
-| `agent/domains/research/worker.py` | 砍掉 `from agent.tools.brave_search/academic_search import ...`，改用 gateway |
-| `agent/domains/research/tools.py` | 砍掉 `from agent.tools.exa_search/research_notes import ...`，改用 gateway |
-| `agent/domains/patent/agent.py` | deepagents toolset 不再直接取 `get_patent_tools()`，改接 gateway adapter |
-| `agent/domains/zero_report/agent.py` | deepagents toolset 不再直接取 `get_zero_report_tools()`，改接 gateway adapter |
-| `agent/domains/ppt/workflow.py` | `PPT_SUBAGENTS` 不再直接绑定 `get_ppt_tools()` 返回值 |
+| `agent/workflows/research/worker.py` | 砍掉 `from agent.tools.brave_search/academic_search import ...`，改用 gateway |
+| `agent/workflows/research/tools.py` | 砍掉 `from agent.tools.exa_search/research_notes import ...`，改用 gateway |
+| `agent/workflows/patent/agent.py` | deepagents toolset 不再直接取 `get_patent_tools()`，改接 gateway adapter |
+| `agent/workflows/zero_report/agent.py` | deepagents toolset 不再直接取 `get_zero_report_tools()`，改接 gateway adapter |
+| `agent/workflows/ppt/workflow.py` | `PPT_SUBAGENTS` 不再直接绑定 `get_ppt_tools()` 返回值 |
 | `web/routers/tasks.py` | `POST /tool_result` 只做 transport 回传 |
 | `chat-dada-front/src/hooks/useTaskStream.ts` | 适配新事件流 |
 | `chat-dada-front/src-tauri/src/commands.rs` + transport 模块 | 从本地命令桥扩展为 SSE/HTTP 双向 transport |
@@ -1343,8 +1343,8 @@ Phase 1                    Phase 2                                     Phase 3
 
 ### 9.3 Phase 3：Harness 与 Hands 解耦验证
 
-- `grep -rn "from agent\.tools\." agent/domains/` 结果应为零（当前应有 6 处在 research/worker.py + tools.py）
-- `rg -n "get_(patent|zero_report|ppt)_tools\(|\"tools\": tools|tools=\\[t for t in get_ppt_tools" agent/domains/` 结果只能出现在 gateway/adapter 层，不再出现在 domain agent/workflow
+- `grep -rn "from agent\.tools\." agent/workflows/` 结果应为零（当前应有 6 处在 research/worker.py + tools.py）
+- `rg -n "get_(patent|zero_report|ppt)_tools\(|\"tools\": tools|tools=\\[t for t in get_ppt_tools" agent/workflows/` 结果只能出现在 gateway/adapter 层，不再出现在 domain agent/workflow
 - 注入 Mock SessionRuntime + Mock ToolGateway，TaskService / Coordinator 全流程通过
 - 同一 ToolCall 分别路由到 local 和 desktop hand，返回结构一致
 - 桌面端完成一次“服务端下发 request_id → Tauri 执行 → `POST /tool_result` 回传”的闭环；只有 `invoke_tool/list_tools` 本地调用不算通过

@@ -353,7 +353,7 @@ The migration should proceed incrementally to avoid destabilizing the already-ev
 
 ### Step 1: Stabilize Current Office Workflow
 
-Keep the current `agent/domains/office/workflow.py` as the active implementation while:
+Keep the current `agent/workflows/office/workflow.py` as the active implementation while:
 
 - dynamic budgeting
 - convergence
@@ -400,19 +400,19 @@ without changing the stage skeleton again.
 
 Recommended target layout:
 
-- `agent/domains/office/core/`
+- `agent/workflows/office/core/`
   - `workflow.py`
   - `state.py`
   - `routing.py`
   - `finalize.py`
   - `errors.py`
   - `costs.py`
-- `agent/domains/office/strategies/`
+- `agent/workflows/office/strategies/`
   - `base.py`
   - `ppt.py`
   - `docx.py`
   - `xlsx.py`
-- `agent/domains/office/orchestrated.py`
+- `agent/workflows/office/orchestrated.py`
   - remains the stable external entrypoint
 
 The current implementation may temporarily keep some of this logic in `office/workflow.py` while the migration is in progress.

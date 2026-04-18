@@ -164,14 +164,17 @@ def test_skill_registry_has_research():
     assert desc.name == "do_research"
 
 
-def test_skill_summary_hides_non_selectable_ppt_and_keeps_office() -> None:
+def test_skill_summary_keeps_office_and_drops_ppt() -> None:
+    """ppt 已并入 office，registry 不应再出现 do_ppt；office 必须可被 LLM 选择。"""
     from agent.coordinator.skills import skill_registry
 
     summary = skill_registry.skill_summary_for_llm()
     assert "do_office" in summary
     assert "do_ppt" not in summary
-    assert skill_registry.get_description("do_ppt") is not None
-    assert skill_registry.get_description("do_ppt").selectable is False
+    assert skill_registry.get_description("do_ppt") is None
+    office_desc = skill_registry.get_description("do_office")
+    assert office_desc is not None
+    assert office_desc.selectable is True
 
 
 def test_skill_description_fields():

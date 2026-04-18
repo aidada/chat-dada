@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the existing staged `Office Core` pipeline (`planning -> build -> qa_fix -> finalize`), insert a shared `Reference Understanding Layer` ahead of format planning, then retrofit `PptStrategy` and add real `XlsxStrategy` / `DocxStrategy` implementations that consume merged goal and reference constraints. Use OfficeCLI `view/get/query` first, then structured mutations, then raw fallback only for narrow fidelity gaps.
 
-**Tech Stack:** Python, LangGraph, OfficeCLI (`pptx/docx/xlsx`), pytest, existing `agent/domains/office` strategy/core modules
+**Tech Stack:** Python, LangGraph, OfficeCLI (`pptx/docx/xlsx`), pytest, existing `agent/workflows/office` strategy/core modules
 
 ---
 
@@ -14,41 +14,41 @@
 
 ### Shared Office reference layer
 
-- Create: `agent/domains/office/reference_models.py`
+- Create: `agent/workflows/office/reference_models.py`
   - typed payload builders for `goal_constraints`, `reference_structure_constraints`, `reference_style_constraints`, `existing_document_profile`, `conflict_resolution`
-- Create: `agent/domains/office/reference_inspector.py`
+- Create: `agent/workflows/office/reference_inspector.py`
   - OfficeCLI-backed read helpers for reference and existing files
-- Create: `agent/domains/office/reference_profiler.py`
+- Create: `agent/workflows/office/reference_profiler.py`
   - format-aware profiling that turns inspect output into reusable constraints
-- Create: `agent/domains/office/reference_resolver.py`
+- Create: `agent/workflows/office/reference_resolver.py`
   - merges goal, reference, and existing-document profiles into strategy-ready constraints
 
 ### Workflow integration
 
-- Modify: `agent/domains/office/core/state.py`
+- Modify: `agent/workflows/office/core/state.py`
   - add `reference_files`, `goal_constraints`, `reference_*_constraints`, `existing_document_profile`, `fidelity_deviations`
-- Modify: `agent/domains/office/goal_normalizer.py`
+- Modify: `agent/workflows/office/goal_normalizer.py`
   - normalize reference file inputs and operation-specific planner hints
-- Modify: `agent/domains/office/workflow.py`
+- Modify: `agent/workflows/office/workflow.py`
   - add reference-aware planning step inputs and planner summary propagation
-- Modify: `agent/domains/office/core/build.py`
+- Modify: `agent/workflows/office/core/build.py`
   - thread merged constraints and fidelity hints into build execution
-- Modify: `agent/domains/office/core/qa.py`
+- Modify: `agent/workflows/office/core/qa.py`
   - add fidelity deviation reporting to `quality_report`
-- Modify: `agent/domains/office/orchestrated.py`
+- Modify: `agent/workflows/office/orchestrated.py`
   - carry reference metadata into final `review` and `budget`
 
 ### Strategy layer
 
-- Modify: `agent/domains/office/strategies/base.py`
+- Modify: `agent/workflows/office/strategies/base.py`
   - add reference-aware strategy interfaces
-- Modify: `agent/domains/office/strategies/ppt.py`
+- Modify: `agent/workflows/office/strategies/ppt.py`
   - consume merged constraints and retrofit reference fidelity
-- Modify: `agent/domains/office/strategies/xlsx.py`
+- Modify: `agent/workflows/office/strategies/xlsx.py`
   - replace placeholder with workbook/sheet strategy
-- Modify: `agent/domains/office/strategies/docx.py`
+- Modify: `agent/workflows/office/strategies/docx.py`
   - replace placeholder with document/section strategy
-- Modify: `agent/domains/office/strategies/__init__.py`
+- Modify: `agent/workflows/office/strategies/__init__.py`
   - keep selector stable while upgrading concrete strategies
 
 ### Runtime / diagnostics
@@ -78,14 +78,14 @@
 ## Task 1: Add Shared Reference Data Models
 
 **Files:**
-- Create: `agent/domains/office/reference_models.py`
-- Modify: `agent/domains/office/core/state.py`
+- Create: `agent/workflows/office/reference_models.py`
+- Modify: `agent/workflows/office/core/state.py`
 - Test: `tests/test_office_reference_models.py`
 
 - [ ] **Step 1: Write the failing tests for normalized reference payloads**
 
 ```python
-from agent.domains.office.reference_models import (
+from agent.workflows.office.reference_models import (
     build_conflict_resolution,
     build_existing_document_profile,
     build_goal_constraints,
@@ -128,12 +128,12 @@ def test_build_existing_document_profile_tracks_protected_units() -> None:
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_office_reference_models.py -q`
-Expected: FAIL with `ModuleNotFoundError: No module named 'agent.domains.office.reference_models'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'agent.workflows.office.reference_models'`
 
 - [ ] **Step 3: Write minimal reference model builders**
 
 ```python
-# agent/domains/office/reference_models.py
+# agent/workflows/office/reference_models.py
 from __future__ import annotations
 
 from typing import Any
@@ -180,7 +180,7 @@ def build_conflict_resolution() -> dict[str, Any]:
 - [ ] **Step 4: Extend Office workflow state with reference fields**
 
 ```python
-# agent/domains/office/core/state.py
+# agent/workflows/office/core/state.py
 class OfficeWorkflowState(TypedDict, total=False):
     reference_files: list[str]
     goal_constraints: dict[str, Any]
@@ -198,23 +198,23 @@ Expected: PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/domains/office/reference_models.py agent/domains/office/core/state.py tests/test_office_reference_models.py
+git add agent/workflows/office/reference_models.py agent/workflows/office/core/state.py tests/test_office_reference_models.py
 git commit -m "feat: add office reference constraint models"
 ```
 
 ## Task 2: Build ReferenceInspector, ReferenceProfiler, and ConstraintResolver
 
 **Files:**
-- Create: `agent/domains/office/reference_inspector.py`
-- Create: `agent/domains/office/reference_profiler.py`
-- Create: `agent/domains/office/reference_resolver.py`
+- Create: `agent/workflows/office/reference_inspector.py`
+- Create: `agent/workflows/office/reference_profiler.py`
+- Create: `agent/workflows/office/reference_resolver.py`
 - Test: `tests/test_office_reference_layer.py`
 
 - [ ] **Step 1: Write the failing tests for reference inspection and resolution**
 
 ```python
-from agent.domains.office.reference_profiler import profile_reference_payload
-from agent.domains.office.reference_resolver import resolve_reference_constraints
+from agent.workflows.office.reference_profiler import profile_reference_payload
+from agent.workflows.office.reference_resolver import resolve_reference_constraints
 
 
 def test_profile_reference_payload_for_ppt_extracts_structure_and_style() -> None:
@@ -250,7 +250,7 @@ Expected: FAIL with import errors for the new modules
 - [ ] **Step 3: Add minimal inspection wrappers around OfficeCLI reads**
 
 ```python
-# agent/domains/office/reference_inspector.py
+# agent/workflows/office/reference_inspector.py
 from __future__ import annotations
 
 from typing import Any
@@ -275,7 +275,7 @@ async def inspect_reference_file(*, format_name: str, file_path: str) -> dict[st
 - [ ] **Step 4: Add structured profiling and merging**
 
 ```python
-# agent/domains/office/reference_profiler.py
+# agent/workflows/office/reference_profiler.py
 from __future__ import annotations
 
 from typing import Any
@@ -295,12 +295,12 @@ def profile_reference_payload(*, format_name: str, inspect_payload: dict[str, An
     }
 
 
-# agent/domains/office/reference_resolver.py
+# agent/workflows/office/reference_resolver.py
 from __future__ import annotations
 
 from typing import Any
 
-from agent.domains.office.reference_models import build_conflict_resolution
+from agent.workflows.office.reference_models import build_conflict_resolution
 
 
 def resolve_reference_constraints(
@@ -327,17 +327,17 @@ Expected: PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/domains/office/reference_inspector.py agent/domains/office/reference_profiler.py agent/domains/office/reference_resolver.py tests/test_office_reference_layer.py
+git add agent/workflows/office/reference_inspector.py agent/workflows/office/reference_profiler.py agent/workflows/office/reference_resolver.py tests/test_office_reference_layer.py
 git commit -m "feat: add office reference inspection and resolution layer"
 ```
 
 ## Task 3: Integrate Reference Constraints Into Office Workflow Planning
 
 **Files:**
-- Modify: `agent/domains/office/goal_normalizer.py`
-- Modify: `agent/domains/office/workflow.py`
-- Modify: `agent/domains/office/strategies/base.py`
-- Modify: `agent/domains/office/strategies/default.py`
+- Modify: `agent/workflows/office/goal_normalizer.py`
+- Modify: `agent/workflows/office/workflow.py`
+- Modify: `agent/workflows/office/strategies/base.py`
+- Modify: `agent/workflows/office/strategies/default.py`
 - Test: `tests/test_office_domain.py`
 
 - [ ] **Step 1: Write the failing workflow test for reference-aware planning**
@@ -348,7 +348,7 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_planning_node_carries_reference_constraints_into_task_profile() -> None:
-    from agent.domains.office.workflow import planning_node
+    from agent.workflows.office.workflow import planning_node
 
     result = await planning_node(
         {
@@ -378,7 +378,7 @@ Expected: FAIL because reference-aware planner inputs are ignored
 - [ ] **Step 3: Normalize reference files and goal constraints in preflight**
 
 ```python
-# agent/domains/office/goal_normalizer.py
+# agent/workflows/office/goal_normalizer.py
 def normalize_goal_profile(
     *,
     goal: str,
@@ -398,7 +398,7 @@ def normalize_goal_profile(
 ```
 
 ```python
-# agent/domains/office/workflow.py
+# agent/workflows/office/workflow.py
 return {
     "format": format_name,
     "operation": operation,
@@ -417,7 +417,7 @@ return {
 - [ ] **Step 4: Make strategy contracts accept merged constraints**
 
 ```python
-# agent/domains/office/strategies/base.py
+# agent/workflows/office/strategies/base.py
 class OfficeFormatStrategy(Protocol):
     def build_plan(
         self,
@@ -432,7 +432,7 @@ class OfficeFormatStrategy(Protocol):
 ```
 
 ```python
-# agent/domains/office/strategies/default.py
+# agent/workflows/office/strategies/default.py
 def build_plan(
     self,
     *,
@@ -462,7 +462,7 @@ def build_plan(
 - [ ] **Step 5: Update planning node to pass merged constraints**
 
 ```python
-# agent/domains/office/workflow.py
+# agent/workflows/office/workflow.py
 merged_constraints = {
     "goal_constraints": dict(state.get("goal_constraints") or {}),
     "reference_structure_constraints": dict(state.get("reference_structure_constraints") or {}),
@@ -486,23 +486,23 @@ Expected: PASS
 - [ ] **Step 7: Commit**
 
 ```bash
-git add agent/domains/office/goal_normalizer.py agent/domains/office/workflow.py agent/domains/office/strategies/base.py agent/domains/office/strategies/default.py tests/test_office_domain.py
+git add agent/workflows/office/goal_normalizer.py agent/workflows/office/workflow.py agent/workflows/office/strategies/base.py agent/workflows/office/strategies/default.py tests/test_office_domain.py
 git commit -m "feat: thread reference constraints through office planning"
 ```
 
 ## Task 4: Retrofit PptStrategy To Consume Reference Constraints
 
 **Files:**
-- Modify: `agent/domains/office/strategies/ppt.py`
-- Modify: `agent/domains/office/core/build.py`
-- Modify: `agent/domains/office/core/qa.py`
+- Modify: `agent/workflows/office/strategies/ppt.py`
+- Modify: `agent/workflows/office/core/build.py`
+- Modify: `agent/workflows/office/core/qa.py`
 - Test: `tests/test_office_domain.py`
 
 - [ ] **Step 1: Write the failing tests for PPT reference-aligned planning and QA**
 
 ```python
 def test_ppt_strategy_build_plan_uses_reference_slide_names() -> None:
-    from agent.domains.office.strategies.ppt import PptStrategy
+    from agent.workflows.office.strategies.ppt import PptStrategy
 
     plan = PptStrategy().build_plan(
         goal="按参考案例生成 6 页产品介绍",
@@ -520,7 +520,7 @@ def test_ppt_strategy_build_plan_uses_reference_slide_names() -> None:
 
 
 def test_ppt_quality_report_can_record_reference_deviation() -> None:
-    from agent.domains.office.strategies.ppt import PptStrategy
+    from agent.workflows.office.strategies.ppt import PptStrategy
 
     issues = PptStrategy().evaluate_quality_stats(
         operation="create",
@@ -538,7 +538,7 @@ Expected: FAIL because `PptStrategy.build_plan()` does not accept or use `merged
 - [ ] **Step 3: Use reference structure and style tokens in PPT planning**
 
 ```python
-# agent/domains/office/strategies/ppt.py
+# agent/workflows/office/strategies/ppt.py
 def build_plan(
     self,
     *,
@@ -578,7 +578,7 @@ def build_plan(
 - [ ] **Step 4: Thread fidelity hints into build and QA**
 
 ```python
-# agent/domains/office/core/build.py
+# agent/workflows/office/core/build.py
 input_msg = "\n".join(
     strategy.build_input_sections(
         goal=str(state.get("goal", "") or ""),
@@ -599,7 +599,7 @@ input_msg = "\n".join(
 ```
 
 ```python
-# agent/domains/office/core/qa.py
+# agent/workflows/office/core/qa.py
 quality_report = build_quality_report(
     format_name=str(state.get("format", "") or state.get("format_hint", "") or ""),
     operation=operation,
@@ -622,23 +622,23 @@ Expected: PASS for existing PPT tests and new reference-aware PPT tests
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/domains/office/strategies/ppt.py agent/domains/office/core/build.py agent/domains/office/core/qa.py tests/test_office_domain.py
+git add agent/workflows/office/strategies/ppt.py agent/workflows/office/core/build.py agent/workflows/office/core/qa.py tests/test_office_domain.py
 git commit -m "feat: retrofit ppt strategy for reference-driven planning"
 ```
 
 ## Task 5: Replace XlsxStrategy Placeholder With WorkbookPlanner and SheetBuilder
 
 **Files:**
-- Modify: `agent/domains/office/strategies/xlsx.py`
-- Modify: `agent/domains/office/strategies/__init__.py`
-- Modify: `agent/domains/office/core/qa.py`
+- Modify: `agent/workflows/office/strategies/xlsx.py`
+- Modify: `agent/workflows/office/strategies/__init__.py`
+- Modify: `agent/workflows/office/core/qa.py`
 - Test: `tests/test_office_domain.py`
 
 - [ ] **Step 1: Write the failing tests for workbook planning**
 
 ```python
 def test_xlsx_strategy_builds_sheet_plan_from_goal_and_reference() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成一个预算分析表，包含 RawData、Summary、Dashboard",
@@ -665,7 +665,7 @@ Expected: FAIL because `XlsxStrategy` is still a placeholder
 - [ ] **Step 3: Implement minimal workbook planner and builder helpers**
 
 ```python
-# agent/domains/office/strategies/xlsx.py
+# agent/workflows/office/strategies/xlsx.py
 from __future__ import annotations
 
 from typing import Any
@@ -711,7 +711,7 @@ class XlsxStrategy:
 - [ ] **Step 4: Add XLSX-specific quality checks**
 
 ```python
-# agent/domains/office/strategies/xlsx.py
+# agent/workflows/office/strategies/xlsx.py
 def evaluate_quality_stats(self, *, operation: str, stats: dict[str, Any]) -> list[dict[str, Any]]:
     if operation not in {"create", "edit", "transform"}:
         return []
@@ -728,22 +728,22 @@ Expected: PASS for new XLSX tests and selector compatibility tests
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/domains/office/strategies/xlsx.py agent/domains/office/strategies/__init__.py agent/domains/office/core/qa.py tests/test_office_domain.py
+git add agent/workflows/office/strategies/xlsx.py agent/workflows/office/strategies/__init__.py agent/workflows/office/core/qa.py tests/test_office_domain.py
 git commit -m "feat: add xlsx reference-driven strategy"
 ```
 
 ## Task 6: Replace DocxStrategy Placeholder With DocumentPlanner and SectionWriter
 
 **Files:**
-- Modify: `agent/domains/office/strategies/docx.py`
-- Modify: `agent/domains/office/core/qa.py`
+- Modify: `agent/workflows/office/strategies/docx.py`
+- Modify: `agent/workflows/office/core/qa.py`
 - Test: `tests/test_office_domain.py`
 
 - [ ] **Step 1: Write the failing tests for DOCX planning**
 
 ```python
 def test_docx_strategy_builds_section_plan_from_goal_and_reference() -> None:
-    from agent.domains.office.strategies.docx import DocxStrategy
+    from agent.workflows.office.strategies.docx import DocxStrategy
 
     plan = DocxStrategy().build_plan(
         goal="生成一份项目方案，包含背景、目标、实施计划、风险控制",
@@ -770,7 +770,7 @@ Expected: FAIL because `DocxStrategy` is still a placeholder
 - [ ] **Step 3: Implement minimal document planner**
 
 ```python
-# agent/domains/office/strategies/docx.py
+# agent/workflows/office/strategies/docx.py
 from __future__ import annotations
 
 from typing import Any
@@ -811,7 +811,7 @@ class DocxStrategy:
 - [ ] **Step 4: Add DOCX-specific QA checks**
 
 ```python
-# agent/domains/office/strategies/docx.py
+# agent/workflows/office/strategies/docx.py
 def evaluate_quality_stats(self, *, operation: str, stats: dict[str, Any]) -> list[dict[str, Any]]:
     if operation not in {"create", "edit", "transform"}:
         return []
@@ -828,15 +828,15 @@ Expected: PASS for new DOCX tests and selector compatibility tests
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/domains/office/strategies/docx.py agent/domains/office/core/qa.py tests/test_office_domain.py
+git add agent/workflows/office/strategies/docx.py agent/workflows/office/core/qa.py tests/test_office_domain.py
 git commit -m "feat: add docx reference-driven strategy"
 ```
 
 ## Task 7: Add Fidelity Diagnostics To QA, Result Summaries, and Cost Ledger
 
 **Files:**
-- Modify: `agent/domains/office/core/quality_report.py`
-- Modify: `agent/domains/office/orchestrated.py`
+- Modify: `agent/workflows/office/core/quality_report.py`
+- Modify: `agent/workflows/office/orchestrated.py`
 - Modify: `agent/runtime/cost_logging.py`
 - Modify: `agent/runtime/task_execution.py`
 - Modify: `tests/test_cost_logging.py`
@@ -845,7 +845,7 @@ git commit -m "feat: add docx reference-driven strategy"
 - [ ] **Step 1: Write the failing tests for fidelity summaries**
 
 ```python
-from agent.domains.office.core.quality_report import build_quality_report, summarize_quality_report
+from agent.workflows.office.core.quality_report import build_quality_report, summarize_quality_report
 
 
 def test_quality_report_summary_includes_fidelity_deviations() -> None:
@@ -876,7 +876,7 @@ Expected: FAIL because fidelity deviations are not summarized
 - [ ] **Step 3: Extend quality reports and ledger summaries**
 
 ```python
-# agent/domains/office/core/quality_report.py
+# agent/workflows/office/core/quality_report.py
 def summarize_quality_report(report: dict[str, Any] | None) -> dict[str, Any]:
     active = dict(report or {})
     summary = {
@@ -920,7 +920,7 @@ def summarize_cost_ledger(ledger: dict[str, Any] | None) -> dict[str, Any]:
 - [ ] **Step 4: Surface fidelity deviations in orchestrated/task summaries**
 
 ```python
-# agent/domains/office/orchestrated.py
+# agent/workflows/office/orchestrated.py
 review={
     "passed": passed,
     "reason": "Office task completed" if passed else "Office task missing validated artifacts",
@@ -940,7 +940,7 @@ Expected: PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/domains/office/core/quality_report.py agent/domains/office/orchestrated.py agent/runtime/cost_logging.py agent/runtime/task_execution.py tests/test_cost_logging.py tests/test_office_domain.py
+git add agent/workflows/office/core/quality_report.py agent/workflows/office/orchestrated.py agent/runtime/cost_logging.py agent/runtime/task_execution.py tests/test_cost_logging.py tests/test_office_domain.py
 git commit -m "feat: add fidelity diagnostics to office quality summaries"
 ```
 
@@ -956,7 +956,7 @@ git commit -m "feat: add fidelity diagnostics to office quality summaries"
 ```python
 @pytest.mark.asyncio
 async def test_ppt_reference_edit_keeps_goal_first() -> None:
-    from agent.domains.office.reference_resolver import resolve_reference_constraints
+    from agent.workflows.office.reference_resolver import resolve_reference_constraints
 
     merged = resolve_reference_constraints(
         goal_constraints={"hard_requirements": ["6 slides"]},
@@ -970,7 +970,7 @@ async def test_ppt_reference_edit_keeps_goal_first() -> None:
 
 @pytest.mark.asyncio
 async def test_xlsx_reference_create_builds_expected_sheet_topology() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="创建预算分析表",
@@ -985,7 +985,7 @@ async def test_xlsx_reference_create_builds_expected_sheet_topology() -> None:
 
 @pytest.mark.asyncio
 async def test_docx_reference_edit_protects_non_target_sections() -> None:
-    from agent.domains.office.reference_resolver import resolve_reference_constraints
+    from agent.workflows.office.reference_resolver import resolve_reference_constraints
 
     merged = resolve_reference_constraints(
         goal_constraints={"hard_requirements": ["update risks"]},

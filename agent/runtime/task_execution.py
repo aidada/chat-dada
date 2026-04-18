@@ -30,7 +30,7 @@ from agent.runtime.cost_logging import (
     merge_tool_events_into_ledger,
     summarize_cost_ledger,
 )
-from agent.domains.office.core.quality_report import quality_report_summary_lines, summarize_quality_report
+from agent.workflows.office.core.quality_report import quality_report_summary_lines, summarize_quality_report
 from core.langsmith_config import build_langsmith_run_config
 from core.logger import monitor, new_trace_id
 from core.models import set_thinking_level
@@ -84,6 +84,17 @@ def parse_step_payload(step_info: str) -> tuple[str, dict[str, Any]]:
 
 def _merge_nested_interrupt_pending(current_pending: bool, payload: dict[str, Any]) -> bool:
     return current_pending or bool(payload.get("nested_graph"))
+
+
+def _merge_quality_report_summary(
+    quality_report: dict[str, Any] | None,
+    *summary_sources: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = summarize_quality_report(quality_report)
+    for source in summary_sources:
+        if isinstance(source, dict):
+            merged.update({key: value for key, value in source.items() if value is not None})
+    return merged
 
 
 class TaskService:
@@ -776,8 +787,13 @@ class TaskService:
             review = dict(latest_snapshot.get("review") or {})
             artifact_refs = list(latest_snapshot.get("artifact_refs") or [])
             quality_report = dict(review.get("quality_report") or {})
-            quality_report_summary = summarize_quality_report(quality_report)
             cost_ledger = dict(budget.get("cost_ledger") or {})
+            quality_report_summary = _merge_quality_report_summary(
+                quality_report,
+                review.get("quality_report_summary") if isinstance(review.get("quality_report_summary"), dict) else None,
+                budget.get("quality_report_summary") if isinstance(budget.get("quality_report_summary"), dict) else None,
+                cost_ledger.get("quality_report_summary") if isinstance(cost_ledger.get("quality_report_summary"), dict) else None,
+            )
             partial_progress = dict(review.get("partial_progress") or cost_ledger.get("partial_progress") or {})
             if not cost_ledger:
                 cost_ledger = init_cost_ledger(task_id=task_id, domain="office")
@@ -799,8 +815,9 @@ class TaskService:
             )
             budget["cost_ledger"] = summarize_cost_ledger(cost_ledger)
             budget["monitoring_summary"] = summary
-            if quality_report:
+            if quality_report_summary:
                 budget["quality_report_summary"] = quality_report_summary
+                review["quality_report_summary"] = quality_report_summary
 
             result_text = str(latest_snapshot.get("result_text", "") or "")
             if (
@@ -818,7 +835,7 @@ class TaskService:
                 last_success = diagnostics.get("last_successful_tool") or {}
                 if last_success.get("command"):
                     detail_lines.append(f"最后一次成功工具调用: {last_success['command']}")
-                detail_lines.extend(quality_report_summary_lines(quality_report))
+                detail_lines.extend(quality_report_summary_lines(quality_report_summary))
                 if detail_lines:
                     result_text = f"{result_text}\n" + "\n".join(detail_lines)
                     await self._session.set_result_text(task_id, result_text)

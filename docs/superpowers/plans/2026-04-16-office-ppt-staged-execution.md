@@ -67,8 +67,8 @@ Scope:
 Primary files:
 
 - `agent/tools/officecli.py`
-- `agent/domains/office/workflow.py`
-- `agent/domains/office/orchestrated.py`
+- `agent/workflows/office/workflow.py`
+- `agent/workflows/office/orchestrated.py`
 - `agent/runtime/task_execution.py`
 - relevant event/session persistence modules
 
@@ -98,12 +98,12 @@ Scope:
 
 Primary files:
 
-- `agent/domains/office/workflow.py`
-- `agent/domains/office/orchestrated.py`
+- `agent/workflows/office/workflow.py`
+- `agent/workflows/office/orchestrated.py`
 - new helper modules such as:
-  - `agent/domains/office/planner.py`
-  - `agent/domains/office/builder.py`
-  - `agent/domains/office/qa.py`
+  - `agent/workflows/office/planner.py`
+  - `agent/workflows/office/builder.py`
+  - `agent/workflows/office/qa.py`
 
 Exit criteria:
 
@@ -137,8 +137,8 @@ Scope:
 
 Primary files:
 
-- `agent/domains/office/workflow.py`
-- `agent/domains/office/qa.py`
+- `agent/workflows/office/workflow.py`
+- `agent/workflows/office/qa.py`
 - `agent/coordinator/prompts.py`
 - filename inference and planner output helpers
 
@@ -280,20 +280,20 @@ Dependencies:
 
 - `agent/coordinator/prompts.py`
 - `agent/coordinator/agent.py`
-- `agent/domains/office/workflow.py`
-- `agent/domains/office/orchestrated.py`
+- `agent/workflows/office/workflow.py`
+- `agent/workflows/office/orchestrated.py`
 - `agent/tools/officecli.py`
 - `agent/runtime/task_execution.py`
 - relevant session/event logging modules
 
 ### New files expected
 
-- `agent/domains/office/planner.py`
-- `agent/domains/office/builder.py`
-- `agent/domains/office/qa.py`
-- `agent/domains/office/core/state.py`
-- `agent/domains/office/core/routing.py`
-- `agent/domains/office/core/finalize.py`
+- `agent/workflows/office/planner.py`
+- `agent/workflows/office/builder.py`
+- `agent/workflows/office/qa.py`
+- `agent/workflows/office/core/state.py`
+- `agent/workflows/office/core/routing.py`
+- `agent/workflows/office/core/finalize.py`
 - optional cost helper module if current runtime/task execution abstractions are too coupled
 
 ## Migration Sequence
@@ -301,7 +301,7 @@ Dependencies:
 1. Stabilize the current staged Office workflow in place.
 2. Extract shared state/routing/finalize/cost helpers into `office/core/`.
 3. Move PPT-specific planning and quality logic into `office/strategies/ppt.py`.
-4. Reduce `agent/domains/ppt/` to a compatibility wrapper over the Office strategy.
+4. Reduce `agent/workflows/ppt/` to a compatibility wrapper over the Office strategy.
 5. Only then add `docx` and `xlsx` strategies.
 
 This sequence ensures we do not combine:

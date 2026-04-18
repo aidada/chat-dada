@@ -11,9 +11,9 @@ from unittest.mock import patch
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 
-from agent.domains.patent.agent import run_patent_domain
-from agent.domains.research.orchestrated import run_research_domain_orchestrated
-from agent.domains.zero_report.agent import run_zero_report_domain
+from agent.workflows.patent.agent import run_patent_domain
+from agent.workflows.research.orchestrated import run_research_domain_orchestrated
+from agent.workflows.zero_report.agent import run_zero_report_domain
 from agent.runtime.interaction import (
     ask_user,
     reset_preloaded_user_replies,
@@ -375,7 +375,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "agent.domains.research.orchestrated.stream_nested_graph",
+                    "agent.workflows.research.orchestrated.stream_nested_graph",
                     new=AsyncMock(
                         return_value={
                             "final_result": "## 文献综述正文\n\n研究结果 https://example.com/paper",
@@ -388,7 +388,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ) as mocked,
-                patch("agent.domains.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+                patch("agent.workflows.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
             ):
                 result = await run_research_domain_orchestrated({"query": "test query", "task_id": "research_test"})
                 report_exists = (tmp_root / "research_test" / "final_report.md").exists()
@@ -426,7 +426,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "agent.domains.research.orchestrated.stream_nested_graph",
+                    "agent.workflows.research.orchestrated.stream_nested_graph",
                     new=AsyncMock(
                         return_value={
                             "final_result": "research final https://example.com",
@@ -436,9 +436,9 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ) as mocked,
-                patch("agent.domains.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+                patch("agent.workflows.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
             ):
-                from agent.domains.research.orchestrated import run_research_domain_orchestrated
+                from agent.workflows.research.orchestrated import run_research_domain_orchestrated
 
                 result = await run_research_domain_orchestrated({"query": "研究主题", "task_id": "task_r"})
                 report_exists = (tmp_root / "task_r" / "final_report.md").exists()
@@ -473,7 +473,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "agent.domains.research.orchestrated.stream_nested_graph",
+                    "agent.workflows.research.orchestrated.stream_nested_graph",
                     new=AsyncMock(
                         return_value={
                             "aggregated_draft": "## 中间稿\n\n可作为最终兜底输出",
@@ -481,7 +481,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ),
-                patch("agent.domains.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+                patch("agent.workflows.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
             ):
                 result = await run_research_domain_orchestrated({"query": "研究主题", "task_id": "task_r_fallback"})
 
@@ -493,7 +493,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock, patch
 
         from agent.capabilities.memory import ResearchMemory as BaseResearchMemory
-        from agent.domains.research.workflow import CHECKPOINT_C_PROMPT
+        from agent.workflows.research.workflow import CHECKPOINT_C_PROMPT
 
         with TemporaryDirectory() as tmp_dir:
             tmp_root = Path(tmp_dir)
@@ -521,11 +521,11 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "agent.domains.research.orchestrated.stream_nested_graph",
+                    "agent.workflows.research.orchestrated.stream_nested_graph",
                     new=AsyncMock(),
                 ) as mocked_stream,
                 patch(
-                    "agent.domains.research.orchestrated.synthesize_final_payload",
+                    "agent.workflows.research.orchestrated.synthesize_final_payload",
                     new=AsyncMock(
                         return_value={
                             "final_result": "## 最终研究输出\n\n已直接收束到最终稿。",
@@ -533,7 +533,7 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ) as mocked_synth,
-                patch("agent.domains.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
+                patch("agent.workflows.research.orchestrated.ResearchMemory", side_effect=_memory_factory),
             ):
                 result = await run_research_domain_orchestrated(
                     {
@@ -555,111 +555,6 @@ class ResearchDomainTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已直接收束到最终稿", result.result)
         self.assertTrue(result.review["passed"])
         self.assertTrue(any(ref["name"] == "final_report.md" for ref in result.artifact_refs))
-
-
-class PptDomainTests(unittest.IsolatedAsyncioTestCase):
-    async def test_ppt_sequential_workflow_accepts_custom_base_chat_model(self) -> None:
-        from unittest.mock import AsyncMock
-
-        from agent.brain.registry import registry
-        from agent.domains.ppt.workflow import PPT_INNER_RECURSION_LIMIT, exec_sequential
-
-        try:
-            registry.update("orchestrator", model="MiniMax-M2.7-highspeed", provider="minimax")
-            with (
-                patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key"}, clear=False),
-                patch(
-                    "agent.domains.ppt.workflow.stream_nested_graph",
-                    new=AsyncMock(return_value={"messages": [AIMessage(content="ppt final")]}),
-                ) as mocked_stream,
-                patch("agent.domains.ppt.workflow.get_ppt_tools", return_value=[]),
-                patch("agent.domains.ppt.workflow.PPT_SUBAGENTS", []),
-                patch("agent.domains.ppt.workflow._load_officecli_skill", return_value=""),
-            ):
-                result = await exec_sequential({"goal": "介绍一下你自己", "intermediate_results": []})
-        finally:
-            registry.reset()
-
-        mocked_stream.assert_awaited_once()
-        self.assertEqual(
-            mocked_stream.await_args.kwargs["config"]["recursion_limit"],
-            PPT_INNER_RECURSION_LIMIT,
-        )
-        self.assertEqual(
-            mocked_stream.await_args.kwargs["config"]["configurable"]["nested_recursion_limit"],
-            PPT_INNER_RECURSION_LIMIT,
-        )
-        self.assertEqual(
-            result,
-            {"intermediate_results": [{"strategy": "sequential", "output": "ppt final"}]},
-        )
-
-    async def test_ppt_sequential_workflow_bounded_failure_on_recursion_limit(self) -> None:
-        from unittest.mock import AsyncMock
-
-        from agent.brain.registry import registry
-        from agent.domains.ppt.workflow import exec_sequential
-        from langgraph.errors import GraphRecursionError
-
-        try:
-            registry.update("orchestrator", model="MiniMax-M2.7-highspeed", provider="minimax")
-            with (
-                patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key"}, clear=False),
-                patch(
-                    "agent.domains.ppt.workflow.stream_nested_graph",
-                    new=AsyncMock(side_effect=GraphRecursionError("limit")),
-                ),
-                patch("agent.domains.ppt.workflow.get_ppt_tools", return_value=[]),
-                patch("agent.domains.ppt.workflow.PPT_SUBAGENTS", []),
-                patch("agent.domains.ppt.workflow._load_officecli_skill", return_value=""),
-            ):
-                result = await exec_sequential({"goal": "介绍一下你自己", "intermediate_results": []})
-        finally:
-            registry.reset()
-
-        self.assertEqual(result["terminal_status"], "bounded_failure")
-        self.assertEqual(result["terminal_reason"], "inner_recursion_limit")
-        self.assertIn("超过", result["final_result"])
-        self.assertFalse(result["evaluations"][0]["passed"])
-
-    async def test_ppt_review_pass_does_not_emit_review_stream_event(self) -> None:
-        from unittest.mock import AsyncMock
-
-        from agent.domains.ppt.workflow import evaluate_node
-
-        collected: list[dict[str, object]] = []
-        fake_review = SimpleNamespace(passed=True, issues=[])
-
-        with (
-            patch("langgraph.config.get_stream_writer", return_value=collected.append),
-            patch("agent.domains.ppt.workflow.ReviewGate.evaluate", new=AsyncMock(return_value=fake_review)),
-        ):
-            result = await evaluate_node(
-                {"intermediate_results": [{"strategy": "sequential", "output": "ppt body"}]}
-            )
-
-        self.assertEqual(result["final_result"], "ppt body")
-        self.assertEqual([payload.get("event_type") for payload in collected], ["progress.step"])
-        self.assertEqual(collected[0]["content"], "PPT review passed")
-
-    async def test_ppt_evaluate_short_circuits_terminal_failure(self) -> None:
-        from agent.domains.ppt.workflow import evaluate_node
-
-        result = await evaluate_node(
-            {
-                "terminal_status": "bounded_failure",
-                "terminal_reason": "inner_recursion_limit",
-                "final_result": "PPT 生成已中止",
-                "confidence": 0.0,
-            }
-        )
-
-        self.assertEqual(result["final_result"], "PPT 生成已中止")
-        self.assertFalse(result["evaluations"][0]["passed"])
-        self.assertEqual(
-            result["evaluations"][0]["issues"][0]["metadata"]["terminal_status"],
-            "bounded_failure",
-        )
 
 
 class NestedStreamingTests(unittest.IsolatedAsyncioTestCase):
@@ -716,7 +611,7 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key"}, clear=False),
                 patch("deepagents.create_deep_agent") as mocked,
             ):
-                from agent.domains.patent.agent import build_deepagents_patent_agent
+                from agent.workflows.patent.agent import build_deepagents_patent_agent
 
                 mocked.return_value = object()
                 result = await build_deepagents_patent_agent()
@@ -743,7 +638,7 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
             tmp_root = Path(tmp_dir)
             with (
                 patch(
-                    "agent.domains.patent.orchestrated.stream_nested_graph",
+                    "agent.workflows.patent.orchestrated.stream_nested_graph",
                     new=AsyncMock(
                         return_value={
                             "final_result": "patent final",
@@ -752,10 +647,10 @@ class PatentDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ) as mocked,
-                patch("agent.domains.patent.agent.PATENT_DATA_ROOT", tmp_root),
-                patch("agent.domains.patent.orchestrated.PATENT_DATA_ROOT", tmp_root),
+                patch("agent.workflows.patent.agent.PATENT_DATA_ROOT", tmp_root),
+                patch("agent.workflows.patent.orchestrated.PATENT_DATA_ROOT", tmp_root),
             ):
-                from agent.domains.patent.orchestrated import run_patent_domain_orchestrated
+                from agent.workflows.patent.orchestrated import run_patent_domain_orchestrated
 
                 result = await run_patent_domain_orchestrated({"query": "专利任务", "task_id": "task_p"})
                 report_exists = (tmp_root / "task_p" / "patent_draft.md").exists()
@@ -816,7 +711,7 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
                 patch("langchain_google_genai.ChatGoogleGenerativeAI", new=_FakeGeminiLLM),
                 patch("deepagents.create_deep_agent") as mocked,
             ):
-                from agent.domains.zero_report.agent import build_deepagents_zero_report_agent
+                from agent.workflows.zero_report.agent import build_deepagents_zero_report_agent
 
                 mocked.return_value = object()
                 result = await build_deepagents_zero_report_agent()
@@ -843,7 +738,7 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
             tmp_root = Path(tmp_dir)
             with (
                 patch(
-                    "agent.domains.zero_report.orchestrated.stream_nested_graph",
+                    "agent.workflows.zero_report.orchestrated.stream_nested_graph",
                     new=AsyncMock(
                         return_value={
                             "final_result": "zero report final",
@@ -852,10 +747,10 @@ class ZeroReportDomainTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ) as mocked,
-                patch("agent.domains.zero_report.agent.ZERO_REPORT_DATA_ROOT", tmp_root),
-                patch("agent.domains.zero_report.orchestrated.ZERO_REPORT_DATA_ROOT", tmp_root),
+                patch("agent.workflows.zero_report.agent.ZERO_REPORT_DATA_ROOT", tmp_root),
+                patch("agent.workflows.zero_report.orchestrated.ZERO_REPORT_DATA_ROOT", tmp_root),
             ):
-                from agent.domains.zero_report.orchestrated import run_zero_report_domain_orchestrated
+                from agent.workflows.zero_report.orchestrated import run_zero_report_domain_orchestrated
 
                 result = await run_zero_report_domain_orchestrated({"query": "归零任务", "task_id": "task_z"})
                 report_exists = (tmp_root / "task_z" / "zero_report.md").exists()
@@ -1047,6 +942,122 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["configurable"]["checkpoint_id"], "cp-running")
         service._session.finish_task.assert_awaited_once_with("task_running", "succeeded")
         usage_service.record_task_usage.assert_awaited_once()
+
+    async def test_execute_task_resume_renders_merged_quality_summary_when_raw_report_is_stale(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from agent.runtime.task_execution import TaskService
+
+        class FakeRootGraph:
+            async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
+                if False:
+                    yield None
+                return
+
+            async def aget_state(self, config):
+                return SimpleNamespace(
+                    values={
+                        "final_result": "resume ok",
+                        "artifact_refs": [],
+                        "review": {},
+                        "budget": {},
+                    }
+                )
+
+        session_cm = AsyncMock()
+        session = MagicMock()
+        session.commit = AsyncMock()
+        session_cm.__aenter__.return_value = session
+        session_cm.__aexit__.return_value = False
+        usage_service = MagicMock()
+        usage_service.estimate_cost_from_usage.return_value = 0.0
+        usage_service.estimate_cost_usd.return_value = 0.0
+        usage_service.record_task_usage = AsyncMock()
+
+        quality_summary = {
+            "status": "hard_fail",
+            "passed": False,
+            "issue_count": 1,
+            "error_count": 1,
+            "warning_count": 0,
+            "slide_count": 6,
+            "visual_slide_count": 4,
+            "text_only_slide_count": 1,
+            "layout_variety_count": 3,
+            "fidelity_deviation_count": 1,
+            "terminal_reason": "inner_recursion_limit",
+        }
+
+        service = TaskService(
+            session=AsyncMock(),
+            redis=AsyncMock(),
+            checkpointer_factory=lambda: object(),
+            conversation_context_builder_factory=MagicMock,
+        )
+        service._root_graph = FakeRootGraph()
+        service._session.get_task = AsyncMock(
+            side_effect=[
+                {
+                    "task_id": "task_running",
+                    "task": "恢复任务",
+                    "user_id": "user-1",
+                    "mode": "auto",
+                    "thinking_level": "medium",
+                    "file_paths": [],
+                    "conversation_id": "",
+                    "request_payload": {"execution_path": "office"},
+                    "route_name": "office",
+                    "route_reason": "placeholder for coordinator routing",
+                    "route_confidence": 0.0,
+                    "latest_checkpoint_id": "cp-running",
+                },
+                {
+                    "task_id": "task_running",
+                    "result_text": "Office 任务已中止：内层 agent 超过 84 步仍未收敛",
+                    "artifact_refs": [],
+                    "review": {
+                        "passed": False,
+                        "reason": "inner_recursion_limit",
+                        "quality_report": {
+                            "status": "hard_fail",
+                            "passed": False,
+                            "issue_count": 1,
+                            "error_count": 1,
+                            "warning_count": 0,
+                        },
+                        "quality_report_summary": quality_summary,
+                    },
+                    "budget": {
+                        "cost_ledger": {
+                            "task_id": "task_running",
+                            "domain": "office",
+                            "quality_report_summary": quality_summary,
+                        }
+                    },
+                },
+            ]
+        )
+        service._session.get_events = AsyncMock(return_value=[])
+        service._session.get_clarification_history = AsyncMock(return_value=[])
+        service._session.update_projection = AsyncMock()
+        service._session.set_result_text = AsyncMock()
+        service._session.finish_task = AsyncMock()
+        service.record_event = AsyncMock()
+
+        with patch("agent.runtime.task_execution.SessionFactory", return_value=session_cm), \
+             patch("agent.runtime.task_execution.QuotaService", return_value=usage_service):
+            await service._execute_task("task_running")
+
+        self.assertIn("保真偏差: 1 个", service._session.set_result_text.await_args_list[-1].args[1])
+        self.assertIn("slides=6", service._session.set_result_text.await_args_list[-1].args[1])
+        final_projection = service._session.update_projection.await_args_list[-1].kwargs["projection_patch"]
+        self.assertEqual(final_projection["review"]["quality_report_summary"]["fidelity_deviation_count"], 1)
+        self.assertEqual(final_projection["budget"]["quality_report_summary"]["fidelity_deviation_count"], 1)
+        self.assertEqual(
+            final_projection["budget"]["cost_ledger"]["quality_report_summary"]["fidelity_deviation_count"],
+            1,
+        )
 
 
 class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
@@ -1261,7 +1272,7 @@ class EvidenceCollectionTests(unittest.TestCase):
 
 class ResearchEvidenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_research_builds_evidence_from_urls_in_report(self) -> None:
-        from agent.domains.research.utils import build_evidence_and_citations
+        from agent.workflows.research.utils import build_evidence_and_citations
 
         evidence, citations = build_evidence_and_citations(
             "test_task",
@@ -1272,7 +1283,7 @@ class ResearchEvidenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("https://example.com/paper1", evidence.sources())
 
     async def test_research_builds_evidence_from_worker_results(self) -> None:
-        from agent.domains.research.utils import build_evidence_and_citations
+        from agent.workflows.research.utils import build_evidence_and_citations
 
         workers = [
             {"subtask_id": "s1", "topic": "ML", "findings": "Found at https://arxiv.org/abs/1234"},

@@ -285,10 +285,10 @@ SSE 事件流会：
 
 | 领域           | 入口                                             | 说明                                    |
 | -------------- | ------------------------------------------------ | --------------------------------------- |
-| `research`     | `agent/domains/research/orchestrated.py`         | 模块化科研工作流                        |
-| `patent`       | `agent/domains/patent/orchestrated.py`           | 专利草稿工作流                          |
-| `zero_report`  | `agent/domains/zero_report/orchestrated.py`      | 归零报告工作流                          |
-| `ppt`          | `agent/domains/ppt/orchestrated.py`              | 生成内容后再渲染 `.pptx`                |
+| `research`     | `agent/workflows/research/orchestrated.py`       | 模块化科研工作流                        |
+| `patent`       | `agent/workflows/patent/orchestrated.py`         | 专利草稿工作流                          |
+| `zero_report`  | `agent/workflows/zero_report/orchestrated.py`    | 归零报告工作流                          |
+| `office`       | `agent/workflows/office/orchestrated.py`         | 统一处理 `.pptx`/`.docx`/`.xlsx`，含配图能力 |
 
 轻量问答和跨领域 DAG 组合（如「先调研再做 PPT」）现在由 Coordinator 统一处理：`understand_goal` 节点根据用户意图路由到 direct（直答）、single_skill（单领域）或 dag（多任务编排）三种执行模式。
 

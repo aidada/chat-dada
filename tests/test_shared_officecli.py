@@ -367,7 +367,7 @@ async def test_execute_officecli_specs_normalizes_command_alias_in_batch() -> No
 
 
 def test_officecli_batch_schema_normalizes_command_alias() -> None:
-    from agent.domains.office.tools import OfficeCliBatchInput
+    from agent.workflows.office.tools import OfficeCliBatchInput
 
     payload = OfficeCliBatchInput.model_validate(
         {"commands": [{"command": "create", "file": "demo.pptx"}]}
