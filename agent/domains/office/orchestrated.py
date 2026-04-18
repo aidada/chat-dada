@@ -52,6 +52,17 @@ _graph = build_office_workflow_graph()
 from agent.platform.emit import safe_emit_progress_with_content as _safe_emit
 
 
+def _merge_quality_report_summary(
+    quality_report: dict[str, Any] | None,
+    *summary_sources: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = summarize_quality_report(quality_report)
+    for source in summary_sources:
+        if isinstance(source, dict):
+            merged.update({key: value for key, value in source.items() if value is not None})
+    return merged
+
+
 def _collect_source_files(input_data: dict[str, Any]) -> list[str]:
     raw = input_data.get("source_files")
     if raw is None:
@@ -292,7 +303,11 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
     terminal_reason = str(result.get("terminal_reason", terminal_status) or terminal_status)
     cost_ledger = dict(result.get("cost_ledger") or {})
     quality_report = dict(result.get("quality_report") or {})
-    quality_report_summary = summarize_quality_report(quality_report)
+    quality_report_summary = _merge_quality_report_summary(
+        quality_report,
+        result.get("quality_report_summary") if isinstance(result.get("quality_report_summary"), dict) else None,
+        cost_ledger.get("quality_report_summary") if isinstance(cost_ledger.get("quality_report_summary"), dict) else None,
+    )
     partial_progress = dict(result.get("partial_progress") or {})
     if not cost_ledger:
         cost_ledger = init_cost_ledger(
@@ -323,7 +338,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
                 "passed": False,
                 "reason": "No content generated",
                 "quality_report": quality_report,
-                "quality_report_summary": summarize_quality_report(quality_report),
+                "quality_report_summary": quality_report_summary,
                 "partial_progress": partial_progress,
             },
             budget={
@@ -365,7 +380,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
                 "passed": False,
                 "reason": terminal_reason,
                 "quality_report": quality_report,
-                "quality_report_summary": summarize_quality_report(quality_report),
+                "quality_report_summary": quality_report_summary,
                 "partial_progress": partial_progress,
             },
             budget={
@@ -441,7 +456,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
                     "runtime_target": runtime_target,
                     "close_failures": flush_failures,
                     "quality_report": quality_report,
-                    "quality_report_summary": summarize_quality_report(quality_report),
+                    "quality_report_summary": quality_report_summary,
                 },
                 budget={
                     "action": "allow",

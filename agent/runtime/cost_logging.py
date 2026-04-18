@@ -113,8 +113,8 @@ def summarize_cost_ledger(ledger: dict[str, Any] | None) -> dict[str, Any]:
         "stage_records": stage_records,
         "call_records": call_records,
     }
-    if active.get("quality_report_summary"):
-        summary["quality_report_summary"] = dict(active.get("quality_report_summary") or {})
+    if active.get("quality_report_summary") is not None:
+        summary["quality_report_summary"] = _copy_summary_dict(active.get("quality_report_summary"))
     if active.get("partial_progress"):
         summary["partial_progress"] = dict(active.get("partial_progress") or {})
     return summary
@@ -265,8 +265,8 @@ def attach_quality_summary(
     quality_report_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
     active = dict(ledger or {})
-    if quality_report_summary:
-        active["quality_report_summary"] = dict(quality_report_summary)
+    if quality_report_summary is not None:
+        active["quality_report_summary"] = _copy_summary_dict(quality_report_summary)
     return active
 
 
@@ -297,3 +297,9 @@ def update_completed_pages(
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _copy_summary_dict(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return dict(payload)

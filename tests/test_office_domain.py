@@ -1641,6 +1641,56 @@ async def test_office_domain_terminal_partial_progress_included_in_review() -> N
 
 
 @pytest.mark.asyncio
+async def test_office_domain_result_surfaces_fidelity_deviation_summary() -> None:
+    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+
+    quality_report = {
+        "format": "pptx",
+        "operation": "create",
+        "validated": True,
+        "status": "passed",
+        "passed": True,
+        "issue_count": 0,
+        "error_count": 0,
+        "warning_count": 0,
+        "artifact_count": 1,
+        "summary": "done",
+        "issues": [],
+        "qa_fix_round": 0,
+        "max_qa_fix_rounds": 2,
+        "stats_summary": {"slide_count": 6},
+        "fidelity_deviations": [{"kind": "reference_style_deviation", "message": "theme fallback"}],
+    }
+    payload = """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"deck.pptx","path":"/Users/test/Desktop/deck.pptx","format":"pptx","role":"primary"}],"stats":{"slide_count":6}}
+```"""
+
+    with (
+        patch(
+            "agent.domains.office.orchestrated.stream_nested_graph",
+            new=AsyncMock(
+                return_value={
+                    "final_result": payload,
+                    "quality_report": quality_report,
+                    "cost_ledger": {"task_id": "office_fidelity", "domain": "office"},
+                    "step_history": [{"strategy": "sequential"}],
+                }
+            ),
+        ),
+        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch(
+            "agent.domains.office.orchestrated.execute_officecli_spec",
+            new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close /Users/test/Desktop/deck.pptx"}),
+        ),
+    ):
+        result = await run_office_domain_orchestrated({"query": "做一个 PPT", "task_id": "office_fidelity"})
+
+    assert result.status == "ok"
+    assert result.review["quality_report_summary"]["fidelity_deviation_count"] == 1
+    assert result.budget["cost_ledger"]["quality_report_summary"]["fidelity_deviation_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_ppt_wrapper_maps_ppt_artifact_type() -> None:
     from agent.domains.office.orchestrated import OfficeDomainResult
     from agent.domains.ppt.orchestrated import run_ppt_domain_orchestrated

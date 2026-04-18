@@ -50,6 +50,7 @@ def build_quality_report(
 def summarize_quality_report(report: dict[str, Any] | None) -> dict[str, Any]:
     active = dict(report or {})
     stats = dict(active.get("stats_summary") or {})
+    fidelity_deviations = list(active.get("fidelity_deviations") or [])
     summary = {
         "status": str(active.get("status", "") or ""),
         "passed": bool(active.get("passed", False)),
@@ -74,6 +75,8 @@ def summarize_quality_report(report: dict[str, Any] | None) -> dict[str, Any]:
     ):
         if stats.get(key) is not None:
             summary[key] = stats.get(key)
+    if fidelity_deviations:
+        summary["fidelity_deviation_count"] = len(fidelity_deviations)
     if active.get("terminal_reason"):
         summary["terminal_reason"] = str(active.get("terminal_reason") or "")
     return summary
@@ -99,6 +102,8 @@ def quality_report_summary_lines(report: dict[str, Any] | None) -> list[str]:
         )
     elif summary.get("sheet_count") is not None:
         lines.append(f"关键统计: sheets={summary.get('sheet_count')}")
+    if int(summary.get("fidelity_deviation_count", 0) or 0) > 0:
+        lines.append(f"保真偏差: {summary.get('fidelity_deviation_count', 0)} 个")
     if summary.get("terminal_reason"):
         lines.append(f"质量终止原因: {summary.get('terminal_reason')}")
     return lines

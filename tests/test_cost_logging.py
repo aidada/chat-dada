@@ -102,6 +102,26 @@ def test_quality_report_summary_and_lines_include_key_stats() -> None:
     assert any("slides=6" in line for line in lines)
 
 
+def test_quality_report_summary_includes_fidelity_deviations() -> None:
+    report = build_quality_report(
+        format_name="pptx",
+        operation="create",
+        validated=True,
+        artifacts=[{"name": "deck.pptx"}],
+        summary="done",
+        stats={"slide_count": 6},
+        issues=[],
+        qa_fix_round=0,
+        max_qa_fix_rounds=2,
+        terminal_reason="",
+    )
+    report["fidelity_deviations"] = [{"kind": "style_deviation", "message": "theme fallback"}]
+
+    summary = summarize_quality_report(report)
+
+    assert summary["fidelity_deviation_count"] == 1
+
+
 def test_cost_ledger_summary_includes_quality_report_summary() -> None:
     ledger = init_cost_ledger(task_id="t1", domain="office", requested_pages=6)
     report = build_quality_report(
