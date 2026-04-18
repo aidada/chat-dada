@@ -122,6 +122,28 @@ def test_quality_report_summary_includes_fidelity_deviations() -> None:
     assert summary["fidelity_deviation_count"] == 1
 
 
+def test_quality_report_summary_lines_render_from_merged_summary_payload() -> None:
+    lines = quality_report_summary_lines(
+        {
+            "status": "hard_fail",
+            "passed": False,
+            "issue_count": 1,
+            "error_count": 1,
+            "warning_count": 0,
+            "slide_count": 6,
+            "visual_slide_count": 4,
+            "text_only_slide_count": 1,
+            "layout_variety_count": 3,
+            "fidelity_deviation_count": 1,
+            "terminal_reason": "inner_recursion_limit",
+        }
+    )
+
+    assert any("slides=6" in line for line in lines)
+    assert any("保真偏差: 1 个" == line for line in lines)
+    assert any("质量终止原因: inner_recursion_limit" == line for line in lines)
+
+
 def test_cost_ledger_summary_includes_quality_report_summary() -> None:
     ledger = init_cost_ledger(task_id="t1", domain="office", requested_pages=6)
     report = build_quality_report(

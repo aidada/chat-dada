@@ -73,10 +73,15 @@ def summarize_quality_report(report: dict[str, Any] | None) -> dict[str, Any]:
         "chart_count",
         "table_count",
     ):
-        if stats.get(key) is not None:
-            summary[key] = stats.get(key)
+        value = stats.get(key)
+        if value is None:
+            value = active.get(key)
+        if value is not None:
+            summary[key] = value
     if fidelity_deviations:
         summary["fidelity_deviation_count"] = len(fidelity_deviations)
+    elif active.get("fidelity_deviation_count") is not None:
+        summary["fidelity_deviation_count"] = int(active.get("fidelity_deviation_count", 0) or 0)
     if active.get("terminal_reason"):
         summary["terminal_reason"] = str(active.get("terminal_reason") or "")
     return summary

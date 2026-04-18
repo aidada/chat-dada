@@ -1048,6 +1048,114 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
         service._session.finish_task.assert_awaited_once_with("task_running", "succeeded")
         usage_service.record_task_usage.assert_awaited_once()
 
+    async def test_execute_task_resume_preserves_summary_only_quality_diagnostics(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from agent.runtime.task_execution import TaskService
+
+        class FakeRootGraph:
+            async def astream(self, input_data, config=None, version=None, stream_mode=None, subgraphs=None):
+                if False:
+                    yield None
+                return
+
+            async def aget_state(self, config):
+                return SimpleNamespace(
+                    values={
+                        "final_result": "resume ok",
+                        "artifact_refs": [],
+                        "review": {},
+                        "budget": {},
+                    }
+                )
+
+        session_cm = AsyncMock()
+        session = MagicMock()
+        session.commit = AsyncMock()
+        session_cm.__aenter__.return_value = session
+        session_cm.__aexit__.return_value = False
+        usage_service = MagicMock()
+        usage_service.estimate_cost_from_usage.return_value = 0.0
+        usage_service.estimate_cost_usd.return_value = 0.0
+        usage_service.record_task_usage = AsyncMock()
+
+        quality_summary = {
+            "status": "hard_fail",
+            "passed": False,
+            "issue_count": 1,
+            "error_count": 1,
+            "warning_count": 0,
+            "slide_count": 6,
+            "visual_slide_count": 4,
+            "text_only_slide_count": 1,
+            "layout_variety_count": 3,
+            "fidelity_deviation_count": 1,
+            "terminal_reason": "inner_recursion_limit",
+        }
+
+        service = TaskService(
+            session=AsyncMock(),
+            redis=AsyncMock(),
+            checkpointer_factory=lambda: object(),
+            conversation_context_builder_factory=MagicMock,
+        )
+        service._root_graph = FakeRootGraph()
+        service._session.get_task = AsyncMock(
+            side_effect=[
+                {
+                    "task_id": "task_running",
+                    "task": "恢复任务",
+                    "user_id": "user-1",
+                    "mode": "auto",
+                    "thinking_level": "medium",
+                    "file_paths": [],
+                    "conversation_id": "",
+                    "request_payload": {"execution_path": "office"},
+                    "route_name": "office",
+                    "route_reason": "placeholder for coordinator routing",
+                    "route_confidence": 0.0,
+                    "latest_checkpoint_id": "cp-running",
+                },
+                {
+                    "task_id": "task_running",
+                    "result_text": "Office 任务已中止：内层 agent 超过 84 步仍未收敛",
+                    "artifact_refs": [],
+                    "review": {
+                        "passed": False,
+                        "reason": "inner_recursion_limit",
+                        "quality_report_summary": quality_summary,
+                    },
+                    "budget": {
+                        "cost_ledger": {
+                            "task_id": "task_running",
+                            "domain": "office",
+                            "quality_report_summary": quality_summary,
+                        }
+                    },
+                },
+            ]
+        )
+        service._session.get_events = AsyncMock(return_value=[])
+        service._session.get_clarification_history = AsyncMock(return_value=[])
+        service._session.update_projection = AsyncMock()
+        service._session.set_result_text = AsyncMock()
+        service._session.finish_task = AsyncMock()
+        service.record_event = AsyncMock()
+
+        with patch("agent.runtime.task_execution.SessionFactory", return_value=session_cm), \
+             patch("agent.runtime.task_execution.QuotaService", return_value=usage_service):
+            await service._execute_task("task_running")
+
+        self.assertIn("保真偏差: 1 个", service._session.set_result_text.await_args_list[-1].args[1])
+        final_projection = service._session.update_projection.await_args_list[-1].kwargs["projection_patch"]
+        self.assertEqual(final_projection["review"]["quality_report_summary"]["fidelity_deviation_count"], 1)
+        self.assertEqual(final_projection["budget"]["quality_report_summary"]["fidelity_deviation_count"], 1)
+        self.assertEqual(
+            final_projection["budget"]["cost_ledger"]["quality_report_summary"]["fidelity_deviation_count"],
+            1,
+        )
+
 
 class RootGraphInterruptResumeTests(unittest.IsolatedAsyncioTestCase):
     """Integration tests: root graph interrupt → resume via Command(resume=...)."""
