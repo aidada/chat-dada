@@ -72,6 +72,15 @@ def _collect_source_files(input_data: dict[str, Any]) -> list[str]:
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
+def _collect_reference_files(input_data: dict[str, Any]) -> list[str]:
+    raw = input_data.get("reference_files")
+    if raw is None:
+        raw = input_data.get("reference_file_paths")
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
 def _snapshot_outputs(outputs_dir: Path) -> dict[str, int]:
     snapshot: dict[str, int] = {}
     for ext in ("*.pptx", "*.docx", "*.xlsx"):
@@ -245,6 +254,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
     query = input_data.get("query") or input_data.get("task", "")
     task_id = input_data.get("task_id", "office_unknown")
     source_files = _collect_source_files(input_data)
+    reference_files = _collect_reference_files(input_data)
     try:
         from langgraph.config import get_config
 
@@ -267,6 +277,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
             "format_hint": str(input_data.get("format_hint", "") or ""),
             "file_hint": str(input_data.get("file_hint", "") or ""),
             "source_files": source_files,
+            "reference_files": reference_files,
             "operation_hint": str(input_data.get("operation_hint", "") or ""),
             "cost": 0.0,
             "progress": 0.0,

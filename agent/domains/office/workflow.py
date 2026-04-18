@@ -28,6 +28,8 @@ from agent.domains.office.goal_normalizer import (
     normalize_goal_profile,
     refine_filename_from_plan,
 )
+from agent.domains.office.reference_inspector import inspect_reference_file
+from agent.domains.office.reference_profiler import profile_reference_payload
 from agent.domains.office.reference_resolver import resolve_reference_constraints
 from agent.domains.office.qa import run_quality_gate
 from agent.domains.office.result_utils import (
@@ -552,6 +554,100 @@ async def select_strategy_node(state: OfficeWorkflowState) -> dict[str, Any]:
     }
 
 
+def _merge_reference_structure_constraints(
+    current: dict[str, Any],
+    incoming: dict[str, Any],
+    *,
+    format_name: str,
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {
+        **dict(current or {}),
+        **dict(incoming or {}),
+        "format": format_name,
+    }
+    units: list[dict[str, Any]] = []
+    seen_unit_names: set[str] = set()
+    for source in (dict(current or {}), dict(incoming or {})):
+        for item in list(source.get("units") or []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            dedupe_key = name or json.dumps(item, ensure_ascii=False, sort_keys=True)
+            if dedupe_key in seen_unit_names:
+                continue
+            seen_unit_names.add(dedupe_key)
+            units.append(dict(item))
+    merged["units"] = units
+    return merged
+
+
+def _merge_reference_style_constraints(
+    current: dict[str, Any],
+    incoming: dict[str, Any],
+    *,
+    format_name: str,
+) -> dict[str, Any]:
+    current_style_tokens = dict(dict(current or {}).get("style_tokens") or {})
+    incoming_style_tokens = dict(dict(incoming or {}).get("style_tokens") or {})
+    return {
+        **dict(current or {}),
+        **dict(incoming or {}),
+        "format": format_name,
+        "style_tokens": {
+            **current_style_tokens,
+            **incoming_style_tokens,
+        },
+    }
+
+
+async def resolve_reference_inputs_node(state: OfficeWorkflowState) -> dict[str, Any]:
+    format_name = str(state.get("format", "") or state.get("format_hint", "") or "").strip().lower()
+    reference_files = [str(item).strip() for item in state.get("reference_files", []) if str(item).strip()]
+    if not format_name or not reference_files:
+        return {}
+
+    merged_structure_constraints = {
+        **dict(state.get("reference_structure_constraints") or {}),
+        "format": format_name,
+    }
+    merged_style_constraints = {
+        **dict(state.get("reference_style_constraints") or {}),
+        "format": format_name,
+    }
+
+    for file_path in reference_files:
+        try:
+            inspect_payload = await inspect_reference_file(format_name=format_name, file_path=file_path)
+            profiled_payload = profile_reference_payload(
+                format_name=format_name,
+                inspect_payload=inspect_payload,
+            )
+        except Exception as exc:
+            _log.warning(
+                "Ignoring unreadable Office reference file %s for format %s: %s",
+                file_path,
+                format_name,
+                exc,
+            )
+            continue
+
+        merged_structure_constraints = _merge_reference_structure_constraints(
+            merged_structure_constraints,
+            dict(profiled_payload.get("structure") or {}),
+            format_name=format_name,
+        )
+        merged_style_constraints = _merge_reference_style_constraints(
+            merged_style_constraints,
+            dict(profiled_payload.get("style") or {}),
+            format_name=format_name,
+        )
+
+    return {
+        "reference_structure_constraints": merged_structure_constraints,
+        "reference_style_constraints": merged_style_constraints,
+    }
+
+
 async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
     requested_slide_count = int(state.get("requested_slide_count", 0) or 0) or 0
     build_batch_size = int(state.get("build_batch_size", 0) or 0) or 1
@@ -683,6 +779,7 @@ def build_office_workflow_graph() -> Any:
     graph = StateGraph(OfficeWorkflowState)
     graph.add_node("analyze", analyze_node)
     graph.add_node("preflight", preflight_node)
+    graph.add_node("resolve_reference_inputs", resolve_reference_inputs_node)
     graph.add_node("select_strategy", select_strategy_node)
     graph.add_node("planning", planning_node)
     graph.add_node("build", build_node)
@@ -691,7 +788,8 @@ def build_office_workflow_graph() -> Any:
 
     graph.add_edge(START, "analyze")
     graph.add_edge("analyze", "preflight")
-    graph.add_edge("preflight", "select_strategy")
+    graph.add_edge("preflight", "resolve_reference_inputs")
+    graph.add_edge("resolve_reference_inputs", "select_strategy")
     graph.add_edge("select_strategy", "planning")
     graph.add_edge("planning", "build")
     graph.add_conditional_edges(

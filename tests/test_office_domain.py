@@ -113,6 +113,25 @@ async def test_office_planning_node_refines_generic_filename_from_plan_title() -
 
 
 @pytest.mark.asyncio
+async def test_office_resolve_reference_inputs_node_ignores_unreadable_files() -> None:
+    from agent.domains.office.workflow import resolve_reference_inputs_node
+
+    with patch(
+        "agent.domains.office.workflow.inspect_reference_file",
+        new=AsyncMock(side_effect=FileNotFoundError("missing reference")),
+    ):
+        result = await resolve_reference_inputs_node(
+            {
+                "format": "pptx",
+                "reference_files": ["/Users/test/Downloads/missing-reference.pptx"],
+            }
+        )
+
+    assert result["reference_structure_constraints"] == {"format": "pptx"}
+    assert result["reference_style_constraints"] == {"format": "pptx"}
+
+
+@pytest.mark.asyncio
 async def test_docx_planning_node_uses_llm_structured_goal_constraints() -> None:
     import agent.domains.office.workflow as workflow_module
 
@@ -1868,6 +1887,73 @@ async def test_office_domain_inspect_allows_no_artifact() -> None:
     assert result.status == "ok"
     assert result.review["passed"] is True
     assert result.artifact_refs == []
+
+
+@pytest.mark.asyncio
+async def test_office_domain_reference_files_flow_from_entrypoint_into_runtime_constraints() -> None:
+    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+
+    reference_file = "/Users/test/Downloads/reference-style.pptx"
+    captured_state: dict[str, Any] = {}
+
+    async def fake_inspect_reference_file(*, format_name: str, file_path: str) -> dict[str, Any]:
+        assert format_name == "pptx"
+        assert file_path == reference_file
+        return {
+            "outline": [{"title": "封面"}, {"title": "问题"}, {"title": "方案"}],
+            "stats": {"theme": "blue"},
+        }
+
+    async def fake_run_section_builder(state: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        captured_state.update(state)
+        return {
+            "current_stage": "qa_fix",
+        }
+
+    def fake_run_quality_gate(_state: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "current_stage": "finalize",
+            "final_result": """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"deck.pptx","path":"/Users/test/Desktop/deck.pptx","format":"pptx","role":"primary"}],"stats":{}}
+```""",
+            "quality_report": {"status": "passed"},
+        }
+
+    with (
+        patch("agent.domains.office.workflow.inspect_reference_file", new=AsyncMock(side_effect=fake_inspect_reference_file)),
+        patch(
+            "agent.domains.office.workflow.profile_reference_payload",
+            return_value={
+                "structure": {"format": "pptx", "units": [{"name": "封面"}, {"name": "问题"}, {"name": "方案"}]},
+                "style": {"format": "pptx", "style_tokens": {"theme": "blue"}},
+            },
+        ),
+        patch("agent.domains.office.workflow.run_section_builder", new=AsyncMock(side_effect=fake_run_section_builder)),
+        patch("agent.domains.office.workflow.run_quality_gate", side_effect=fake_run_quality_gate),
+        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch(
+            "agent.domains.office.orchestrated.execute_officecli_spec",
+            new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close /Users/test/Desktop/deck.pptx"}),
+        ),
+    ):
+        result = await run_office_domain_orchestrated(
+            {
+                "query": "做一个 PPT",
+                "task_id": "office_reference_runtime",
+                "reference_files": [reference_file],
+            }
+        )
+
+    merged = dict(captured_state["task_profile"]["merged_constraints"])
+    assert captured_state["reference_files"] == [reference_file]
+    assert captured_state["task_profile"]["reference_files"] == [reference_file]
+    assert merged["reference_structure_constraints"]["units"] == [
+        {"name": "封面"},
+        {"name": "问题"},
+        {"name": "方案"},
+    ]
+    assert merged["reference_style_constraints"]["style_tokens"] == {"theme": "blue"}
+    assert result.status == "ok"
 
 
 @pytest.mark.asyncio
