@@ -306,7 +306,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
             "configurable": {
                 "thread_id": str(task_id),
                 "office_constraints": {
-                    "allowed_source_files": source_files,
+                    "allowed_source_files": [*source_files, *reference_files],
                     "allowed_output_dir": str(ALLOWED_DIR),
                     "runtime_target": runtime_target,
                 },
