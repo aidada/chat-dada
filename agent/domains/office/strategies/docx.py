@@ -203,11 +203,11 @@ def _collect_headings(*, merged_constraints: dict[str, Any] | None) -> list[str]
     seen: set[str] = set()
 
     goal_constraints = dict((merged_constraints or {}).get("goal_constraints") or {})
-    hard_requirements = goal_constraints.get("hard_requirements")
-    if isinstance(hard_requirements, list):
-        for item in hard_requirements:
+    section_headings = goal_constraints.get("section_headings")
+    if isinstance(section_headings, list):
+        for item in section_headings:
             heading = str(item or "").strip()
-            if not heading or _is_instruction_like_heading(heading):
+            if not heading:
                 continue
             key = heading.casefold()
             if key in seen:
@@ -218,48 +218,17 @@ def _collect_headings(*, merged_constraints: dict[str, Any] | None) -> list[str]
     return headings
 
 
-_INSTRUCTION_LIKE_HEADING_TOKENS = (
-    "preserve ",
-    "keep ",
-    "maintain ",
-    "retain ",
-    "ensure ",
-    "use ",
-    "follow ",
-    "avoid ",
-    "remove ",
-    "update ",
-    "change ",
-    "rename ",
-    "formatting",
-    "format ",
-    "layout",
-    "style",
-    "should ",
-    "must ",
-    "need ",
-    "不要",
-    "保持",
-    "保留",
-    "避免",
-    "使用",
-    "更新",
-)
-
-
-def _is_instruction_like_heading(text: str) -> bool:
-    normalized = " ".join(str(text or "").strip().lower().split())
-    if not normalized:
-        return True
-    return any(token in normalized for token in _INSTRUCTION_LIKE_HEADING_TOKENS)
-
-
 def _base_style_requirements(merged_constraints: dict[str, Any] | None) -> dict[str, Any]:
     style_constraints = dict((merged_constraints or {}).get("reference_style_constraints") or {})
     style_tokens = style_constraints.get("style_tokens")
-    if isinstance(style_tokens, dict):
-        return dict(style_tokens)
-    return {}
+    requirements = dict(style_tokens) if isinstance(style_tokens, dict) else {}
+    goal_constraints = dict((merged_constraints or {}).get("goal_constraints") or {})
+    formatting_instructions = goal_constraints.get("formatting_instructions")
+    if isinstance(formatting_instructions, list):
+        normalized = [str(item or "").strip() for item in formatting_instructions if str(item or "").strip()]
+        if normalized:
+            requirements["formatting_instructions"] = normalized
+    return requirements
 
 
 def _build_batches(*, sections: list[dict[str, Any]], build_batch_size: int) -> list[dict[str, Any]]:

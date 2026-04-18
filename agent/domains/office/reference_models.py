@@ -11,6 +11,8 @@ class GoalConstraints(TypedDict):
     operation: str
     goal: str
     hard_requirements: list[str]
+    section_headings: list[str]
+    formatting_instructions: list[str]
 
 
 class ReferenceStructureConstraints(TypedDict):
@@ -49,12 +51,16 @@ def build_goal_constraints(
     operation: str,
     goal: str,
     hard_requirements: list[str] | None = None,
+    section_headings: list[str] | None = None,
+    formatting_instructions: list[str] | None = None,
 ) -> GoalConstraints:
     return {
         "format": str(format_name or ""),
         "operation": str(operation or ""),
         "goal": str(goal or "").strip(),
         "hard_requirements": list(hard_requirements or []),
+        "section_headings": list(section_headings or []),
+        "formatting_instructions": list(formatting_instructions or []),
     }
 
 

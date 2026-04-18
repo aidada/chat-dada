@@ -21,6 +21,64 @@ def _canonical_format(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+_DOCX_INSTRUCTION_TOKENS = (
+    "preserve ",
+    "keep ",
+    "maintain ",
+    "retain ",
+    "ensure ",
+    "use ",
+    "follow ",
+    "avoid ",
+    "remove ",
+    "update ",
+    "change ",
+    "rename ",
+    "formatting",
+    "format ",
+    "layout",
+    "style",
+    "should ",
+    "must ",
+    "need ",
+    "不要",
+    "保持",
+    "保留",
+    "避免",
+    "使用",
+    "更新",
+)
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item or "").strip() for item in value if str(item or "").strip()]
+
+
+def _is_docx_instruction_like(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        return False
+    return any(token in normalized for token in _DOCX_INSTRUCTION_TOKENS)
+
+
+def _derive_docx_goal_lists(goal_source: dict[str, Any]) -> tuple[list[str], list[str]]:
+    explicit_headings = _coerce_string_list(goal_source.get("section_headings"))
+    explicit_formatting = _coerce_string_list(goal_source.get("formatting_instructions"))
+    if explicit_headings or explicit_formatting:
+        return explicit_headings, explicit_formatting
+
+    headings: list[str] = []
+    formatting: list[str] = []
+    for item in _coerce_string_list(goal_source.get("hard_requirements")):
+        if _is_docx_instruction_like(item):
+            formatting.append(item)
+        else:
+            headings.append(item)
+    return headings, formatting
+
+
 def resolve_reference_constraints(
     *,
     goal_constraints: dict[str, Any],
@@ -55,11 +113,20 @@ def resolve_reference_constraints(
     if not goal_format_name:
         style_format = _canonical_format(style_payload.get("format", ""))
         goal_format_name = style_format
+    section_headings: list[str] = []
+    formatting_instructions: list[str] = []
+    if goal_format_name == "docx":
+        section_headings, formatting_instructions = _derive_docx_goal_lists(goal_source)
+    else:
+        section_headings = _coerce_string_list(goal_source.get("section_headings"))
+        formatting_instructions = _coerce_string_list(goal_source.get("formatting_instructions"))
     goal_payload: GoalConstraints = build_goal_constraints(
         format_name=goal_format_name,
         operation=str(goal_source.get("operation", "") or ""),
         goal=str(goal_source.get("goal", "") or ""),
         hard_requirements=deepcopy(goal_source.get("hard_requirements", []) or []),
+        section_headings=section_headings,
+        formatting_instructions=formatting_instructions,
     )
     conflict_resolution: ConflictResolution = build_conflict_resolution()
     return {

@@ -234,7 +234,11 @@ def test_docx_strategy_builds_section_plan_from_goal_and_reference() -> None:
         build_batch_size=1,
         default_create_file="project-plan.docx",
         merged_constraints={
-            "goal_constraints": {"hard_requirements": ["背景", "目标", "实施计划", "风险控制"]},
+            "goal_constraints": {
+                "hard_requirements": ["背景", "目标", "实施计划", "风险控制", "preserve formatting"],
+                "section_headings": ["背景", "目标", "实施计划", "风险控制"],
+                "formatting_instructions": ["preserve formatting"],
+            },
             "reference_structure_constraints": {
                 "units": [{"name": "背景"}, {"name": "目标"}, {"name": "附录"}, {"name": "致谢"}]
             },
@@ -246,6 +250,7 @@ def test_docx_strategy_builds_section_plan_from_goal_and_reference() -> None:
     assert [section["heading"] for section in plan["sections"]] == ["背景", "目标", "实施计划", "风险控制"]
     assert plan["sections"][0]["heading"] == "背景"
     assert plan["sections"][2]["content_mode"] == "mixed"
+    assert plan["sections"][0]["style_requirements"]["formatting_instructions"] == ["preserve formatting"]
 
 
 def test_docx_strategy_ignores_instruction_like_hard_requirements() -> None:
@@ -258,17 +263,18 @@ def test_docx_strategy_ignores_instruction_like_hard_requirements() -> None:
         default_create_file="project-plan.docx",
         merged_constraints={
             "goal_constraints": {
-                "hard_requirements": [
-                    "preserve formatting",
-                    "Executive Summary",
-                    "keep numbering consistent",
-                    "Project Scope",
-                ]
+                "hard_requirements": ["preserve formatting", "Executive Summary", "keep numbering consistent", "Project Scope"],
+                "section_headings": ["Executive Summary", "Project Scope"],
+                "formatting_instructions": ["preserve formatting", "keep numbering consistent"],
             }
         },
     )
 
     assert [section["heading"] for section in plan["sections"]] == ["Executive Summary", "Project Scope"]
+    assert plan["sections"][0]["style_requirements"]["formatting_instructions"] == [
+        "preserve formatting",
+        "keep numbering consistent",
+    ]
 
 
 def test_xlsx_strategy_ignores_non_sheet_like_hard_requirements() -> None:

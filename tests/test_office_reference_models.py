@@ -9,21 +9,31 @@ from agent.domains.office.reference_models import (
 
 def test_build_goal_constraints_preserves_user_values_and_copies_lists() -> None:
     hard_requirements = ["preserve formulas", "rename summary sheet"]
+    section_headings = ["背景", "目标"]
+    formatting_instructions = ["保留编号", "使用 Heading1"]
 
     payload = build_goal_constraints(
         format_name="XLSX",
         operation="EDIT",
         goal="按用户规范修改预算表",
         hard_requirements=hard_requirements,
+        section_headings=section_headings,
+        formatting_instructions=formatting_instructions,
     )
 
     hard_requirements.append("add chart")
+    section_headings.append("实施计划")
+    formatting_instructions.append("保持格式一致")
 
     assert payload["format"] == "XLSX"
     assert payload["operation"] == "EDIT"
     assert payload["goal"] == "按用户规范修改预算表"
     assert payload["hard_requirements"] == ["preserve formulas", "rename summary sheet"]
+    assert payload["section_headings"] == ["背景", "目标"]
+    assert payload["formatting_instructions"] == ["保留编号", "使用 Heading1"]
     assert payload["hard_requirements"] is not hard_requirements
+    assert payload["section_headings"] is not section_headings
+    assert payload["formatting_instructions"] is not formatting_instructions
 
 
 def test_build_reference_structure_constraints_preserves_format_and_copies_units() -> None:
