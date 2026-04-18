@@ -21,46 +21,10 @@ def _canonical_format(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-_DOCX_INSTRUCTION_TOKENS = (
-    "preserve ",
-    "keep ",
-    "maintain ",
-    "retain ",
-    "ensure ",
-    "use ",
-    "follow ",
-    "avoid ",
-    "remove ",
-    "update ",
-    "change ",
-    "rename ",
-    "formatting",
-    "format ",
-    "layout",
-    "style",
-    "should ",
-    "must ",
-    "need ",
-    "不要",
-    "保持",
-    "保留",
-    "避免",
-    "使用",
-    "更新",
-)
-
-
 def _coerce_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item or "").strip() for item in value if str(item or "").strip()]
-
-
-def _is_docx_instruction_like(text: str) -> bool:
-    normalized = " ".join(str(text or "").strip().lower().split())
-    if not normalized:
-        return False
-    return any(token in normalized for token in _DOCX_INSTRUCTION_TOKENS)
 
 
 def _derive_docx_goal_lists(goal_source: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -68,16 +32,7 @@ def _derive_docx_goal_lists(goal_source: dict[str, Any]) -> tuple[list[str], lis
     explicit_formatting = _coerce_string_list(goal_source.get("formatting_instructions"))
     if explicit_headings or explicit_formatting:
         return explicit_headings, explicit_formatting
-
-    headings: list[str] = []
-    formatting: list[str] = []
-    for item in _coerce_string_list(goal_source.get("hard_requirements")):
-        if _is_docx_instruction_like(item):
-            formatting.append(item)
-        else:
-            headings.append(item)
-    return headings, formatting
-
+    return [], []
 
 def resolve_reference_constraints(
     *,
