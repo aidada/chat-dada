@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage
 
 
 def test_infer_default_create_file_from_user_intent() -> None:
@@ -1436,6 +1437,178 @@ async def test_ppt_quality_report_can_record_reference_deviation() -> None:
     assert result["quality_report"]["fidelity_deviations"] == [
         {"kind": "reference_style_deviation", "message": "theme fallback"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_ppt_reference_edit_build_prompt_keeps_goal_first_semantics() -> None:
+    from agent.domains.office.core.build import run_build_stage
+    from agent.domains.office.strategies.ppt import PptStrategy
+
+    goal = "参考品牌案例的视觉风格，更新季度复盘 PPT，并突出 AI 自动化带来的 ROI。"
+    target_file = "/Users/test/Downloads/qbr-edit.pptx"
+    reference_file = "/Users/test/Downloads/reference-style.pptx"
+    deck_plan = PptStrategy().build_plan(
+        goal=goal,
+        requested_slide_count=4,
+        build_batch_size=2,
+        default_create_file="qbr-edit.pptx",
+        merged_constraints={
+            "reference_structure_constraints": {
+                "units": [{"name": "封面"}, {"name": "ROI 机会"}, {"name": "执行路径"}]
+            }
+        },
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_stream(agent, payload, **kwargs):
+        captured["agent"] = agent
+        captured["input_msg"] = payload["messages"][0].content
+        captured["config"] = kwargs.get("config")
+        return {
+            "messages": [
+                AIMessage(
+                    content="""```json
+{"operation":"edit","validated":false,"summary":"batch done","artifacts":[{"filename":"qbr-edit.pptx","format":"pptx","role":"primary"}],"stats":{}}
+```"""
+                )
+            ]
+        }
+
+    with (
+        patch("agent.domains.office.core.build.build_chat_model", return_value=object()),
+        patch("agent.domains.office.core.build.create_deep_agent", side_effect=lambda **kwargs: kwargs),
+        patch("agent.domains.office.core.build.resolve_deepagents_runtime", return_value=([], None)),
+        patch("agent.domains.office.core.build.stream_nested_graph", new=AsyncMock(side_effect=fake_stream)),
+        patch("agent.domains.office.core.build.build_officecli_skill_bundle", return_value="officecli skill bundle"),
+    ):
+        result = await run_build_stage(
+            {
+                "goal": goal,
+                "operation": "edit",
+                "format": "pptx",
+                "runtime_target_hint": "desktop",
+                "default_create_file": "qbr-edit.pptx",
+                "requested_slide_count": 4,
+                "build_batch_size": 2,
+                "allowed_source_files": [target_file, reference_file],
+                "deck_plan": deck_plan,
+                "current_batch_index": 0,
+                "cost_ledger": {},
+            },
+            strategy=PptStrategy(),
+            system_template="{phase_guidance}",
+            format_specific_guidance="",
+            office_model_role="orchestrator",
+            subagents=[],
+        )
+
+    assert result["current_stage"] == "build"
+    input_msg = str(captured["input_msg"])
+    assert input_msg.splitlines()[0] == goal
+    assert "- operation: edit" in input_msg
+    assert "- source_files:" in input_msg
+    assert f"  - {target_file}" in input_msg
+    assert f"  - {reference_file}" in input_msg
+    assert "- current_batch_slide_titles: 封面, ROI 机会" in input_msg
+    assert "当前不是最后一个 batch。完成本批写入即可" in str(captured["agent"]["system_prompt"])
+
+
+@pytest.mark.asyncio
+async def test_xlsx_reference_create_planning_builds_expected_sheet_topology() -> None:
+    from agent.domains.office.workflow import planning_node
+
+    goal = "参考财务模板创建预算工作簿，包含 Inputs、Calculations、Dashboard 三张表。"
+    result = await planning_node(
+        {
+            "goal": goal,
+            "format": "xlsx",
+            "operation": "create",
+            "requested_slide_count": 0,
+            "build_batch_size": 2,
+            "default_create_file": "budget-model.xlsx",
+            "goal_constraints": {
+                "hard_requirements": ["Inputs", "Calculations", "Dashboard", "preserve formulas"]
+            },
+            "reference_structure_constraints": {
+                "units": [{"name": "Inputs"}, {"name": "Dashboard"}, {"name": "preserve formulas and archive notes"}]
+            },
+            "reference_style_constraints": {"style_tokens": {"summary_position": "top"}},
+            "cost_ledger": {},
+        }
+    )
+
+    assert result["task_profile"]["merged_constraints"]["goal_constraints"]["goal"] == goal
+    assert [sheet["name"] for sheet in result["deck_plan"]["sheets"]] == [
+        "Inputs",
+        "Calculations",
+        "Dashboard",
+    ]
+    assert [sheet["sheet_type"] for sheet in result["deck_plan"]["sheets"]] == [
+        "worksheet",
+        "worksheet",
+        "dashboard",
+    ]
+    assert result["planning_summary"]["slide_count"] == 3
+    assert result["deck_plan"]["batches"] == [
+        {
+            "index": 0,
+            "sheet_start": 1,
+            "sheet_end": 2,
+            "sheet_names": ["Inputs", "Calculations"],
+            "slide_start": 1,
+            "slide_end": 2,
+            "slide_titles": ["Inputs", "Calculations"],
+            "slide_roles": ["worksheet", "worksheet"],
+        },
+        {
+            "index": 1,
+            "sheet_start": 3,
+            "sheet_end": 3,
+            "sheet_names": ["Dashboard"],
+            "slide_start": 3,
+            "slide_end": 3,
+            "slide_titles": ["Dashboard"],
+            "slide_roles": ["dashboard"],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_docx_reference_edit_planning_preserves_protected_non_target_sections() -> None:
+    from agent.domains.office.workflow import planning_node
+
+    result = await planning_node(
+        {
+            "goal": "参考方案模板，更新项目方案中的执行摘要和实施计划，并保留附录与致谢。",
+            "format": "docx",
+            "operation": "edit",
+            "requested_slide_count": 0,
+            "build_batch_size": 1,
+            "default_create_file": "project-plan.docx",
+            "goal_constraints": {
+                "hard_requirements": ["执行摘要", "实施计划", "preserve numbering"],
+                "section_headings": ["执行摘要", "实施计划"],
+                "formatting_instructions": ["preserve numbering"],
+            },
+            "reference_structure_constraints": {
+                "units": [{"name": "执行摘要"}, {"name": "实施计划"}, {"name": "附录"}]
+            },
+            "reference_style_constraints": {"style_tokens": {"heading_style": "Heading1"}},
+            "existing_document_profile": {
+                "units": ["执行摘要", "实施计划", "附录", "致谢"],
+                "protected_units": ["附录", "致谢"],
+            },
+            "cost_ledger": {},
+        }
+    )
+
+    merged = result["task_profile"]["merged_constraints"]
+
+    assert result["task_profile"]["target_filename"] == "project-plan.docx"
+    assert merged["existing_document_profile"]["protected_units"] == ["附录", "致谢"]
+    assert merged["goal_constraints"]["section_headings"] == ["执行摘要", "实施计划"]
+    assert [section["heading"] for section in result["deck_plan"]["sections"]] == ["执行摘要", "实施计划"]
+    assert result["deck_plan"]["sections"][0]["style_requirements"]["formatting_instructions"] == ["preserve numbering"]
 
 
 @pytest.mark.asyncio
