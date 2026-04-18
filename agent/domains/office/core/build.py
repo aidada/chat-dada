@@ -55,6 +55,8 @@ async def run_build_stage(
     build_batch_size = int(state.get("build_batch_size", 0) or 0) or 1
     cost_ledger = dict(state.get("cost_ledger") or {})
     deck_plan = dict(state.get("deck_plan") or {})
+    task_profile = dict(state.get("task_profile") or {})
+    merged_constraints = dict(task_profile.get("merged_constraints") or {})
     current_batch_index = int(state.get("current_batch_index", 0) or 0)
     repair_mode = bool(state.get("repair_mode"))
 
@@ -118,6 +120,7 @@ async def run_build_stage(
             plan=deck_plan,
             current_batch_index=current_batch_index,
             repair_mode=repair_mode,
+            merged_constraints=merged_constraints,
         )
     )
 

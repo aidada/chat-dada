@@ -167,6 +167,63 @@ class DocxStrategy(DefaultOfficeStrategy):
             return [{"severity": "error", "message": "DOCX 写入结果缺少质量 stats"}]
         return []
 
+    def build_input_sections(
+        self,
+        *,
+        goal: str,
+        operation: str,
+        format_hint: str,
+        runtime_target: str,
+        default_create_file: str,
+        requested_slide_count: int | None,
+        build_batch_size: int,
+        source_files: list[str],
+        context: str,
+        qa_feedback: str,
+        plan: dict[str, Any],
+        current_batch_index: int,
+        repair_mode: bool,
+        merged_constraints: dict[str, Any] | None = None,
+    ) -> list[str]:
+        sections = super().build_input_sections(
+            goal=goal,
+            operation=operation,
+            format_hint=format_hint,
+            runtime_target=runtime_target,
+            default_create_file=default_create_file,
+            requested_slide_count=requested_slide_count,
+            build_batch_size=build_batch_size,
+            source_files=source_files,
+            context=context,
+            qa_feedback=qa_feedback,
+            plan=plan,
+            current_batch_index=current_batch_index,
+            repair_mode=repair_mode,
+            merged_constraints=merged_constraints,
+        )
+        if operation != "edit":
+            return sections
+
+        goal_constraints = dict((merged_constraints or {}).get("goal_constraints") or {})
+        target_sections = [
+            str(item or "").strip()
+            for item in goal_constraints.get("section_headings", [])
+            if str(item or "").strip()
+        ]
+        if target_sections:
+            sections.append(f"- target_sections: {', '.join(target_sections)}")
+
+        existing_document_profile = dict((merged_constraints or {}).get("existing_document_profile") or {})
+        protected_units = [
+            str(item or "").strip()
+            for item in existing_document_profile.get("protected_units", [])
+            if str(item or "").strip()
+        ]
+        if protected_units:
+            sections.append(f"- protected_sections: {', '.join(protected_units)}")
+
+        return sections
+
 
 def _infer_document_title(goal: str, default_create_file: str) -> str:
     text = str(goal or "").strip()

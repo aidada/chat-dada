@@ -108,6 +108,7 @@ class DefaultOfficeStrategy:
         plan: dict[str, Any],
         current_batch_index: int,
         repair_mode: bool,
+        merged_constraints: dict[str, Any] | None = None,
     ) -> list[str]:
         sections = [
             goal,
