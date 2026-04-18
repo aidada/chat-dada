@@ -248,6 +248,29 @@ def test_docx_strategy_builds_section_plan_from_goal_and_reference() -> None:
     assert plan["sections"][2]["content_mode"] == "mixed"
 
 
+def test_docx_strategy_ignores_instruction_like_hard_requirements() -> None:
+    from agent.domains.office.strategies.docx import DocxStrategy
+
+    plan = DocxStrategy().build_plan(
+        goal="生成一份项目方案",
+        requested_slide_count=0,
+        build_batch_size=1,
+        default_create_file="project-plan.docx",
+        merged_constraints={
+            "goal_constraints": {
+                "hard_requirements": [
+                    "preserve formatting",
+                    "Executive Summary",
+                    "keep numbering consistent",
+                    "Project Scope",
+                ]
+            }
+        },
+    )
+
+    assert [section["heading"] for section in plan["sections"]] == ["Executive Summary", "Project Scope"]
+
+
 def test_xlsx_strategy_ignores_non_sheet_like_hard_requirements() -> None:
     from agent.domains.office.strategies.xlsx import XlsxStrategy
 
@@ -1466,6 +1489,32 @@ async def test_office_domain_xlsx_finalize_counts_sheet_count_as_completed_pages
 
     assert result.status == "ok"
     assert result.budget["cost_ledger"]["completed_pages"] == 3
+
+
+@pytest.mark.asyncio
+async def test_office_domain_docx_finalize_counts_section_count_as_completed_pages() -> None:
+    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+
+    payload = """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"project-plan.docx","format":"docx","role":"primary"}],"stats":{"section_count":3}}
+```"""
+
+    with (
+        patch(
+            "agent.domains.office.orchestrated.stream_nested_graph",
+            new=AsyncMock(return_value={"final_result": payload, "step_history": [{"strategy": "sequential"}]}),
+        ),
+        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch(
+            "agent.domains.office.orchestrated.execute_officecli_spec",
+            new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close project-plan.docx"}),
+        ),
+    ):
+        result = await run_office_domain_orchestrated({"query": "生成项目方案", "task_id": "office_docx_finalize"})
+
+    assert result.status == "ok"
+    assert result.budget["cost_ledger"]["completed_pages"] == 3
+    assert result.review["quality_report_summary"]["section_count"] == 3
 
 
 @pytest.mark.asyncio

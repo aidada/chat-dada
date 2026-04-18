@@ -59,6 +59,7 @@ def summarize_quality_report(report: dict[str, Any] | None) -> dict[str, Any]:
         "validated": bool(active.get("validated", False)),
     }
     for key in (
+        "section_count",
         "sheet_count",
         "slide_count",
         "content_slide_count",
@@ -86,7 +87,9 @@ def quality_report_summary_lines(report: dict[str, Any] | None) -> list[str]:
         f"质量状态: {summary.get('status', '')}",
         f"质量问题: {summary.get('issue_count', 0)} 个（error={summary.get('error_count', 0)}, warning={summary.get('warning_count', 0)}）",
     ]
-    if summary.get("slide_count") is not None:
+    if summary.get("section_count") is not None:
+        lines.append(f"关键统计: sections={summary.get('section_count')}")
+    elif summary.get("slide_count") is not None:
         lines.append(
             "关键统计: "
             f"slides={summary.get('slide_count')}, "
@@ -105,6 +108,7 @@ def _summarize_stats(stats: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(stats, dict):
         return {}
     summary_keys = (
+        "section_count",
         "sheet_count",
         "slide_count",
         "content_slide_count",

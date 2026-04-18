@@ -376,6 +376,33 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
         )
 
     result_meta = extract_office_result_json(content_text)
+    if isinstance(result_meta, dict):
+        result_stats = result_meta.get("stats")
+        if isinstance(result_stats, dict) and result_stats:
+            merged_quality_summary = dict(quality_report_summary)
+            for key in (
+                "section_count",
+                "sheet_count",
+                "slide_count",
+                "content_slide_count",
+                "notes_slide_count",
+                "transition_slide_count",
+                "visual_slide_count",
+                "text_only_slide_count",
+                "layout_variety_count",
+                "picture_count",
+                "chart_count",
+                "table_count",
+                "qa_checks",
+            ):
+                if merged_quality_summary.get(key) is None and result_stats.get(key) is not None:
+                    merged_quality_summary[key] = result_stats.get(key)
+            if merged_quality_summary != quality_report_summary:
+                quality_report_summary = merged_quality_summary
+                cost_ledger = attach_quality_summary(
+                    cost_ledger,
+                    quality_report_summary=quality_report_summary,
+                )
     artifact_refs = _resolve_artifact_refs(
         result_meta,
         runtime_target=runtime_target,
@@ -447,6 +474,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
             completed_pages = int(
                 stats.get("slide_count", 0)
                 or stats.get("sheet_count", 0)
+                or stats.get("section_count", 0)
                 or 0
             )
         except (TypeError, ValueError):
@@ -475,7 +503,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
             "operation": operation,
             "runtime_target": runtime_target,
             "quality_report": quality_report,
-            "quality_report_summary": summarize_quality_report(quality_report),
+            "quality_report_summary": quality_report_summary,
         },
         budget={
             "action": "allow",

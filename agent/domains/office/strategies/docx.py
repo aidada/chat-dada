@@ -207,7 +207,7 @@ def _collect_headings(*, merged_constraints: dict[str, Any] | None) -> list[str]
     if isinstance(hard_requirements, list):
         for item in hard_requirements:
             heading = str(item or "").strip()
-            if not heading:
+            if not heading or _is_instruction_like_heading(heading):
                 continue
             key = heading.casefold()
             if key in seen:
@@ -216,6 +216,42 @@ def _collect_headings(*, merged_constraints: dict[str, Any] | None) -> list[str]
             headings.append(heading)
 
     return headings
+
+
+_INSTRUCTION_LIKE_HEADING_TOKENS = (
+    "preserve ",
+    "keep ",
+    "maintain ",
+    "retain ",
+    "ensure ",
+    "use ",
+    "follow ",
+    "avoid ",
+    "remove ",
+    "update ",
+    "change ",
+    "rename ",
+    "formatting",
+    "format ",
+    "layout",
+    "style",
+    "should ",
+    "must ",
+    "need ",
+    "不要",
+    "保持",
+    "保留",
+    "避免",
+    "使用",
+    "更新",
+)
+
+
+def _is_instruction_like_heading(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        return True
+    return any(token in normalized for token in _INSTRUCTION_LIKE_HEADING_TOKENS)
 
 
 def _base_style_requirements(merged_constraints: dict[str, Any] | None) -> dict[str, Any]:
