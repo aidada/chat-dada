@@ -119,6 +119,50 @@ def test_profile_reference_payload_for_non_ppt_defaults_to_empty_constraints() -
     assert profiled["style"]["style_tokens"] == {}
 
 
+def test_profile_reference_payload_for_xlsx_extracts_minimal_structure_from_text_and_issues() -> None:
+    profiled = profile_reference_payload(
+        format_name="xlsx",
+        inspect_payload={
+            "text": "Workbook sheets: Summary, RawData, Dashboard",
+            "issues": {
+                "text": "Check formulas on Summary sheet and Dashboard chart titles.",
+                "message": "sheet scan complete",
+            },
+        },
+    )
+
+    assert profiled["structure"]["format"] == "xlsx"
+    assert profiled["style"]["format"] == "xlsx"
+    assert profiled["structure"]["units"] == [
+        {"name": "Summary"},
+        {"name": "RawData"},
+        {"name": "Dashboard"},
+    ]
+    assert profiled["style"]["style_tokens"]["issue_summary"] == "sheet scan complete"
+
+
+def test_profile_reference_payload_for_docx_extracts_minimal_structure_and_style() -> None:
+    profiled = profile_reference_payload(
+        format_name="docx",
+        inspect_payload={
+            "text": "Document sections: Executive Summary\nImplementation Plan\nAppendix",
+            "annotated": {
+                "text": "Uses Heading 1 for section titles and a formal tone.",
+                "message": "annotation complete",
+            },
+        },
+    )
+
+    assert profiled["structure"]["format"] == "docx"
+    assert profiled["style"]["format"] == "docx"
+    assert profiled["structure"]["units"] == [
+        {"name": "Executive Summary"},
+        {"name": "Implementation Plan"},
+        {"name": "Appendix"},
+    ]
+    assert profiled["style"]["style_tokens"]["annotation_summary"] == "annotation complete"
+
+
 def test_resolve_reference_constraints_keeps_goal_first() -> None:
     merged = resolve_reference_constraints(
         goal_constraints={"hard_requirements": ["rename summary sheet"]},

@@ -1957,6 +1957,61 @@ async def test_office_domain_reference_files_flow_from_entrypoint_into_runtime_c
 
 
 @pytest.mark.asyncio
+async def test_run_office_domain_orchestrated_forwards_caller_supplied_reference_fields() -> None:
+    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+
+    captured_state: dict[str, Any] = {}
+
+    async def fake_stream(*args: Any, **_kwargs: Any) -> dict[str, Any]:
+        captured_state.update(args[1])
+        return {
+            "final_result": """```json
+{"operation":"inspect","validated":true,"summary":"forwarded","artifacts":[],"stats":{}}
+```""",
+            "step_history": [{"strategy": "sequential"}],
+        }
+
+    with (
+        patch("agent.domains.office.orchestrated.stream_nested_graph", new=AsyncMock(side_effect=fake_stream)),
+        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="server"),
+    ):
+        result = await run_office_domain_orchestrated(
+            {
+                "query": "根据参考文件生成更新方案",
+                "task_id": "office_forward_reference_fields",
+                "goal_constraints": {"goal": "根据参考文件生成更新方案", "hard_requirements": ["保留附录"]},
+                "reference_structure_constraints": {"format": "docx", "units": [{"name": "执行摘要"}]},
+                "reference_style_constraints": {"format": "docx", "style_tokens": {"heading_style": "Heading1"}},
+                "existing_document_profile": {"format": "docx", "protected_units": ["附录"]},
+                "fidelity_deviations": [{"kind": "reference_style_deviation", "message": "theme fallback"}],
+                "reference_file_paths": ["/Users/test/Downloads/reference-outline.docx"],
+            }
+        )
+
+    assert captured_state["goal_constraints"] == {
+        "goal": "根据参考文件生成更新方案",
+        "hard_requirements": ["保留附录"],
+    }
+    assert captured_state["reference_structure_constraints"] == {
+        "format": "docx",
+        "units": [{"name": "执行摘要"}],
+    }
+    assert captured_state["reference_style_constraints"] == {
+        "format": "docx",
+        "style_tokens": {"heading_style": "Heading1"},
+    }
+    assert captured_state["existing_document_profile"] == {
+        "format": "docx",
+        "protected_units": ["附录"],
+    }
+    assert captured_state["fidelity_deviations"] == [
+        {"kind": "reference_style_deviation", "message": "theme fallback"}
+    ]
+    assert captured_state["reference_files"] == ["/Users/test/Downloads/reference-outline.docx"]
+    assert result.status == "ok"
+
+
+@pytest.mark.asyncio
 async def test_office_domain_write_close_failure_marks_error() -> None:
     from agent.domains.office.orchestrated import run_office_domain_orchestrated
 

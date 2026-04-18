@@ -1,6 +1,7 @@
 """Office domain orchestrated entrypoint."""
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import logging
 import time
@@ -268,28 +269,39 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
     finalize_started_at = time.perf_counter()
     _safe_emit("step", "Office task started...")
 
+    initial_state: dict[str, Any] = {
+        "goal": str(query),
+        "task_id": str(task_id),
+        "report_profile": "",
+        "format_hint": str(input_data.get("format_hint", "") or ""),
+        "file_hint": str(input_data.get("file_hint", "") or ""),
+        "source_files": source_files,
+        "reference_files": reference_files,
+        "operation_hint": str(input_data.get("operation_hint", "") or ""),
+        "cost": 0.0,
+        "progress": 0.0,
+        "confidence": 0.0,
+        "max_cost": OFFICE_MAX_COST,
+        "max_steps": OFFICE_MAX_STEPS,
+        "inner_recursion_limit": OFFICE_INNER_RECURSION_LIMIT,
+        "intermediate_results": [],
+        "evaluations": [],
+        "step_history": [],
+        "coverage": {},
+    }
+    for key in (
+        "goal_constraints",
+        "reference_structure_constraints",
+        "reference_style_constraints",
+        "existing_document_profile",
+        "fidelity_deviations",
+    ):
+        if key in input_data and input_data.get(key) is not None:
+            initial_state[key] = deepcopy(input_data.get(key))
+
     result = await stream_nested_graph(
         _graph,
-        {
-            "goal": str(query),
-            "task_id": str(task_id),
-            "report_profile": "",
-            "format_hint": str(input_data.get("format_hint", "") or ""),
-            "file_hint": str(input_data.get("file_hint", "") or ""),
-            "source_files": source_files,
-            "reference_files": reference_files,
-            "operation_hint": str(input_data.get("operation_hint", "") or ""),
-            "cost": 0.0,
-            "progress": 0.0,
-            "confidence": 0.0,
-            "max_cost": OFFICE_MAX_COST,
-            "max_steps": OFFICE_MAX_STEPS,
-            "inner_recursion_limit": OFFICE_INNER_RECURSION_LIMIT,
-            "intermediate_results": [],
-            "evaluations": [],
-            "step_history": [],
-            "coverage": {},
-        },
+        initial_state,
         config={
             "configurable": {
                 "thread_id": str(task_id),
