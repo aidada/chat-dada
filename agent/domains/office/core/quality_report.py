@@ -88,8 +88,13 @@ def summarize_quality_report(report: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def quality_report_summary_lines(report: dict[str, Any] | None) -> list[str]:
+    if not isinstance(report, dict) or not report:
+        return []
     summary = summarize_quality_report(report)
-    if not summary:
+    if not any(
+        value not in ("", None, False) and value != 0
+        for value in summary.values()
+    ):
         return []
     lines = [
         f"质量状态: {summary.get('status', '')}",

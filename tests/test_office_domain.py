@@ -1687,6 +1687,7 @@ async def test_office_domain_result_surfaces_fidelity_deviation_summary() -> Non
 
     assert result.status == "ok"
     assert result.review["quality_report_summary"]["fidelity_deviation_count"] == 1
+    assert result.budget["quality_report_summary"]["fidelity_deviation_count"] == 1
     assert result.budget["cost_ledger"]["quality_report_summary"]["fidelity_deviation_count"] == 1
 
 

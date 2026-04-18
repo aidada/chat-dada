@@ -1048,7 +1048,7 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
         service._session.finish_task.assert_awaited_once_with("task_running", "succeeded")
         usage_service.record_task_usage.assert_awaited_once()
 
-    async def test_execute_task_resume_preserves_summary_only_quality_diagnostics(self) -> None:
+    async def test_execute_task_resume_renders_merged_quality_summary_when_raw_report_is_stale(self) -> None:
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1124,6 +1124,13 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     "review": {
                         "passed": False,
                         "reason": "inner_recursion_limit",
+                        "quality_report": {
+                            "status": "hard_fail",
+                            "passed": False,
+                            "issue_count": 1,
+                            "error_count": 1,
+                            "warning_count": 0,
+                        },
                         "quality_report_summary": quality_summary,
                     },
                     "budget": {
@@ -1148,6 +1155,7 @@ class TaskServiceRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await service._execute_task("task_running")
 
         self.assertIn("保真偏差: 1 个", service._session.set_result_text.await_args_list[-1].args[1])
+        self.assertIn("slides=6", service._session.set_result_text.await_args_list[-1].args[1])
         final_projection = service._session.update_projection.await_args_list[-1].kwargs["projection_patch"]
         self.assertEqual(final_projection["review"]["quality_report_summary"]["fidelity_deviation_count"], 1)
         self.assertEqual(final_projection["budget"]["quality_report_summary"]["fidelity_deviation_count"], 1)

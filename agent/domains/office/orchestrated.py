@@ -344,6 +344,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
             budget={
                 "action": "allow",
                 "reason": f"workflow({' → '.join(strategies_used)})",
+                "quality_report_summary": quality_report_summary,
                 "cost_ledger": summarize_cost_ledger(cost_ledger),
             },
         )
@@ -386,6 +387,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
             budget={
                 "action": "allow",
                 "reason": f"workflow({' → '.join(strategies_used)})",
+                "quality_report_summary": quality_report_summary,
                 "cost_ledger": summarize_cost_ledger(cost_ledger),
             },
         )
@@ -461,6 +463,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
                 budget={
                     "action": "allow",
                     "reason": f"workflow({' → '.join(strategies_used)})",
+                    "quality_report_summary": quality_report_summary,
                     "cost_ledger": summarize_cost_ledger(cost_ledger),
                 },
             )
@@ -523,6 +526,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
         budget={
             "action": "allow",
             "reason": f"workflow({' → '.join(strategies_used)})",
+            "quality_report_summary": quality_report_summary,
             "cost_ledger": summarize_cost_ledger(cost_ledger),
         },
     )

@@ -144,6 +144,11 @@ def test_quality_report_summary_lines_render_from_merged_summary_payload() -> No
     assert any("质量终止原因: inner_recursion_limit" == line for line in lines)
 
 
+def test_quality_report_summary_lines_return_empty_for_empty_input() -> None:
+    assert quality_report_summary_lines(None) == []
+    assert quality_report_summary_lines({}) == []
+
+
 def test_cost_ledger_summary_includes_quality_report_summary() -> None:
     ledger = init_cost_ledger(task_id="t1", domain="office", requested_pages=6)
     report = build_quality_report(

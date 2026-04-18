@@ -835,9 +835,7 @@ class TaskService:
                 last_success = diagnostics.get("last_successful_tool") or {}
                 if last_success.get("command"):
                     detail_lines.append(f"最后一次成功工具调用: {last_success['command']}")
-                detail_lines.extend(
-                    quality_report_summary_lines(quality_report if quality_report else quality_report_summary)
-                )
+                detail_lines.extend(quality_report_summary_lines(quality_report_summary))
                 if detail_lines:
                     result_text = f"{result_text}\n" + "\n".join(detail_lines)
                     await self._session.set_result_text(task_id, result_text)
