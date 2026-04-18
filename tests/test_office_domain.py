@@ -1957,6 +1957,46 @@ async def test_office_domain_reference_files_flow_from_entrypoint_into_runtime_c
 
 
 @pytest.mark.asyncio
+async def test_office_domain_reference_files_are_added_to_office_constraints_allowlist() -> None:
+    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+
+    reference_file = "/Users/test/Downloads/reference-style.pptx"
+    captured: dict[str, Any] = {}
+
+    async def fake_stream_nested_graph(_graph, state, *, config=None, extra_payload=None):
+        captured["state"] = state
+        captured["config"] = config
+        return {
+            "final_result": """```json
+{"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"deck.pptx","path":"/Users/test/Desktop/deck.pptx","format":"pptx","role":"primary"}],"stats":{}}
+```""",
+            "quality_report": {"status": "passed"},
+            "step_history": [{"strategy": "sequential"}],
+            "cost_ledger": {"task_id": "office_reference_allowlist", "domain": "office"},
+        }
+
+    with (
+        patch("agent.domains.office.orchestrated.stream_nested_graph", new=AsyncMock(side_effect=fake_stream_nested_graph)),
+        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch(
+            "agent.domains.office.orchestrated.execute_officecli_spec",
+            new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close /Users/test/Desktop/deck.pptx"}),
+        ),
+    ):
+        result = await run_office_domain_orchestrated(
+            {
+                "query": "做一个 PPT",
+                "task_id": "office_reference_allowlist",
+                "reference_files": [reference_file],
+            }
+        )
+
+    assert result.status == "ok"
+    assert captured["state"]["reference_files"] == [reference_file]
+    assert captured["config"]["configurable"]["office_constraints"]["allowed_source_files"] == [reference_file]
+
+
+@pytest.mark.asyncio
 async def test_run_office_domain_orchestrated_forwards_caller_supplied_reference_fields() -> None:
     from agent.domains.office.orchestrated import run_office_domain_orchestrated
 
