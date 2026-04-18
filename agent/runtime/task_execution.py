@@ -30,7 +30,7 @@ from agent.runtime.cost_logging import (
     merge_tool_events_into_ledger,
     summarize_cost_ledger,
 )
-from agent.domains.office.core.quality_report import quality_report_summary_lines, summarize_quality_report
+from agent.workflows.office.core.quality_report import quality_report_summary_lines, summarize_quality_report
 from core.langsmith_config import build_langsmith_run_config
 from core.logger import monitor, new_trace_id
 from core.models import set_thinking_level

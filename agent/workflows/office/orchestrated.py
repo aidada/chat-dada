@@ -83,31 +83,36 @@ def _collect_reference_files(input_data: dict[str, Any]) -> list[str]:
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
-def _expose_image_local_dirs(source_files: list[str], reference_files: list[str]) -> None:
-    """把用户提供的本地素材所在目录暴露给 list_local_images 工具。
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".svg")
 
-    把每个来源文件的父目录写入 OFFICE_IMAGE_LOCAL_DIRS（os.pathsep 分隔），
-    image_tools.list_local_images 会读取这个变量去扫描可配图的本地素材。
+
+def _build_user_images(source_files: list[str], reference_files: list[str]) -> list[dict[str, str]]:
+    """从用户附件中筛出图片素材，组装为 list_user_images 工具可消费的结构。
+
+    数据来源：chat-dada-front 通过 ``/upload`` 上传后，url/path 进入 task 的
+    ``file_paths`` / ``reference_files``。返回的列表会作为 ``configurable.user_images``
+    注入到 langgraph 运行时，下游 image_tools.list_user_images 通过 ``get_config()``
+    读取，因此天然支持多任务并发，无需借助进程级状态。
     """
+    images: list[dict[str, str]] = []
     seen: set[str] = set()
-    dirs: list[str] = []
     for raw in [*source_files, *reference_files]:
         text = str(raw or "").strip()
         if not text:
             continue
-        try:
-            parent = Path(text).expanduser().resolve(strict=False).parent
-        except Exception:
+        name = Path(text).name
+        if Path(name).suffix.lower() not in _IMAGE_EXTS:
             continue
-        key = str(parent)
-        if key in seen:
+        if text in seen:
             continue
-        seen.add(key)
-        dirs.append(key)
-    if dirs:
-        os.environ["OFFICE_IMAGE_LOCAL_DIRS"] = os.pathsep.join(dirs)
-    else:
-        os.environ.pop("OFFICE_IMAGE_LOCAL_DIRS", None)
+        seen.add(text)
+        entry: dict[str, str] = {"name": name}
+        if text.startswith(("http://", "https://", "/uploads/", "/download/")):
+            entry["url"] = text
+        else:
+            entry["path"] = text
+        images.append(entry)
+    return images
 
 
 def _snapshot_outputs(outputs_dir: Path) -> dict[str, int]:
@@ -293,7 +298,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
 
     runtime_target = infer_office_runtime_target(configurable)
     before_snapshot = _snapshot_outputs(ALLOWED_DIR) if runtime_target == "server" else {}
-    _expose_image_local_dirs(source_files, reference_files)
+    user_images = _build_user_images(source_files, reference_files)
     _log.info("Starting Office workflow: query=%s task_id=%s", str(query)[:60], task_id)
     finalize_started_at = time.perf_counter()
     _safe_emit("step", "Office task started...")
@@ -339,6 +344,7 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
                     "allowed_output_dir": str(ALLOWED_DIR),
                     "runtime_target": runtime_target,
                 },
+                "user_images": user_images,
             }
         },
         extra_payload={

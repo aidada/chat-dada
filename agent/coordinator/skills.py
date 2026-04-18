@@ -142,14 +142,14 @@ skill_registry = SkillRegistry()
 
 
 def discover_skills() -> None:
-    """Scan agent/domains/*/orchestrated.py and register domain skills.
+    """Scan agent/workflows/*/orchestrated.py and register domain skills.
 
     Migrated from agent.platform.domain_registry.auto_discover().
 
     Falls back to legacy static imports when an orchestrated module does not
     expose an AgentProtocol subclass.
     """
-    agents_root = pathlib.Path(__file__).resolve().parent.parent / "domains"
+    agents_root = pathlib.Path(__file__).resolve().parent.parent / "workflows"
 
     for child in sorted(agents_root.iterdir()):
         if not child.is_dir() or child.name.startswith("_"):
@@ -158,7 +158,7 @@ def discover_skills() -> None:
         if not mod_path.exists():
             continue
 
-        module_name = f"agent.domains.{child.name}.orchestrated"
+        module_name = f"agent.workflows.{child.name}.orchestrated"
         try:
             mod = importlib.import_module(module_name)
         except Exception:
@@ -219,12 +219,6 @@ def _create_skill_description(domain_name: str) -> SkillDescription:
             "description": "Generate patent drafts based on technical content",
             "best_for": ["patent drafting", "IP documentation", "invention disclosure"],
             "timeout_seconds": 300,
-        },
-        "ppt": {
-            "description": "Create PowerPoint presentations via OfficeCLI",
-            "best_for": ["presentation creation", "slide generation", "report visualization"],
-            "timeout_seconds": 300,
-            "selectable": False,
         },
         "office": {
             "description": "Create, edit, inspect, or transform Office documents via OfficeCLI",

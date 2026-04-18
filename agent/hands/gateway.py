@@ -168,16 +168,14 @@ class ToolGateway:
         过渡期实现：包装现有工具函数为 gateway-aware adapters。
         """
         if domain == "patent":
-            from agent.domains.patent.tools import get_patent_tools
+            from agent.workflows.patent.tools import get_patent_tools
             domain_tools = list(get_patent_tools())
         elif domain == "zero_report":
-            from agent.domains.zero_report.tools import get_zero_report_tools
+            from agent.workflows.zero_report.tools import get_zero_report_tools
             domain_tools = list(get_zero_report_tools())
-        elif domain == "ppt":
-            from agent.domains.ppt.tools import get_ppt_tools
-            domain_tools = list(get_ppt_tools())
-        elif domain == "office":
-            from agent.domains.office.tools import get_office_tools
+        elif domain in ("office", "ppt"):
+            # ppt 已并入 office 域，统一走 office 工具集（包括 officecli 与 image 能力）。
+            from agent.workflows.office.tools import get_office_tools
             domain_tools = list(get_office_tools())
         else:
             domain_tools = []

@@ -8,7 +8,7 @@ from unittest.mock import patch
 import httpx
 from agent.capabilities.review_gates import ReviewResult
 from agent.capabilities.memory import ResearchMemory
-from agent.domains.research.config import (
+from agent.workflows.research.config import (
     ACADEMIC_DELIVERABLE_TYPE,
     ACADEMIC_PAPER_GUIDANCE_PROFILE,
     DEFAULT_DELIVERABLE_TYPE,
@@ -17,8 +17,8 @@ from agent.domains.research.config import (
     resolve_deliverable_type,
     resolve_report_profile,
 )
-from agent.domains.research.reviewers import ResearchReviewGate
-from agent.domains.research.workflow import (
+from agent.workflows.research.reviewers import ResearchReviewGate
+from agent.workflows.research.workflow import (
     _actionable_revision_targets,
     _should_retry_workflow_llm_node,
     aggregate_draft_node,
@@ -235,7 +235,7 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "workflow_trace": [],
         }
 
-        with patch("agent.domains.research.workflow.ask_user", return_value="继续修订"):
+        with patch("agent.workflows.research.workflow.ask_user", return_value="继续修订"):
             result = await checkpoint_b_node(state)
 
         self.assertTrue(result["needs_replan"])
@@ -254,7 +254,7 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "workflow_trace": [],
         }
 
-        with patch("agent.domains.research.workflow._invoke_llm_text", return_value=""):
+        with patch("agent.workflows.research.workflow._invoke_llm_text", return_value=""):
             result = await planner_node(state)
 
         self.assertEqual(result["budget"]["soft_budget_total"], 6)
@@ -271,7 +271,7 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "workflow_trace": [],
         }
 
-        with patch("agent.domains.research.workflow.ask_user") as mocked_ask:
+        with patch("agent.workflows.research.workflow.ask_user") as mocked_ask:
             result = await checkpoint_a_node(state)
 
         mocked_ask.assert_not_called()
@@ -298,8 +298,8 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             def _memory_factory(task_id: str):
                 return ResearchMemory(task_id, root=Path(tmpdir))
 
-            with patch("agent.domains.research.workflow._invoke_llm_text", return_value=""), patch(
-                "agent.domains.research.workflow.ResearchMemory",
+            with patch("agent.workflows.research.workflow._invoke_llm_text", return_value=""), patch(
+                "agent.workflows.research.workflow.ResearchMemory",
                 side_effect=_memory_factory,
             ):
                 result = await aggregate_draft_node(state)
@@ -321,8 +321,8 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
         }
         emitted: list[tuple[str, object]] = []
 
-        with patch("agent.domains.research.workflow.ask_user", return_value="继续修订"), patch(
-            "agent.domains.research.workflow._safe_emit",
+        with patch("agent.workflows.research.workflow.ask_user", return_value="继续修订"), patch(
+            "agent.workflows.research.workflow._safe_emit",
             side_effect=lambda event_type, content: emitted.append((event_type, content)),
         ):
             await checkpoint_b_node(state)
@@ -356,11 +356,11 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             def _memory_factory(task_id: str):
                 return ResearchMemory(task_id, root=Path(tmpdir))
 
-            with patch("agent.domains.research.workflow._invoke_llm_text", return_value=""), patch(
-                "agent.domains.research.workflow.ResearchMemory",
+            with patch("agent.workflows.research.workflow._invoke_llm_text", return_value=""), patch(
+                "agent.workflows.research.workflow.ResearchMemory",
                 side_effect=_memory_factory,
             ), patch(
-                "agent.domains.research.workflow._safe_emit",
+                "agent.workflows.research.workflow._safe_emit",
                 side_effect=lambda event_type, content: emitted.append((event_type, content)),
             ):
                 result = await synthesize_final_node(state)
@@ -402,7 +402,7 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "workflow_trace": [],
         }
 
-        with patch("agent.domains.research.workflow.ask_user", return_value="继续"):
+        with patch("agent.workflows.research.workflow.ask_user", return_value="继续"):
             result = await checkpoint_b_node(state)
 
         self.assertFalse(result["budget"]["awaiting_user_decision"])

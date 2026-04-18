@@ -1,2 +1,0 @@
-"""Patent domain agent package."""
-

@@ -1,4 +1,4 @@
-from agent.domains.office.reference_models import (
+from agent.workflows.office.reference_models import (
     build_conflict_resolution,
     build_existing_document_profile,
     build_goal_constraints,

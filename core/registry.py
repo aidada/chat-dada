@@ -177,7 +177,7 @@ register(
 )
 register(
     "writer",
-    fn_path="agent.domains.office.orchestrated:run_office_domain_orchestrated",
+    fn_path="agent.workflows.office.orchestrated:run_office_domain_orchestrated",
     cap_type="agent",
     description="Generate or edit Office documents via OfficeCLI",
 )

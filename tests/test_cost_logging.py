@@ -9,7 +9,7 @@ from agent.runtime.cost_logging import (
     merge_tool_events_into_ledger,
     summarize_cost_ledger,
 )
-from agent.domains.office.core.quality_report import (
+from agent.workflows.office.core.quality_report import (
     build_quality_report,
     quality_report_summary_lines,
     summarize_quality_report,

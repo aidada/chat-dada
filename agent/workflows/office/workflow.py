@@ -402,8 +402,8 @@ _OFFICE_SYSTEM = """\
 - 结构化 `officecli` / `officecli_batch` 调用一律使用 `verb` 字段；不要在工具参数里使用 `command`。如果参考手册里的原始 `officecli batch` JSON 示例出现 `command`，转换成结构化工具调用时必须改写为 `verb`。
 - 只允许使用 OfficeCLI 工具；禁止编写或执行 Python、bash、shell 脚本来生成或修改 Office 文档。
 - 配图能力：
-  - 优先调用 `list_local_images` 查找用户已上传的本地素材；命中即用对应路径作为 `officecli add ... --type picture --prop src=<path>` 的入参。
-  - 没有合适素材且需要插图时，调用 `image_gen(prompt=...)` 生成示意图（产物会落到 outputs/），再用返回的 `files[0]` 路径作为 `src` 传入 `officecli add --type picture`。
+  - 优先调用 `list_user_images` 查看用户已通过前端上传的图片素材；命中即把对应 `url`（优先）或 `path` 作为 `officecli add ... --type picture --prop src=<...>` 的入参。
+  - 没有合适素材且需要插图时，调用 `image_gen(prompt=...)` 生成示意图（产物 落到 outputs/ 并自动上传 R2），再用返回的 `files[0]`（R2 预签名 URL，缺省回退本地 path）作为 `src` 传入 `officecli add --type picture`。
   - 不要把生成图片当作 cover/装饰背景的唯一来源；至少在内容 slide 优先考虑 chart/shape/figure 组合。
 - 如果发生写操作，完成后必须调用 validate；若 validate 未通过，不要宣称任务成功。
 - 如果当前阶段明确说明“final validation deferred”，则本轮只允许完成指定 batch 的写入，不要提前做整套文档的最终 QA。

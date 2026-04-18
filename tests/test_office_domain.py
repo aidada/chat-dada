@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage
 
 
 def test_infer_default_create_file_from_user_intent() -> None:
-    from agent.domains.office.workflow import _infer_default_create_file
+    from agent.workflows.office.workflow import _infer_default_create_file
 
     filename = _infer_default_create_file(
         "帮我在下载文件夹创建一个 PPT，大概 3 页，内容是介绍 chat-dada这个agent 软件 可以帮助你完成什么工作，解决的痛点是什么",
@@ -21,7 +21,7 @@ def test_infer_default_create_file_from_user_intent() -> None:
 
 
 def test_infer_default_create_file_preserves_explicit_filename() -> None:
-    from agent.domains.office.workflow import _infer_default_create_file
+    from agent.workflows.office.workflow import _infer_default_create_file
 
     filename = _infer_default_create_file(
         "请创建 quarterly-review.pptx，并放到下载文件夹",
@@ -33,7 +33,7 @@ def test_infer_default_create_file_preserves_explicit_filename() -> None:
 
 
 def test_infer_default_create_file_rewrites_generic_llm_filename() -> None:
-    from agent.domains.office.workflow import _infer_default_create_file
+    from agent.workflows.office.workflow import _infer_default_create_file
 
     filename = _infer_default_create_file(
         "在下载文件夹下，为我生成一个 PPT，主题为 论如何在新时代 AI 环境下，对孩子进行现代化教育，一共 10 页",
@@ -46,7 +46,7 @@ def test_infer_default_create_file_rewrites_generic_llm_filename() -> None:
 
 @pytest.mark.asyncio
 async def test_office_preflight_increases_inner_limit_for_large_visual_deck() -> None:
-    from agent.domains.office.workflow import OFFICE_INNER_RECURSION_LIMIT, preflight_node
+    from agent.workflows.office.workflow import OFFICE_INNER_RECURSION_LIMIT, preflight_node
 
     result = await preflight_node(
         {
@@ -66,7 +66,7 @@ async def test_office_preflight_increases_inner_limit_for_large_visual_deck() ->
 
 @pytest.mark.asyncio
 async def test_office_planning_node_creates_deck_plan_and_batches() -> None:
-    from agent.domains.office.workflow import planning_node
+    from agent.workflows.office.workflow import planning_node
 
     result = await planning_node(
         {
@@ -94,7 +94,7 @@ async def test_office_planning_node_creates_deck_plan_and_batches() -> None:
 
 @pytest.mark.asyncio
 async def test_office_planning_node_refines_generic_filename_from_plan_title() -> None:
-    from agent.domains.office.workflow import planning_node
+    from agent.workflows.office.workflow import planning_node
 
     result = await planning_node(
         {
@@ -114,10 +114,10 @@ async def test_office_planning_node_refines_generic_filename_from_plan_title() -
 
 @pytest.mark.asyncio
 async def test_office_resolve_reference_inputs_node_ignores_unreadable_files() -> None:
-    from agent.domains.office.workflow import resolve_reference_inputs_node
+    from agent.workflows.office.workflow import resolve_reference_inputs_node
 
     with patch(
-        "agent.domains.office.workflow.inspect_reference_file",
+        "agent.workflows.office.workflow.inspect_reference_file",
         new=AsyncMock(side_effect=FileNotFoundError("missing reference")),
     ):
         result = await resolve_reference_inputs_node(
@@ -133,7 +133,7 @@ async def test_office_resolve_reference_inputs_node_ignores_unreadable_files() -
 
 @pytest.mark.asyncio
 async def test_docx_planning_node_uses_llm_structured_goal_constraints() -> None:
-    import agent.domains.office.workflow as workflow_module
+    import agent.workflows.office.workflow as workflow_module
 
     class FakeLLM:
         async def ainvoke(self, _messages):
@@ -178,8 +178,8 @@ async def test_docx_planning_node_uses_llm_structured_goal_constraints() -> None
 
 @pytest.mark.asyncio
 async def test_planning_node_carries_reference_constraints_into_task_profile() -> None:
-    from agent.domains.office.strategies.ppt import PptStrategy
-    from agent.domains.office.workflow import planning_node
+    from agent.workflows.office.strategies.ppt import PptStrategy
+    from agent.workflows.office.workflow import planning_node
 
     class IncompletePlanPptStrategy(PptStrategy):
         def __init__(self) -> None:
@@ -197,7 +197,7 @@ async def test_planning_node_carries_reference_constraints_into_task_profile() -
             return plan
 
     with patch(
-        "agent.domains.office.workflow.get_strategy_for_format",
+        "agent.workflows.office.workflow.get_strategy_for_format",
         return_value=IncompletePlanPptStrategy(),
     ):
         result = await planning_node(
@@ -231,7 +231,7 @@ async def test_planning_node_carries_reference_constraints_into_task_profile() -
 
 @pytest.mark.asyncio
 async def test_planning_node_refines_filename_when_format_is_inferred() -> None:
-    from agent.domains.office.workflow import planning_node
+    from agent.workflows.office.workflow import planning_node
 
     result = await planning_node(
         {
@@ -249,7 +249,7 @@ async def test_planning_node_refines_filename_when_format_is_inferred() -> None:
 
 
 def test_office_route_after_build_loops_until_all_batches_written() -> None:
-    from agent.domains.office.workflow import route_after_build
+    from agent.workflows.office.workflow import route_after_build
 
     assert route_after_build({"current_stage": "build"}) == "build"
     assert route_after_build({"current_stage": "qa_fix"}) == "qa_fix"
@@ -257,23 +257,23 @@ def test_office_route_after_build_loops_until_all_batches_written() -> None:
 
 
 def test_office_route_after_qa_fix_retries_then_finalizes() -> None:
-    from agent.domains.office.workflow import route_after_qa_fix
+    from agent.workflows.office.workflow import route_after_qa_fix
 
     assert route_after_qa_fix({"current_stage": "build"}) == "build"
     assert route_after_qa_fix({"current_stage": "finalize"}) == "finalize"
 
 
 def test_strategy_selector_returns_docx_and_xlsx_specific_strategies() -> None:
-    from agent.domains.office.strategies import get_strategy_for_format
-    from agent.domains.office.strategies.docx import DocxStrategy
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies import get_strategy_for_format
+    from agent.workflows.office.strategies.docx import DocxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     assert isinstance(get_strategy_for_format("docx"), DocxStrategy)
     assert isinstance(get_strategy_for_format("xlsx"), XlsxStrategy)
 
 
 def test_xlsx_strategy_builds_sheet_plan_from_goal_and_reference() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成一个预算分析表，包含 RawData、Summary、Dashboard",
@@ -293,7 +293,7 @@ def test_xlsx_strategy_builds_sheet_plan_from_goal_and_reference() -> None:
 
 
 def test_docx_strategy_builds_section_plan_from_goal_and_reference() -> None:
-    from agent.domains.office.strategies.docx import DocxStrategy
+    from agent.workflows.office.strategies.docx import DocxStrategy
 
     plan = DocxStrategy().build_plan(
         goal="生成一份项目方案，包含背景、目标、实施计划、风险控制",
@@ -321,7 +321,7 @@ def test_docx_strategy_builds_section_plan_from_goal_and_reference() -> None:
 
 
 def test_docx_strategy_ignores_instruction_like_hard_requirements() -> None:
-    from agent.domains.office.strategies.docx import DocxStrategy
+    from agent.workflows.office.strategies.docx import DocxStrategy
 
     plan = DocxStrategy().build_plan(
         goal="生成一份项目方案",
@@ -345,7 +345,7 @@ def test_docx_strategy_ignores_instruction_like_hard_requirements() -> None:
 
 
 def test_xlsx_strategy_ignores_non_sheet_like_hard_requirements() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成一个预算分析表，保留公式并重命名汇总表",
@@ -364,7 +364,7 @@ def test_xlsx_strategy_ignores_non_sheet_like_hard_requirements() -> None:
 
 
 def test_xlsx_strategy_accepts_realistic_multi_word_sheet_name() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成区域销售预算表",
@@ -385,7 +385,7 @@ def test_xlsx_strategy_accepts_realistic_multi_word_sheet_name() -> None:
 
 
 def test_xlsx_strategy_ignores_string_hard_requirements_value() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成预算分析表",
@@ -404,7 +404,7 @@ def test_xlsx_strategy_ignores_string_hard_requirements_value() -> None:
 
 
 def test_xlsx_strategy_accepts_numeric_and_light_punctuation_sheet_names() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成财务预算表",
@@ -438,7 +438,7 @@ def test_xlsx_strategy_accepts_numeric_and_light_punctuation_sheet_names() -> No
 
 
 def test_xlsx_strategy_accepts_comma_separated_explicit_sheet_name() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成财务预算表",
@@ -456,7 +456,7 @@ def test_xlsx_strategy_accepts_comma_separated_explicit_sheet_name() -> None:
 
 
 def test_xlsx_strategy_rejects_overlong_sheet_name() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     long_name = "Budget Forecast For International Sales 2026"
     plan = XlsxStrategy().build_plan(
@@ -476,7 +476,7 @@ def test_xlsx_strategy_rejects_overlong_sheet_name() -> None:
 
 
 def test_xlsx_strategy_rejects_forbidden_character_sheet_name() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成预算分析表",
@@ -495,7 +495,7 @@ def test_xlsx_strategy_rejects_forbidden_character_sheet_name() -> None:
 
 
 def test_xlsx_strategy_build_plan_dedupes_case_insensitive_sheet_names() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成预算分析表",
@@ -513,7 +513,7 @@ def test_xlsx_strategy_build_plan_dedupes_case_insensitive_sheet_names() -> None
 
 
 def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     existing_sheet = {
@@ -556,7 +556,7 @@ def test_xlsx_strategy_validate_plan_preserves_existing_sheets_and_batches() -> 
 
 
 def test_xlsx_strategy_validate_plan_rebuilds_case_insensitive_duplicate_sheet_names() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     plan, issues = strategy.validate_plan(
@@ -601,7 +601,7 @@ def test_xlsx_strategy_validate_plan_rebuilds_case_insensitive_duplicate_sheet_n
 
 
 def test_xlsx_strategy_validate_plan_rebuilds_invalid_preserved_sheet_name() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     plan, issues = strategy.validate_plan(
@@ -636,7 +636,7 @@ def test_xlsx_strategy_validate_plan_rebuilds_invalid_preserved_sheet_name() -> 
 
 
 def test_xlsx_strategy_validate_plan_falls_back_on_malformed_numeric_fields() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     plan, issues = strategy.validate_plan(
@@ -690,7 +690,7 @@ def test_xlsx_strategy_validate_plan_falls_back_on_malformed_numeric_fields() ->
 
 
 def test_xlsx_strategy_validate_plan_rebuilds_duplicate_preserved_batches() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     existing_sheets = [
@@ -768,7 +768,7 @@ def test_xlsx_strategy_validate_plan_rebuilds_duplicate_preserved_batches() -> N
 
 
 def test_xlsx_strategy_validate_plan_rebuilds_gap_or_overlap_in_preserved_batches() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     existing_sheets = [
@@ -866,7 +866,7 @@ def test_xlsx_strategy_validate_plan_rebuilds_gap_or_overlap_in_preserved_batche
 
 
 def test_xlsx_strategy_validate_plan_preserves_valid_multi_sheet_batch_set() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     existing_sheets = [
@@ -954,7 +954,7 @@ def test_xlsx_strategy_validate_plan_preserves_valid_multi_sheet_batch_set() -> 
 
 
 def test_xlsx_strategy_sanitizes_table_region_identifier_from_multi_word_sheet_name() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成区域销售预算表",
@@ -972,7 +972,7 @@ def test_xlsx_strategy_sanitizes_table_region_identifier_from_multi_word_sheet_n
 
 
 def test_xlsx_strategy_sanitizes_numeric_leading_table_region_identifier() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成预算分析表",
@@ -991,7 +991,7 @@ def test_xlsx_strategy_sanitizes_numeric_leading_table_region_identifier() -> No
 
 
 def test_xlsx_strategy_generates_unique_table_region_identifiers_for_colliding_sheet_names() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成预算分析表",
@@ -1011,7 +1011,7 @@ def test_xlsx_strategy_generates_unique_table_region_identifiers_for_colliding_s
 
 
 def test_xlsx_strategy_ignores_descriptive_reference_unit_names() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     plan = XlsxStrategy().build_plan(
         goal="生成预算分析表",
@@ -1034,7 +1034,7 @@ def test_xlsx_strategy_ignores_descriptive_reference_unit_names() -> None:
 
 
 def test_xlsx_strategy_validate_plan_avoids_collision_with_preserved_table_region_identifier() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     plan, issues = strategy.validate_plan(
@@ -1083,7 +1083,7 @@ def test_xlsx_strategy_validate_plan_avoids_collision_with_preserved_table_regio
 
 
 def test_xlsx_strategy_validate_plan_avoids_collision_when_preserved_identifier_comes_later() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     plan, issues = strategy.validate_plan(
@@ -1132,7 +1132,7 @@ def test_xlsx_strategy_validate_plan_avoids_collision_when_preserved_identifier_
 
 
 def test_xlsx_strategy_validate_plan_normalizes_stale_alias_fields_in_preserved_batch() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     existing_sheets = [
@@ -1188,7 +1188,7 @@ def test_xlsx_strategy_validate_plan_normalizes_stale_alias_fields_in_preserved_
 
 
 def test_xlsx_strategy_validate_plan_normalizes_stale_alias_ranges_in_preserved_batch() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     existing_sheets = [
@@ -1244,7 +1244,7 @@ def test_xlsx_strategy_validate_plan_normalizes_stale_alias_ranges_in_preserved_
 
 
 def test_xlsx_strategy_validate_plan_rebuilds_inconsistent_preserved_batch() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     existing_sheets = [
@@ -1320,7 +1320,7 @@ def test_xlsx_strategy_validate_plan_rebuilds_inconsistent_preserved_batch() -> 
 
 
 def test_xlsx_strategy_validate_plan_does_not_expand_string_list_fields() -> None:
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     strategy = XlsxStrategy()
     plan, issues = strategy.validate_plan(
@@ -1375,7 +1375,7 @@ def test_xlsx_strategy_validate_plan_does_not_expand_string_list_fields() -> Non
 
 
 def test_ppt_strategy_build_input_sections_include_batch_context() -> None:
-    from agent.domains.office.strategies.ppt import PptStrategy
+    from agent.workflows.office.strategies.ppt import PptStrategy
 
     strategy = PptStrategy()
     plan = strategy.build_plan(
@@ -1407,7 +1407,7 @@ def test_ppt_strategy_build_input_sections_include_batch_context() -> None:
 
 
 def test_ppt_strategy_validate_plan_repairs_missing_contract_fields() -> None:
-    from agent.domains.office.strategies.ppt import PptStrategy
+    from agent.workflows.office.strategies.ppt import PptStrategy
 
     strategy = PptStrategy()
     plan, issues = strategy.validate_plan(
@@ -1436,7 +1436,7 @@ def test_ppt_strategy_validate_plan_repairs_missing_contract_fields() -> None:
 
 
 def test_ppt_strategy_quality_metrics_pass_for_long_deck() -> None:
-    from agent.domains.office.strategies.ppt import PptStrategy
+    from agent.workflows.office.strategies.ppt import PptStrategy
 
     issues = PptStrategy().evaluate_quality_stats(
         operation="create",
@@ -1459,7 +1459,7 @@ def test_ppt_strategy_quality_metrics_pass_for_long_deck() -> None:
 
 
 def test_ppt_strategy_build_plan_uses_reference_slide_names() -> None:
-    from agent.domains.office.strategies.ppt import PptStrategy
+    from agent.workflows.office.strategies.ppt import PptStrategy
 
     plan = PptStrategy().build_plan(
         goal="按参考案例生成 6 页产品介绍",
@@ -1478,7 +1478,7 @@ def test_ppt_strategy_build_plan_uses_reference_slide_names() -> None:
 
 @pytest.mark.asyncio
 async def test_ppt_quality_report_can_record_reference_deviation() -> None:
-    from agent.domains.office.workflow import qa_fix_node
+    from agent.workflows.office.workflow import qa_fix_node
 
     state = {
         "format": "pptx",
@@ -1512,7 +1512,7 @@ async def _run_build_stage_with_captured_context(
     format_specific_guidance: str = "",
     gate: Any,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    from agent.domains.office.core.build import run_build_stage
+    from agent.workflows.office.core.build import run_build_stage
 
     captured: dict[str, Any] = {}
 
@@ -1530,12 +1530,12 @@ async def _run_build_stage_with_captured_context(
         return {"messages": [AIMessage(content="build complete")]}
 
     with (
-        patch("agent.domains.office.core.build.get_config", return_value={"configurable": {}}),
-        patch("agent.domains.office.core.build.resolve_deepagents_runtime", return_value=([], object())),
-        patch("agent.domains.office.core.build.build_chat_model", return_value=object()),
-        patch("agent.domains.office.core.build.build_officecli_skill_bundle", return_value="officecli skill bundle"),
-        patch("agent.domains.office.core.build.create_deep_agent", side_effect=fake_create_deep_agent),
-        patch("agent.domains.office.core.build.stream_nested_graph", new=AsyncMock(side_effect=fake_stream_nested_graph)),
+        patch("agent.workflows.office.core.build.get_config", return_value={"configurable": {}}),
+        patch("agent.workflows.office.core.build.resolve_deepagents_runtime", return_value=([], object())),
+        patch("agent.workflows.office.core.build.build_chat_model", return_value=object()),
+        patch("agent.workflows.office.core.build.build_officecli_skill_bundle", return_value="officecli skill bundle"),
+        patch("agent.workflows.office.core.build.create_deep_agent", side_effect=fake_create_deep_agent),
+        patch("agent.workflows.office.core.build.stream_nested_graph", new=AsyncMock(side_effect=fake_stream_nested_graph)),
     ):
         result = await run_build_stage(
             state,
@@ -1551,7 +1551,7 @@ async def _run_build_stage_with_captured_context(
 
 @pytest.mark.asyncio
 async def test_ppt_reference_edit_build_stage_surfaces_goal_sources_batch_context_and_stage_transition() -> None:
-    from agent.domains.office.strategies.ppt import PptStrategy
+    from agent.workflows.office.strategies.ppt import PptStrategy
 
     goal = "参考品牌案例的视觉风格，更新季度复盘 PPT，并突出 AI 自动化带来的 ROI。"
     target_file = "/Users/test/Downloads/qbr-edit.pptx"
@@ -1612,8 +1612,8 @@ async def test_ppt_reference_edit_build_stage_surfaces_goal_sources_batch_contex
 
 @pytest.mark.asyncio
 async def test_xlsx_reference_create_build_stage_carries_planned_workbook_topology_into_execution_context() -> None:
-    from agent.domains.office.workflow import planning_node
-    from agent.domains.office.strategies.xlsx import XlsxStrategy
+    from agent.workflows.office.workflow import planning_node
+    from agent.workflows.office.strategies.xlsx import XlsxStrategy
 
     goal = "参考财务模板创建预算工作簿，包含 Inputs、Calculations、Dashboard 三张表。"
     planning_result = await planning_node(
@@ -1678,8 +1678,8 @@ async def test_xlsx_reference_create_build_stage_carries_planned_workbook_topolo
 
 @pytest.mark.asyncio
 async def test_docx_protected_section_build_stage_surfaces_target_and_protected_sections_into_execution_context() -> None:
-    from agent.domains.office.strategies.docx import DocxStrategy
-    from agent.domains.office.workflow import planning_node
+    from agent.workflows.office.strategies.docx import DocxStrategy
+    from agent.workflows.office.workflow import planning_node
 
     class FakeLLM:
         async def ainvoke(self, _messages):
@@ -1687,7 +1687,7 @@ async def test_docx_protected_section_build_stage_surfaces_target_and_protected_
                 content='{"section_headings":["执行摘要","实施计划"],"formatting_instructions":["preserve numbering"]}'
             )
 
-    with patch("agent.domains.office.workflow.get_llm", return_value=FakeLLM()):
+    with patch("agent.workflows.office.workflow.get_llm", return_value=FakeLLM()):
         planning_result = await planning_node(
             {
                 "goal": "参考方案模板，更新项目方案中的执行摘要和实施计划，并保留附录与致谢。",
@@ -1757,7 +1757,7 @@ async def test_docx_protected_section_build_stage_surfaces_target_and_protected_
 
 @pytest.mark.asyncio
 async def test_office_domain_server_artifact_falls_back_to_outputs_snapshot(tmp_path) -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     outputs_dir = tmp_path / "outputs"
     outputs_dir.mkdir()
@@ -1773,11 +1773,11 @@ async def test_office_domain_server_artifact_falls_back_to_outputs_snapshot(tmp_
         }
 
     with (
-        patch("agent.domains.office.orchestrated.stream_nested_graph", new=AsyncMock(side_effect=fake_stream)),
-        patch("agent.domains.office.orchestrated.ALLOWED_DIR", outputs_dir),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="server"),
+        patch("agent.workflows.office.orchestrated.stream_nested_graph", new=AsyncMock(side_effect=fake_stream)),
+        patch("agent.workflows.office.orchestrated.ALLOWED_DIR", outputs_dir),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="server"),
         patch(
-            "agent.domains.office.orchestrated.execute_officecli_spec",
+            "agent.workflows.office.orchestrated.execute_officecli_spec",
             new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close deck.pptx"}),
         ),
     ):
@@ -1791,7 +1791,7 @@ async def test_office_domain_server_artifact_falls_back_to_outputs_snapshot(tmp_
 
 @pytest.mark.asyncio
 async def test_office_domain_xlsx_finalize_counts_sheet_count_as_completed_pages() -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     payload = """```json
 {"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"budget.xlsx","format":"xlsx","role":"primary"}],"stats":{"sheet_count":3}}
@@ -1799,12 +1799,12 @@ async def test_office_domain_xlsx_finalize_counts_sheet_count_as_completed_pages
 
     with (
         patch(
-            "agent.domains.office.orchestrated.stream_nested_graph",
+            "agent.workflows.office.orchestrated.stream_nested_graph",
             new=AsyncMock(return_value={"final_result": payload, "step_history": [{"strategy": "sequential"}]}),
         ),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
         patch(
-            "agent.domains.office.orchestrated.execute_officecli_spec",
+            "agent.workflows.office.orchestrated.execute_officecli_spec",
             new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close budget.xlsx"}),
         ),
     ):
@@ -1816,7 +1816,7 @@ async def test_office_domain_xlsx_finalize_counts_sheet_count_as_completed_pages
 
 @pytest.mark.asyncio
 async def test_office_domain_docx_finalize_counts_section_count_as_completed_pages() -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     payload = """```json
 {"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"project-plan.docx","format":"docx","role":"primary"}],"stats":{"section_count":3}}
@@ -1824,12 +1824,12 @@ async def test_office_domain_docx_finalize_counts_section_count_as_completed_pag
 
     with (
         patch(
-            "agent.domains.office.orchestrated.stream_nested_graph",
+            "agent.workflows.office.orchestrated.stream_nested_graph",
             new=AsyncMock(return_value={"final_result": payload, "step_history": [{"strategy": "sequential"}]}),
         ),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
         patch(
-            "agent.domains.office.orchestrated.execute_officecli_spec",
+            "agent.workflows.office.orchestrated.execute_officecli_spec",
             new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close project-plan.docx"}),
         ),
     ):
@@ -1842,7 +1842,7 @@ async def test_office_domain_docx_finalize_counts_section_count_as_completed_pag
 
 @pytest.mark.asyncio
 async def test_office_domain_desktop_artifact_uses_returned_local_path() -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     payload = """```json
 {"operation":"edit","validated":true,"summary":"updated","artifacts":[{"filename":"deck.pptx","path":"/Users/test/Desktop/deck.pptx","format":"pptx","role":"primary"}],"stats":{}}
@@ -1850,12 +1850,12 @@ async def test_office_domain_desktop_artifact_uses_returned_local_path() -> None
 
     with (
         patch(
-            "agent.domains.office.orchestrated.stream_nested_graph",
+            "agent.workflows.office.orchestrated.stream_nested_graph",
             new=AsyncMock(return_value={"final_result": payload, "step_history": [{"strategy": "sequential"}]}),
         ),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
         patch(
-            "agent.domains.office.orchestrated.execute_officecli_spec",
+            "agent.workflows.office.orchestrated.execute_officecli_spec",
             new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close /Users/test/Desktop/deck.pptx"}),
         ),
     ):
@@ -1869,7 +1869,7 @@ async def test_office_domain_desktop_artifact_uses_returned_local_path() -> None
 
 @pytest.mark.asyncio
 async def test_office_domain_inspect_allows_no_artifact() -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     payload = """```json
 {"operation":"inspect","validated":false,"summary":"已完成检查","artifacts":[],"stats":{}}
@@ -1877,10 +1877,10 @@ async def test_office_domain_inspect_allows_no_artifact() -> None:
 
     with (
         patch(
-            "agent.domains.office.orchestrated.stream_nested_graph",
+            "agent.workflows.office.orchestrated.stream_nested_graph",
             new=AsyncMock(return_value={"final_result": payload, "step_history": [{"strategy": "sequential"}]}),
         ),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="server"),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="server"),
     ):
         result = await run_office_domain_orchestrated({"query": "检查这个文档", "task_id": "office_inspect"})
 
@@ -1891,7 +1891,7 @@ async def test_office_domain_inspect_allows_no_artifact() -> None:
 
 @pytest.mark.asyncio
 async def test_office_domain_reference_files_flow_from_entrypoint_into_runtime_constraints() -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     reference_file = "/Users/test/Downloads/reference-style.pptx"
     captured_state: dict[str, Any] = {}
@@ -1920,19 +1920,19 @@ async def test_office_domain_reference_files_flow_from_entrypoint_into_runtime_c
         }
 
     with (
-        patch("agent.domains.office.workflow.inspect_reference_file", new=AsyncMock(side_effect=fake_inspect_reference_file)),
+        patch("agent.workflows.office.workflow.inspect_reference_file", new=AsyncMock(side_effect=fake_inspect_reference_file)),
         patch(
-            "agent.domains.office.workflow.profile_reference_payload",
+            "agent.workflows.office.workflow.profile_reference_payload",
             return_value={
                 "structure": {"format": "pptx", "units": [{"name": "封面"}, {"name": "问题"}, {"name": "方案"}]},
                 "style": {"format": "pptx", "style_tokens": {"theme": "blue"}},
             },
         ),
-        patch("agent.domains.office.workflow.run_section_builder", new=AsyncMock(side_effect=fake_run_section_builder)),
-        patch("agent.domains.office.workflow.run_quality_gate", side_effect=fake_run_quality_gate),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch("agent.workflows.office.workflow.run_section_builder", new=AsyncMock(side_effect=fake_run_section_builder)),
+        patch("agent.workflows.office.workflow.run_quality_gate", side_effect=fake_run_quality_gate),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
         patch(
-            "agent.domains.office.orchestrated.execute_officecli_spec",
+            "agent.workflows.office.orchestrated.execute_officecli_spec",
             new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close /Users/test/Desktop/deck.pptx"}),
         ),
     ):
@@ -1958,7 +1958,7 @@ async def test_office_domain_reference_files_flow_from_entrypoint_into_runtime_c
 
 @pytest.mark.asyncio
 async def test_office_domain_reference_files_are_added_to_office_constraints_allowlist() -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     reference_file = "/Users/test/Downloads/reference-style.pptx"
     captured: dict[str, Any] = {}
@@ -1976,10 +1976,10 @@ async def test_office_domain_reference_files_are_added_to_office_constraints_all
         }
 
     with (
-        patch("agent.domains.office.orchestrated.stream_nested_graph", new=AsyncMock(side_effect=fake_stream_nested_graph)),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch("agent.workflows.office.orchestrated.stream_nested_graph", new=AsyncMock(side_effect=fake_stream_nested_graph)),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
         patch(
-            "agent.domains.office.orchestrated.execute_officecli_spec",
+            "agent.workflows.office.orchestrated.execute_officecli_spec",
             new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close /Users/test/Desktop/deck.pptx"}),
         ),
     ):
@@ -1998,7 +1998,7 @@ async def test_office_domain_reference_files_are_added_to_office_constraints_all
 
 @pytest.mark.asyncio
 async def test_run_office_domain_orchestrated_forwards_caller_supplied_reference_fields() -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     captured_state: dict[str, Any] = {}
 
@@ -2012,8 +2012,8 @@ async def test_run_office_domain_orchestrated_forwards_caller_supplied_reference
         }
 
     with (
-        patch("agent.domains.office.orchestrated.stream_nested_graph", new=AsyncMock(side_effect=fake_stream)),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="server"),
+        patch("agent.workflows.office.orchestrated.stream_nested_graph", new=AsyncMock(side_effect=fake_stream)),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="server"),
     ):
         result = await run_office_domain_orchestrated(
             {
@@ -2053,7 +2053,7 @@ async def test_run_office_domain_orchestrated_forwards_caller_supplied_reference
 
 @pytest.mark.asyncio
 async def test_office_domain_write_close_failure_marks_error() -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     payload = """```json
 {"operation":"create","validated":true,"summary":"done","artifacts":[{"filename":"deck.pptx","path":"/Users/test/Desktop/deck.pptx","format":"pptx","role":"primary"}],"stats":{}}
@@ -2061,12 +2061,12 @@ async def test_office_domain_write_close_failure_marks_error() -> None:
 
     with (
         patch(
-            "agent.domains.office.orchestrated.stream_nested_graph",
+            "agent.workflows.office.orchestrated.stream_nested_graph",
             new=AsyncMock(return_value={"final_result": payload, "step_history": [{"strategy": "sequential"}]}),
         ),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
         patch(
-            "agent.domains.office.orchestrated.execute_officecli_spec",
+            "agent.workflows.office.orchestrated.execute_officecli_spec",
             new=AsyncMock(
                 return_value={
                     "success": False,
@@ -2087,11 +2087,11 @@ async def test_office_domain_write_close_failure_marks_error() -> None:
 
 @pytest.mark.asyncio
 async def test_office_domain_terminal_partial_progress_included_in_review() -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     with (
         patch(
-            "agent.domains.office.orchestrated.stream_nested_graph",
+            "agent.workflows.office.orchestrated.stream_nested_graph",
             new=AsyncMock(
                 return_value={
                     "final_result": "Office 任务已中止：内层 agent 超过 84 步仍未收敛",
@@ -2110,7 +2110,7 @@ async def test_office_domain_terminal_partial_progress_included_in_review() -> N
                 }
             ),
         ),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
     ):
         result = await run_office_domain_orchestrated({"query": "做一个 10 页 PPT", "task_id": "office_partial"})
 
@@ -2121,7 +2121,7 @@ async def test_office_domain_terminal_partial_progress_included_in_review() -> N
 
 @pytest.mark.asyncio
 async def test_office_domain_result_surfaces_fidelity_deviation_summary() -> None:
-    from agent.domains.office.orchestrated import run_office_domain_orchestrated
+    from agent.workflows.office.orchestrated import run_office_domain_orchestrated
 
     quality_report = {
         "format": "pptx",
@@ -2146,7 +2146,7 @@ async def test_office_domain_result_surfaces_fidelity_deviation_summary() -> Non
 
     with (
         patch(
-            "agent.domains.office.orchestrated.stream_nested_graph",
+            "agent.workflows.office.orchestrated.stream_nested_graph",
             new=AsyncMock(
                 return_value={
                     "final_result": payload,
@@ -2156,9 +2156,9 @@ async def test_office_domain_result_surfaces_fidelity_deviation_summary() -> Non
                 }
             ),
         ),
-        patch("agent.domains.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
+        patch("agent.workflows.office.orchestrated.infer_office_runtime_target", return_value="desktop"),
         patch(
-            "agent.domains.office.orchestrated.execute_officecli_spec",
+            "agent.workflows.office.orchestrated.execute_officecli_spec",
             new=AsyncMock(return_value={"success": True, "message": "Closing resident.", "command": "officecli close /Users/test/Desktop/deck.pptx"}),
         ),
     ):
@@ -2171,30 +2171,8 @@ async def test_office_domain_result_surfaces_fidelity_deviation_summary() -> Non
 
 
 @pytest.mark.asyncio
-async def test_ppt_wrapper_maps_ppt_artifact_type() -> None:
-    from agent.domains.office.orchestrated import OfficeDomainResult
-    from agent.domains.ppt.orchestrated import run_ppt_domain_orchestrated
-
-    with patch(
-        "agent.domains.ppt.orchestrated.run_office_domain_orchestrated",
-        new=AsyncMock(
-            return_value=OfficeDomainResult(
-                status="ok",
-                result="done",
-                artifact_refs=[{"name": "deck.pptx", "type": "file", "format": "pptx"}],
-                review={"passed": True},
-                budget={},
-            )
-        ),
-    ):
-        result = await run_ppt_domain_orchestrated({"query": "做一个 PPT"})
-
-    assert result.artifact_refs[0]["type"] == "pptx"
-
-
-@pytest.mark.asyncio
 async def test_office_workflow_ppt_quality_stats_required_for_create() -> None:
-    from agent.domains.office.workflow import evaluate_node
+    from agent.workflows.office.workflow import evaluate_node
 
     state = {
         "format": "pptx",
@@ -2217,7 +2195,7 @@ async def test_office_workflow_ppt_quality_stats_required_for_create() -> None:
 
 @pytest.mark.asyncio
 async def test_office_workflow_xlsx_quality_stats_required_for_write() -> None:
-    from agent.domains.office.workflow import evaluate_node
+    from agent.workflows.office.workflow import evaluate_node
 
     state = {
         "format": "xlsx",
@@ -2240,7 +2218,7 @@ async def test_office_workflow_xlsx_quality_stats_required_for_write() -> None:
 
 @pytest.mark.asyncio
 async def test_office_workflow_xlsx_quality_stats_require_sheet_count() -> None:
-    from agent.domains.office.workflow import evaluate_node
+    from agent.workflows.office.workflow import evaluate_node
 
     state = {
         "format": "xlsx",
@@ -2263,7 +2241,7 @@ async def test_office_workflow_xlsx_quality_stats_require_sheet_count() -> None:
 
 @pytest.mark.asyncio
 async def test_office_workflow_xlsx_quality_stats_pass_with_sheet_count() -> None:
-    from agent.domains.office.workflow import evaluate_node
+    from agent.workflows.office.workflow import evaluate_node
 
     state = {
         "format": "xlsx",
@@ -2286,7 +2264,7 @@ async def test_office_workflow_xlsx_quality_stats_pass_with_sheet_count() -> Non
 
 @pytest.mark.asyncio
 async def test_office_qa_fix_uses_sheet_count_when_slide_count_missing() -> None:
-    from agent.domains.office.workflow import qa_fix_node
+    from agent.workflows.office.workflow import qa_fix_node
 
     state = {
         "format": "xlsx",
@@ -2312,7 +2290,7 @@ async def test_office_qa_fix_uses_sheet_count_when_slide_count_missing() -> None
 
 @pytest.mark.asyncio
 async def test_office_qa_fix_rejects_docx_missing_section_count() -> None:
-    from agent.domains.office.workflow import qa_fix_node
+    from agent.workflows.office.workflow import qa_fix_node
 
     state = {
         "format": "docx",
@@ -2338,7 +2316,7 @@ async def test_office_qa_fix_rejects_docx_missing_section_count() -> None:
 
 @pytest.mark.asyncio
 async def test_office_qa_fix_rejects_docx_when_protected_units_are_not_preserved() -> None:
-    from agent.domains.office.workflow import qa_fix_node
+    from agent.workflows.office.workflow import qa_fix_node
 
     state = {
         "format": "docx",
@@ -2371,7 +2349,7 @@ async def test_office_qa_fix_rejects_docx_when_protected_units_are_not_preserved
 
 @pytest.mark.asyncio
 async def test_office_qa_fix_rejects_xlsx_when_expected_sheet_names_are_missing() -> None:
-    from agent.domains.office.workflow import qa_fix_node
+    from agent.workflows.office.workflow import qa_fix_node
 
     state = {
         "format": "xlsx",
@@ -2408,7 +2386,7 @@ async def test_office_qa_fix_rejects_xlsx_when_expected_sheet_names_are_missing(
 
 @pytest.mark.asyncio
 async def test_office_qa_fix_accepts_xlsx_when_expected_sheet_topology_is_present() -> None:
-    from agent.domains.office.workflow import qa_fix_node
+    from agent.workflows.office.workflow import qa_fix_node
 
     state = {
         "format": "xlsx",
@@ -2445,7 +2423,7 @@ async def test_office_qa_fix_accepts_xlsx_when_expected_sheet_topology_is_presen
 
 @pytest.mark.asyncio
 async def test_office_workflow_ppt_quality_stats_pass_with_complete_metrics() -> None:
-    from agent.domains.office.workflow import evaluate_node
+    from agent.workflows.office.workflow import evaluate_node
 
     state = {
         "format": "pptx",
@@ -2468,7 +2446,7 @@ async def test_office_workflow_ppt_quality_stats_pass_with_complete_metrics() ->
 
 @pytest.mark.asyncio
 async def test_office_qa_fix_requests_repair_when_ppt_stats_fail() -> None:
-    from agent.domains.office.workflow import qa_fix_node
+    from agent.workflows.office.workflow import qa_fix_node
 
     state = {
         "format": "pptx",
@@ -2497,7 +2475,7 @@ async def test_office_qa_fix_requests_repair_when_ppt_stats_fail() -> None:
 
 @pytest.mark.asyncio
 async def test_office_qa_fix_hard_fails_after_round_exhaustion() -> None:
-    from agent.domains.office.workflow import qa_fix_node
+    from agent.workflows.office.workflow import qa_fix_node
 
     state = {
         "format": "pptx",
@@ -2527,8 +2505,8 @@ async def test_office_qa_fix_hard_fails_after_round_exhaustion() -> None:
 async def test_run_build_stage_recursion_failure_returns_partial_progress() -> None:
     from langgraph.errors import GraphRecursionError
 
-    from agent.domains.office.core.build import run_build_stage
-    from agent.domains.office.strategies.ppt import PptStrategy
+    from agent.workflows.office.core.build import run_build_stage
+    from agent.workflows.office.strategies.ppt import PptStrategy
 
     strategy = PptStrategy()
     plan = strategy.build_plan(
@@ -2559,13 +2537,13 @@ async def test_run_build_stage_recursion_failure_returns_partial_progress() -> N
     }
 
     with (
-        patch("agent.domains.office.core.build.get_config", return_value={"configurable": {}}),
-        patch("agent.domains.office.core.build.resolve_deepagents_runtime", return_value=([], object())),
-        patch("agent.domains.office.core.build.build_chat_model", return_value=object()),
-        patch("agent.domains.office.core.build.build_officecli_skill_bundle", return_value=""),
-        patch("agent.domains.office.core.build.create_deep_agent", return_value=object()),
+        patch("agent.workflows.office.core.build.get_config", return_value={"configurable": {}}),
+        patch("agent.workflows.office.core.build.resolve_deepagents_runtime", return_value=([], object())),
+        patch("agent.workflows.office.core.build.build_chat_model", return_value=object()),
+        patch("agent.workflows.office.core.build.build_officecli_skill_bundle", return_value=""),
+        patch("agent.workflows.office.core.build.create_deep_agent", return_value=object()),
         patch(
-            "agent.domains.office.core.build.stream_nested_graph",
+            "agent.workflows.office.core.build.stream_nested_graph",
             new=AsyncMock(side_effect=GraphRecursionError("recursion")),
         ),
     ):

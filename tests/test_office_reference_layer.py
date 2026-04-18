@@ -1,9 +1,9 @@
 import asyncio
 import json
 
-from agent.domains.office import reference_inspector
-from agent.domains.office.reference_profiler import profile_reference_payload
-from agent.domains.office.reference_resolver import resolve_reference_constraints
+from agent.workflows.office import reference_inspector
+from agent.workflows.office.reference_profiler import profile_reference_payload
+from agent.workflows.office.reference_resolver import resolve_reference_constraints
 
 
 def test_inspect_reference_file_unwraps_officecli_envelopes_into_payloads(monkeypatch) -> None:
