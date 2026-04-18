@@ -188,7 +188,7 @@ def test_resolve_reference_constraints_uses_style_format_for_goal_fallback() -> 
     assert merged["goal_constraints"]["format"] == "pptx"
 
 
-def test_resolve_reference_constraints_splits_docx_headings_and_formatting_instructions() -> None:
+def test_resolve_reference_constraints_does_not_derive_docx_headings_and_formatting_instructions() -> None:
     merged = resolve_reference_constraints(
         goal_constraints={
             "format": "docx",
@@ -200,5 +200,5 @@ def test_resolve_reference_constraints_splits_docx_headings_and_formatting_instr
     )
 
     assert merged["goal_constraints"]["hard_requirements"] == ["背景", "目标", "preserve formatting", "使用 Heading1"]
-    assert merged["goal_constraints"]["section_headings"] == ["背景", "目标"]
-    assert merged["goal_constraints"]["formatting_instructions"] == ["preserve formatting", "使用 Heading1"]
+    assert merged["goal_constraints"]["section_headings"] == []
+    assert merged["goal_constraints"]["formatting_instructions"] == []

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -108,6 +109,51 @@ async def test_office_planning_node_refines_generic_filename_from_plan_title() -
 
     assert result["default_create_file"].endswith(".pptx")
     assert result["default_create_file"] != "ai.pptx"
+
+
+@pytest.mark.asyncio
+async def test_docx_planning_node_uses_llm_structured_goal_constraints() -> None:
+    import agent.domains.office.workflow as workflow_module
+
+    class FakeLLM:
+        async def ainvoke(self, _messages):
+            return AIMessage(
+                content='{"section_headings":["执行摘要","实施计划"],"formatting_instructions":["preserve numbering"]}'
+            )
+
+    with patch("core.models.get_llm", return_value=FakeLLM()):
+        workflow_module = importlib.reload(workflow_module)
+        try:
+            result = await workflow_module.planning_node(
+                {
+                    "goal": "参考方案模板，更新项目方案中的执行摘要和实施计划，并保留附录与致谢。",
+                    "format": "docx",
+                    "operation": "edit",
+                    "requested_slide_count": 0,
+                    "build_batch_size": 1,
+                    "default_create_file": "project-plan.docx",
+                    "goal_constraints": {
+                        "hard_requirements": ["执行摘要", "实施计划", "preserve numbering"],
+                    },
+                    "reference_structure_constraints": {
+                        "units": [{"name": "执行摘要"}, {"name": "实施计划"}, {"name": "附录"}]
+                    },
+                    "reference_style_constraints": {"style_tokens": {"heading_style": "Heading1"}},
+                    "existing_document_profile": {
+                        "units": ["执行摘要", "实施计划", "附录", "致谢"],
+                        "protected_units": ["附录", "致谢"],
+                    },
+                    "cost_ledger": {},
+                }
+            )
+        finally:
+            importlib.reload(workflow_module)
+
+    merged = result["task_profile"]["merged_constraints"]
+    assert merged["goal_constraints"]["section_headings"] == ["执行摘要", "实施计划"]
+    assert merged["goal_constraints"]["formatting_instructions"] == ["preserve numbering"]
+    assert [section["heading"] for section in result["deck_plan"]["sections"]] == ["执行摘要", "实施计划"]
+    assert result["deck_plan"]["sections"][0]["style_requirements"]["formatting_instructions"] == ["preserve numbering"]
 
 
 @pytest.mark.asyncio

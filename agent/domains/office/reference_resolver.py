@@ -27,13 +27,6 @@ def _coerce_string_list(value: Any) -> list[str]:
     return [str(item or "").strip() for item in value if str(item or "").strip()]
 
 
-def _derive_docx_goal_lists(goal_source: dict[str, Any]) -> tuple[list[str], list[str]]:
-    explicit_headings = _coerce_string_list(goal_source.get("section_headings"))
-    explicit_formatting = _coerce_string_list(goal_source.get("formatting_instructions"))
-    if explicit_headings or explicit_formatting:
-        return explicit_headings, explicit_formatting
-    return [], []
-
 def resolve_reference_constraints(
     *,
     goal_constraints: dict[str, Any],
@@ -68,13 +61,8 @@ def resolve_reference_constraints(
     if not goal_format_name:
         style_format = _canonical_format(style_payload.get("format", ""))
         goal_format_name = style_format
-    section_headings: list[str] = []
-    formatting_instructions: list[str] = []
-    if goal_format_name == "docx":
-        section_headings, formatting_instructions = _derive_docx_goal_lists(goal_source)
-    else:
-        section_headings = _coerce_string_list(goal_source.get("section_headings"))
-        formatting_instructions = _coerce_string_list(goal_source.get("formatting_instructions"))
+    section_headings = _coerce_string_list(goal_source.get("section_headings"))
+    formatting_instructions = _coerce_string_list(goal_source.get("formatting_instructions"))
     goal_payload: GoalConstraints = build_goal_constraints(
         format_name=goal_format_name,
         operation=str(goal_source.get("operation", "") or ""),

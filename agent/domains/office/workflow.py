@@ -5,17 +5,19 @@ Provides a lightweight LangGraph workflow around OfficeCLI-based document work.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 
 from core.content_utils import extract_result_text
+from core.models import get_llm, response_text
 from langgraph.config import get_config
 from agent.domains.office.core import OfficeWorkflowState, finalize_node, route_after_build, route_after_qa_fix
 from agent.domains.office.builder import run_section_builder
@@ -221,6 +223,57 @@ def _build_subagent_dicts() -> list[dict[str, Any]]:
 _extract_explicit_filename = extract_explicit_filename
 _infer_default_create_file = infer_default_create_file
 _infer_requested_slide_count = infer_requested_slide_count
+
+
+def _coerce_goal_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item or "").strip() for item in value if str(item or "").strip()]
+
+
+async def _structure_docx_goal_constraints(
+    *,
+    goal: str,
+    goal_constraints: dict[str, Any],
+) -> dict[str, Any]:
+    existing_constraints = dict(goal_constraints or {})
+    existing_headings = _coerce_goal_string_list(existing_constraints.get("section_headings"))
+    existing_formatting = _coerce_goal_string_list(existing_constraints.get("formatting_instructions"))
+
+    llm = get_llm("orchestrator")
+    response = await llm.ainvoke([
+        SystemMessage(
+            content=(
+                "You structure DOCX planning constraints. "
+                "Return JSON only with keys section_headings and formatting_instructions. "
+                "Each value must be an array of strings."
+            )
+        ),
+        HumanMessage(
+            content=(
+                "Goal:\n"
+                f"{str(goal or '').strip()}\n\n"
+                "Existing goal constraints:\n"
+                f"{json.dumps(existing_constraints, ensure_ascii=False)}\n\n"
+                "Return JSON like:\n"
+                '{"section_headings":["执行摘要","实施计划"],"formatting_instructions":["preserve numbering"]}'
+            )
+        ),
+    ])
+
+    try:
+        payload = json.loads(response_text(response))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    return {
+        **existing_constraints,
+        "section_headings": _coerce_goal_string_list(payload.get("section_headings")) or existing_headings,
+        "formatting_instructions": _coerce_goal_string_list(payload.get("formatting_instructions")) or existing_formatting,
+    }
 
 
 def _infer_format(goal: str, file_hint: str, source_files: list[str], explicit: str) -> str:
@@ -511,9 +564,15 @@ async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
         elif any(token in str(state.get("goal", "") or "").lower() for token in ("ppt", "powerpoint", "presentation", "deck", "幻灯片", "演示文稿")):
             strategy_format = "pptx"
     strategy = get_strategy_for_format(strategy_format, operation=str(state.get("operation", "") or ""))
+    goal_constraints = dict(state.get("goal_constraints") or {})
+    if strategy_format == "docx":
+        goal_constraints = await _structure_docx_goal_constraints(
+            goal=str(state.get("goal", "") or ""),
+            goal_constraints=goal_constraints,
+        )
     merged_constraints = resolve_reference_constraints(
         goal_constraints={
-            **dict(state.get("goal_constraints") or {}),
+            **goal_constraints,
             "format": strategy_format,
             "operation": str(state.get("operation", "") or ""),
             "goal": str(state.get("goal", "") or ""),
