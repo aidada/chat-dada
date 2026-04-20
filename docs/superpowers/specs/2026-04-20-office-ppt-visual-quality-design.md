@@ -82,24 +82,27 @@
        shape_count: int
        text_box_count: int
        distinct_title_objects: int   # placeholder_title + manual_textbox_title 同页计数
-       layout_name: str
+       layout_signature: str          # 由形状类型序列 hash 而来（见 4.2 G1-consecutive-layout）
        has_notes: bool
        has_transition: bool
    ```
 
 3. `strategies/ppt.py::evaluate_quality_stats` 签名改为接收 `GroundTruthStats` 而不是 `dict`；模型自报 stats 仅作为次要对照（不一致时以真值为准，模型的 stats 不再能让 QA pass）。
 
-### 4.2 新增 7 个硬 gate（所有都必须基于 `GroundTruthStats`）
+### 4.2 新增 6 个硬 gate（所有都必须基于 `GroundTruthStats`）
 
 | Gate | 判定 | Severity |
 |---|---|---|
 | G1-font-family | `len(unique_font_families) > 2` → fail | error |
-| G1-color-palette | `len(distinct_theme_colors) > 5` → fail | error |
 | G1-duplicate-title | 任意 slide 的 `distinct_title_objects > 1` → fail | error |
 | G1-placeholder-remnant | 任意 slide 文本命中 `{xxxx, lorem ipsum, TODO, FIXME, 占位, placeholder}` → fail | error |
 | G1-picture-threshold | 用户 goal 含配图词 → `sum(s.picture_count) < ceil(slide_count * 0.3)` → fail | error |
-| G1-consecutive-layout | 存在相邻两页 `layout_name` 或 layout signature 相同 → fail | error |
+| G1-consecutive-layout | 相邻两页 `layout_signature` 相同 → fail | error |
 | G1-decorative-only-cap | `decorative_only_slide_count / content_slide_count > 0.5` → fail | error |
+
+**说明：批 1 不做色板门槛**。理由：benchmark failure 的根因是字体漂 + 缺图 + 重复标题，色板漂通常和字体漂一起出现，字体门槛已覆盖 ~80% case；真正的"使用中"颜色扫描需要遍历所有 `ppt/slides/slide*.xml` 抽 `srgbClr` + `schemeClr`，工程成本高、边缘 case 多（填充/边框/文字/渐变各处都有颜色）。批 1 先不做，等批 2 观察字体门槛拦下来的 case 之后再评估是否有必要补。
+
+**Layout signature 定义**（用于 G1-consecutive-layout）：每页按 `annotated` 输出顺序取 shape 类型序列（`Title`, `TextBox`, `Picture`, `Chart`, `Table`, `SmartArt`, `Shape` 等），join 成 `T-TB-TB-P` 形式的字符串，作为该页 layout 的签名。不依赖 officecli 输出 slideLayout 名称——当前 `view annotated` 不报这个字段，自己算 signature 足以拦"连续两页结构相同"。
 
 "配图词"定义（用于触发 G1-picture-threshold）：`{配图, 插图, 加图, 配一些图, 要图, 附图, with images, with pictures}`，任意命中即触发。判定来自 `GoalProfile.quality_profile.visuals=true` 或 goal 原文匹配。
 
@@ -119,7 +122,7 @@
 
 - 模型自报的 `stats` 仅作参考；以 `view stats` / `view annotated` 工具真值为准
 - 字体家族限制为 {YaHei, Arial} 两种（中文 + 英文），禁止 Georgia / Calibri / Cambria 混入
-- 色板限制为 `{primary, secondary, accent, light, bg}` 5 个 theme 颜色，其他颜色仅限工具图标或图片自带
+- 色板软约束写入 prompt（建议只用 preset 里声明的主题色），但批 1 QA 不做硬检查
 
 ### 4.4 QA fix-loop
 
@@ -175,6 +178,10 @@ Plan schema 扩展，新增每 slide 字段：
   - `per_slide_stats.text_box_count > slide.max_text_blocks` → 单页 fail
   - `per_slide_stats.font_families not ⊆ plan.typography_pair` → 单页 fail
 - 单页 fail 进入 `qa_feedback`，`qa_fix_node` 把具体页号和违规原因传给 build repair
+
+### 5.2.1 色板门槛是否在批 2 补（延后决策）
+
+批 1 先跑一段时间，观察字体门槛拦截后剩余 case 中色板漂是否还是主要失败原因。若是，批 2 再补"使用中色板门槛"：扫所有 `ppt/slides/slide*.xml`，聚合 `srgbClr` + `schemeClr` 出现的颜色，去重后若超过 preset 允许的 5 种则 fail。若不是，批 2 不做该项，把成本留给模板 lane。判定在批 1 完成后、批 2 启动前做。
 
 ### 5.3 Style preset 系统
 
@@ -243,15 +250,16 @@ class GoalProfile(BaseModel):
 
 ### 6.1 路由触发条件
 
-新增 `agent/workflows/office/template_router.py::decide_template_lane`：
+新增 `agent/workflows/office/template_router.py::decide_template_lane`。用用户的**显式信号**触发，不用启发式。
 
 触发任一即走模板 lane：
 
-- 用户 goal 含 `{使用模板, 按模板, 参考模板, 套模板, template}`
-- `reference_files` 中存在 `.pptx` 且 `reference_inspector` 判定为 "template-shaped"（有统一母版、slide 数 ≤ 4 或含 `slideLayouts` ≥ 3）
-- `style_preset` 明确匹配某个 bundled skill（`officecli-pitch-deck` → product_launch；`morph-ppt` → marketing）
+- **用户自带模板**：`operation == "create"` 且 `reference_files` 中存在 `.pptx` 文件。直接用那份 .pptx 作模板。
+- **用户点名项目内置模板**：goal 文本中命中内置模板名，例如 `{pitch deck 模板, pitch-deck, 营销模板, morph, morph-ppt, 路演模板}`。按命中的名字映射到对应 bundled skill 目录。
 
-其余走 blank lane（批 1 + 批 2 已改好的）。
+**其他所有情况**（纯文字 goal，无 reference，没命中内置模板名）→ blank lane（批 1 + 批 2 已改好的新管线）。
+
+**边界说明**：`operation == "edit"` 走的是对 `source_files` 原地编辑的现有路径，不是模板 lane；模板 lane 只在 create 时触发。这两条路径在现有 workflow 中已分开，路由不会冲突。
 
 ### 6.2 模板 lane pipeline
 
@@ -310,14 +318,13 @@ Skill 目录内容通过现有 `officecli_skill_loader` 注入 system prompt。
 
 ---
 
-## 8. Risks & Open Questions
+## 8. Risks & Resolved Decisions
 
 ### 风险
 
 1. **`view stats` / `view annotated` 输出格式不稳定**。如果 officecli 升级改了字段名，解析器会静默漂。
    - 缓解：parser 里每个字段都打 debug log；CI 跑一份 golden deck 的真值对账。
-2. **per-slide font detection 成本高**。officecli `view annotated` 当前是否逐页报 font 家族需要验证。
-   - 缓解：若不报，在批 1 阶段追加 `view` 的子 mode（`fonts`/`colors`）；若 officecli 不支持，临时用 XML-level 解析。
+2. **per-slide font detection 依赖 `view annotated`**。已在本 spec 确认该输出每个 Text Box 会标 `← <Font> <size>pt`，可逐页聚合字体家族。若 shape 是 picture/chart 不报字体，视为对门槛无贡献。
 3. **Vertical inference 误判**。"钓鱼好处" 可能被推成 lifestyle 也可能被推成 course_training。
    - 缓解：B 方案的澄清 interrupt 接住 low confidence 情况。
 4. **模板 lane 的 structure phase 失败会让用户等很久**。
@@ -325,11 +332,11 @@ Skill 目录内容通过现有 `officecli_skill_loader` 注入 system prompt。
 5. **Preset 主题色和用户上传图片色调不匹配**。
    - v1 不解决；用户不满可手动指定 preset。
 
-### Open Questions
+### Resolved Decisions（取代原 Open Questions）
 
-- **Q1**：`view annotated` 是否已报 layout_name？若没有需要先扩 officecli 输出。→ 批 1 启动时首先验证。
-- **Q2**：`theme_colors` 如何从 .pptx 抽？officecli 可能直接报主题色，也可能需要读 `ppt/theme/theme1.xml`。批 1 启动时验证。
-- **Q3**：批 3 的 "template-shaped" 判定阈值（slide 数 ≤ 4 或 layouts ≥ 3）需要经验校准。
+- **D1（原 Q1）—— 连续 layout 检测方案**：不依赖 officecli 报 slideLayout 名。自己算 `layout_signature` = 每页 annotated 输出的 shape 类型序列（如 `T-TB-TB-P`），相邻两页签名相同即 fail。零外部依赖。
+- **D2（原 Q2）—— 色板门槛方案**：批 1 不做色板硬 gate。benchmark failure 的主因是字体漂，字体门槛（`≤ 2 family`）已覆盖大部分 case。批 1 上线后若观察到剩余 failure 中色板漂仍然显著，批 2 再补"使用中颜色数量上限"（扫 `ppt/slides/slide*.xml` 抽 `srgbClr` + `schemeClr`）。
+- **D3（原 Q3）—— 模板 lane 触发条件**：用显式信号，不用启发式。`operation == "create"` 且 `reference_files` 含 `.pptx` → 用用户模板；或 goal 文本命中内置模板名 → 用对应 bundled skill；否则 blank lane。
 
 ---
 
