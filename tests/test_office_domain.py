@@ -5,13 +5,13 @@ from unittest.mock import AsyncMock, patch
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 
 def test_infer_default_create_file_from_user_intent() -> None:
-    from agent.workflows.office.workflow import _infer_default_create_file
+    from agent.workflows.office.goal_normalizer import infer_default_create_file
 
-    filename = _infer_default_create_file(
+    filename = infer_default_create_file(
         "帮我在下载文件夹创建一个 PPT，大概 3 页，内容是介绍 chat-dada这个agent 软件 可以帮助你完成什么工作，解决的痛点是什么",
         "",
         "pptx",
@@ -21,9 +21,9 @@ def test_infer_default_create_file_from_user_intent() -> None:
 
 
 def test_infer_default_create_file_preserves_explicit_filename() -> None:
-    from agent.workflows.office.workflow import _infer_default_create_file
+    from agent.workflows.office.goal_normalizer import infer_default_create_file
 
-    filename = _infer_default_create_file(
+    filename = infer_default_create_file(
         "请创建 quarterly-review.pptx，并放到下载文件夹",
         "",
         "pptx",
@@ -33,9 +33,9 @@ def test_infer_default_create_file_preserves_explicit_filename() -> None:
 
 
 def test_infer_default_create_file_rewrites_generic_llm_filename() -> None:
-    from agent.workflows.office.workflow import _infer_default_create_file
+    from agent.workflows.office.goal_normalizer import infer_default_create_file
 
-    filename = _infer_default_create_file(
+    filename = infer_default_create_file(
         "在下载文件夹下，为我生成一个 PPT，主题为 论如何在新时代 AI 环境下，对孩子进行现代化教育，一共 10 页",
         "ai.pptx",
         "pptx",
@@ -58,10 +58,79 @@ async def test_office_preflight_increases_inner_limit_for_large_visual_deck() ->
         }
     )
 
-    assert result["build_batch_size"] == 3
+    assert result["build_batch_size"] == 2
     assert result["inner_recursion_limit"] > OFFICE_INNER_RECURSION_LIMIT
     assert result["quality_profile"]["animations"] is True
     assert result["quality_profile"]["visuals"] is True
+
+
+@pytest.mark.asyncio
+async def test_office_preflight_requests_clarification_for_ambiguous_slide_count() -> None:
+    from agent.workflows.office.workflow import preflight_node
+
+    class _FakeStructuredLLM:
+        def __init__(self, schema):
+            self._schema = schema
+
+        async def ainvoke(self, _messages, **_kwargs):
+            return self._schema(
+                format="pptx",
+                operation="create",
+                requested_slide_count=None,
+                output_filename="chat-dada-intro.pptx",
+                quality_profile={"animations": False, "visuals": False, "notes": True},
+                confidence="low",
+                missing_fields=["requested_slide_count"],
+            )
+
+    class _FakeLLM:
+        def with_structured_output(self, schema):
+            return _FakeStructuredLLM(schema)
+
+    with patch("agent.workflows.office.goal_normalizer.get_llm", return_value=_FakeLLM()):
+        with patch("agent.workflows.office.workflow.request_interrupt", return_value="12 页") as mocked_interrupt:
+            result = await preflight_node(
+                {
+                    "goal": "做一个介绍 chat-dada 的演示文稿",
+                    "raw_user_message": "帮我做个十来页左右的 PPT，介绍 chat-dada。",
+                    "orchestrator_summary": "Create a presentation about chat-dada.",
+                    "format_hint": "pptx",
+                    "operation_hint": "create",
+                    "file_hint": "",
+                    "source_files": [],
+                    "clarification_history": [],
+                }
+            )
+
+    mocked_interrupt.assert_called_once()
+    assert result["requested_slide_count"] == 12
+
+
+def test_infer_build_batch_size_caps_at_two_for_large_decks() -> None:
+    # Large batches of complex slides push the LLM past its JSON-generation
+    # coherence limit, triggering malformed tool-call arguments. Cap the
+    # per-inner-step slide count at 2 so each build turn emits a smaller,
+    # safer officecli_batch payload.
+    from agent.workflows.office.goal_normalizer import infer_build_batch_size
+
+    assert (
+        infer_build_batch_size(format_name="pptx", operation="create", requested_slide_count=12) == 2
+    )
+    assert (
+        infer_build_batch_size(format_name="pptx", operation="create", requested_slide_count=8) == 2
+    )
+    assert (
+        infer_build_batch_size(format_name="pptx", operation="create", requested_slide_count=5) == 2
+    )
+    assert (
+        infer_build_batch_size(format_name="pptx", operation="create", requested_slide_count=3) == 1
+    )
+    assert (
+        infer_build_batch_size(format_name="pptx", operation="transform", requested_slide_count=20) == 2
+    )
+    assert (
+        infer_build_batch_size(format_name="docx", operation="create", requested_slide_count=20) == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -90,6 +159,25 @@ async def test_office_planning_node_creates_deck_plan_and_batches() -> None:
     assert "transition_required" in plan["slides"][0]
     assert "notes_required" in plan["slides"][0]
     assert "objective" in plan["batches"][0]
+
+
+@pytest.mark.asyncio
+async def test_office_planning_node_lets_ppt_strategy_default_unknown_slide_count() -> None:
+    from agent.workflows.office.workflow import planning_node
+
+    result = await planning_node(
+        {
+            "goal": "在下载文件夹下，为我生成一个 PPT，主题为 AI 时代儿童现代化教育",
+            "requested_slide_count": None,
+            "build_batch_size": 2,
+            "default_create_file": "ai-era-child-modern-education.pptx",
+            "format": "pptx",
+            "operation": "create",
+            "cost_ledger": {},
+        }
+    )
+
+    assert result["deck_plan"]["slide_count"] == 6
 
 
 @pytest.mark.asyncio
@@ -1518,6 +1606,7 @@ async def _run_build_stage_with_captured_context(
 
     def fake_create_deep_agent(**kwargs: Any) -> object:
         captured["system_prompt"] = str(kwargs["system_prompt"])
+        captured["middleware"] = list(kwargs.get("middleware", []) or [])
         return object()
 
     async def fake_stream_nested_graph(*_args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -1547,6 +1636,29 @@ async def _run_build_stage_with_captured_context(
         )
 
     return result, captured
+
+
+@pytest.mark.asyncio
+async def test_office_strict_tool_binding_middleware_sets_model_settings() -> None:
+    from langchain.agents.middleware.types import ModelRequest, ModelResponse
+    from agent.workflows.office.core.build import _OfficeStrictToolBindingMiddleware
+
+    middleware = _OfficeStrictToolBindingMiddleware()
+    captured: dict[str, Any] = {}
+
+    async def handler(request: ModelRequest[Any]) -> ModelResponse[Any]:
+        captured["model_settings"] = dict(request.model_settings)
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    request = ModelRequest(
+        model=object(),  # type: ignore[arg-type]
+        messages=[HumanMessage(content="hi")],
+        model_settings={"temperature": 0.3},
+    )
+    await middleware.awrap_model_call(request, handler)
+
+    assert captured["model_settings"]["temperature"] == 0.3
+    assert captured["model_settings"]["strict"] is True
 
 
 @pytest.mark.asyncio
@@ -1608,6 +1720,46 @@ async def test_ppt_reference_edit_build_stage_surfaces_goal_sources_batch_contex
     assert "- 只处理 slide 1-2。" in phase_guidance
     assert result["current_stage"] == "build"
     assert result["current_batch_index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_build_stage_registers_office_strict_tool_binding_middleware() -> None:
+    from agent.workflows.office.strategies.ppt import PptStrategy
+
+    strategy = PptStrategy()
+    plan = strategy.build_plan(
+        goal="在下载目录下，为我生成一个 4 页 PPT，主题为 AI 教育",
+        requested_slide_count=4,
+        build_batch_size=2,
+        default_create_file="ai-education.pptx",
+    )
+    state = {
+        "goal": "在下载目录下，为我生成一个 4 页 PPT，主题为 AI 教育",
+        "task_id": "office_strict_middleware",
+        "format": "pptx",
+        "operation": "create",
+        "runtime_target_hint": "desktop",
+        "default_create_file": "ai-education.pptx",
+        "requested_slide_count": 4,
+        "build_batch_size": 2,
+        "deck_plan": plan,
+        "current_batch_index": 0,
+        "completed_pages": 0,
+        "allowed_source_files": [],
+        "repair_mode": False,
+        "inner_recursion_limit": 12,
+        "intermediate_results": [],
+        "evaluations": [],
+        "cost_ledger": {"task_id": "office_strict_middleware", "domain": "office"},
+    }
+
+    def gate(_input_msg: str, _config: dict[str, Any]) -> None:
+        return None
+
+    _, captured = await _run_build_stage_with_captured_context(state, strategy=strategy, gate=gate)
+
+    middleware = captured["middleware"]
+    assert any(item.__class__.__name__ == "_OfficeStrictToolBindingMiddleware" for item in middleware)
 
 
 @pytest.mark.asyncio

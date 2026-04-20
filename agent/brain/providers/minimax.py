@@ -433,10 +433,6 @@ class MiniMaxOpenAIAdapter(ProviderChatModelAdapter):
         return "openai"
 
     @property
-    def name(self) -> str:
-        return str(self.model)
-
-    @property
     def model_name(self) -> str:
         return self.model
 

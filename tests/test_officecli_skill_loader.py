@@ -61,6 +61,23 @@ def test_build_officecli_skill_bundle_skips_missing_child_skill() -> None:
     assert "officecli-presentation-quality" in bundle
 
 
+def test_build_officecli_skill_bundle_filters_raw_batch_cli_examples() -> None:
+    bundle = build_officecli_skill_bundle("做一个 investor pitch deck", format_hint="pptx")
+    assert "officecli_batch(commands=[" in bundle
+    assert "cat <<'EOF' | officecli batch" not in bundle
+    assert "officecli batch pitch.pptx" not in bundle
+    assert "commands must be a native array, never a JSON string" in bundle
+
+
+def test_build_officecli_skill_bundle_caps_commands_per_batch_call() -> None:
+    # Large officecli_batch payloads push the LLM past its JSON-generation
+    # coherence limit (observed in production as missing closing braces).
+    # Instruct the model to keep each call small and split when in doubt.
+    bundle = build_officecli_skill_bundle("做一个 investor pitch deck", format_hint="pptx")
+    assert "at most 10 commands" in bundle
+    assert "split into multiple officecli_batch calls" in bundle
+
+
 def test_get_officecli_skill_bundle_docx() -> None:
     bundle = get_officecli_skill_bundle("写 academic paper", format_hint="docx")
     assert "officecli-docx" in bundle

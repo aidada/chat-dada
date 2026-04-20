@@ -185,3 +185,10 @@ def test_cost_ledger_summary_includes_partial_progress() -> None:
     assert summary["completed_pages"] == 6
     assert summary["partial_progress"]["stage"] == "build"
     assert summary["partial_progress"]["current_batch_index"] == 2
+
+
+def test_cost_ledger_preserves_unknown_requested_pages() -> None:
+    ledger = init_cost_ledger(task_id="t1", domain="office", requested_pages=None)
+    summary = summarize_cost_ledger(ledger)
+
+    assert summary["requested_pages"] is None

@@ -8,12 +8,12 @@ class PptStrategy:
         self,
         *,
         goal: str,
-        requested_slide_count: int,
+        requested_slide_count: int | None,
         build_batch_size: int,
         default_create_file: str,
         merged_constraints: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        slide_count = max(int(requested_slide_count or 0), 1)
+        slide_count = _resolve_target_slide_count(requested_slide_count)
         title = _infer_deck_title(goal, default_create_file)
         slide_titles = _build_reference_aligned_slide_titles(slide_count, merged_constraints)
         slides = [
@@ -84,7 +84,7 @@ class PptStrategy:
         *,
         plan: dict[str, Any],
         goal: str,
-        requested_slide_count: int,
+        requested_slide_count: int | None,
         build_batch_size: int,
         default_create_file: str,
         merged_constraints: dict[str, Any] | None = None,
@@ -101,8 +101,8 @@ class PptStrategy:
 
         issues: list[str] = []
         raw_slides = list(plan.get("slides") or []) if isinstance(plan.get("slides"), list) else []
-        target_slide_count = int(plan.get("slide_count", 0) or 0) or int(requested_slide_count or 0) or len(raw_slides) or 1
-        target_slide_count = max(target_slide_count, 1)
+        target_slide_count = int(plan.get("slide_count", 0) or 0) or _resolve_target_slide_count(requested_slide_count)
+        target_slide_count = max(target_slide_count or len(raw_slides) or 1, 1)
         fallback = self.build_plan(
             goal=goal,
             requested_slide_count=target_slide_count,
@@ -401,7 +401,7 @@ _PPT_STRATEGY = PptStrategy()
 def build_deck_plan(
     *,
     goal: str,
-    requested_slide_count: int,
+    requested_slide_count: int | None,
     build_batch_size: int,
     default_create_file: str,
     merged_constraints: dict[str, Any] | None = None,
@@ -459,6 +459,14 @@ def advance_after_build(
         repair_mode=repair_mode,
         completed_pages=completed_pages,
     )
+
+
+def _resolve_target_slide_count(requested_slide_count: int | None) -> int:
+    try:
+        count = int(requested_slide_count) if requested_slide_count is not None else 0
+    except (TypeError, ValueError):
+        count = 0
+    return count if count > 0 else 6
 
 
 def _infer_deck_title(goal: str, default_create_file: str) -> str:

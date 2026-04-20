@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any
@@ -19,12 +18,24 @@ from langgraph.graph import StateGraph
 from core.content_utils import extract_result_text
 from core.models import get_llm, response_text
 from langgraph.config import get_config
-from agent.workflows.office.core import OfficeWorkflowState, finalize_node, route_after_build, route_after_qa_fix
+from agent.platform.interrupts import request_interrupt
+from agent.workflows.office.core import (
+    OfficeWorkflowState,
+    finalize_node,
+    route_after_build,
+    route_after_preflight,
+    route_after_qa_fix,
+)
 from agent.workflows.office.builder import run_section_builder
+from agent.workflows.office.goal_contract import (
+    GoalNormalizationRequest,
+    NeedClarification,
+    NormalizeOk,
+    RejectNormalization,
+)
 from agent.workflows.office.goal_normalizer import (
-    extract_explicit_filename,
-    infer_default_create_file,
-    infer_requested_slide_count,
+    compute_dynamic_inner_limit,
+    infer_build_batch_size,
     normalize_goal_profile,
     refine_filename_from_plan,
 )
@@ -49,126 +60,12 @@ OFFICE_MAX_STEPS = 15
 OFFICE_MAX_COST = 3.0
 OFFICE_INNER_RECURSION_LIMIT = 40
 
-_EDIT_HINTS = (
-    "修改",
-    "编辑",
-    "更新",
-    "改写",
-    "润色",
-    "replace",
-    "update",
-    "edit",
-    "fix",
-)
-_INSPECT_HINTS = (
-    "查看",
-    "检查",
-    "分析",
-    "读取",
-    "提取",
-    "总结",
-    "inspect",
-    "review",
-    "analyze",
-    "read",
-)
-_TRANSFORM_HINTS = (
-    "转换",
-    "导出",
-    "另存为",
-    "转成",
-    "convert",
-    "export",
-)
-_CREATE_HINTS = (
-    "创建",
-    "生成",
-    "制作",
-    "做",
-    "写",
-    "draft",
-    "create",
-    "generate",
-)
-_PATH_LIKE_RE = re.compile(r"([A-Za-z]:\\|/|~|\.pptx\b|\.docx\b|\.xlsx\b)")
-_EXPLICIT_FILENAME_RE = re.compile(r"\b([A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(?:pptx|docx|xlsx))\b", re.IGNORECASE)
-_ASCII_FILENAME_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")
-_REQUESTED_SLIDE_COUNT_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:页|page(?:s)?|slide(?:s)?)(?!\w)", re.IGNORECASE)
 _CONTENT_RESEARCHER_TOOL_NAMES = {
     "exa_deep_search",
     "academic_search",
     "web_search",
     "brave_search",
     "browser_navigate",
-}
-_FILENAME_STOPWORDS = {
-    "a",
-    "an",
-    "the",
-    "and",
-    "for",
-    "to",
-    "of",
-    "in",
-    "on",
-    "with",
-    "create",
-    "generate",
-    "make",
-    "draft",
-    "write",
-    "ppt",
-    "pptx",
-    "doc",
-    "docx",
-    "xlsx",
-    "excel",
-    "word",
-    "presentation",
-    "document",
-    "workbook",
-    "download",
-    "downloads",
-    "folder",
-    "file",
-}
-_INTENT_FILENAME_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("介绍", "intro", "overview"), "intro"),
-    (("指南", "guide", "tutorial", "使用"), "guide"),
-    (("总结", "summary"), "summary"),
-    (("报告", "report"), "report"),
-    (("方案", "proposal"), "proposal"),
-    (("计划", "plan"), "plan"),
-    (("分析", "analysis"), "analysis"),
-    (("痛点", "pain point", "pain points"), "pain-points"),
-    (("dashboard", "仪表盘", "kpi"), "dashboard"),
-    (("research", "研究"), "research"),
-    (("patent", "专利"), "patent"),
-    (("financial", "finance", "财务"), "financial-model"),
-    (("education", "learning", "study", "teaching", "教育", "学习"), "education"),
-    (("children", "child", "kids", "student", "students", "孩子", "儿童", "青少年"), "children"),
-    (("modern", "modernization", "new era", "新时代", "现代化"), "modern"),
-)
-_FORMAT_DEFAULT_FILENAMES = {
-    "pptx": "presentation",
-    "docx": "document",
-    "xlsx": "workbook",
-}
-_GENERIC_FILENAME_STEMS = {
-    "ai",
-    "deck",
-    "slides",
-    "slide-deck",
-    "presentation",
-    "document",
-    "workbook",
-    "file",
-    "output",
-    "result",
-    "demo",
-    "temp",
-    "untitled",
-    "new",
 }
 
 
@@ -221,12 +118,6 @@ def _build_subagent_dicts() -> list[dict[str, Any]]:
     return [s.to_dict() for s in OFFICE_SUBAGENTS]
 
 
-# Backward-compatible helper aliases while normalization logic is migrated out of workflow.py.
-_extract_explicit_filename = extract_explicit_filename
-_infer_default_create_file = infer_default_create_file
-_infer_requested_slide_count = infer_requested_slide_count
-
-
 def _coerce_goal_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -276,44 +167,6 @@ async def _structure_docx_goal_constraints(
         "section_headings": _coerce_goal_string_list(payload.get("section_headings")) or existing_headings,
         "formatting_instructions": _coerce_goal_string_list(payload.get("formatting_instructions")) or existing_formatting,
     }
-
-
-def _infer_format(goal: str, file_hint: str, source_files: list[str], explicit: str) -> str:
-    explicit_lower = str(explicit or "").strip().lower()
-    if explicit_lower in {"pptx", "docx", "xlsx"}:
-        return explicit_lower
-
-    candidates = [file_hint, *source_files]
-    for item in candidates:
-        suffix = Path(str(item or "")).suffix.lower().lstrip(".")
-        if suffix in {"pptx", "docx", "xlsx"}:
-            return suffix
-
-    lowered = str(goal or "").lower()
-    if any(keyword in lowered for keyword in ("ppt", "powerpoint", "presentation", "deck", "幻灯片", "演示文稿")):
-        return "pptx"
-    if any(keyword in lowered for keyword in ("docx", "word", "memo", "letter", "manuscript", "proposal", "报告")):
-        return "docx"
-    if any(keyword in lowered for keyword in ("xlsx", "excel", "spreadsheet", "workbook", "dashboard", "表格", "电子表格")):
-        return "xlsx"
-    return ""
-
-
-def _infer_operation(goal: str, source_files: list[str], explicit: str) -> str:
-    explicit_lower = str(explicit or "").strip().lower()
-    if explicit_lower in {"create", "edit", "inspect", "transform"}:
-        return explicit_lower
-
-    lowered = str(goal or "").lower()
-    if any(keyword in lowered for keyword in _TRANSFORM_HINTS):
-        return "transform"
-    if any(keyword in lowered for keyword in _EDIT_HINTS):
-        return "edit"
-    if any(keyword in lowered for keyword in _INSPECT_HINTS):
-        return "inspect"
-    if any(keyword in lowered for keyword in _CREATE_HINTS):
-        return "create"
-    return "inspect" if source_files else "create"
 
 
 def _build_format_specific_guidance(
@@ -400,6 +253,8 @@ _OFFICE_SYSTEM = """\
 - 只有在用户目标缺少内容素材、事实、数据时，才调用搜索类工具。
 - 对 OfficeCLI 语法、DOM 路径、属性名或帮助主题不确定时，必须先调用 help/get/view/query，禁止猜测伪命令。
 - 结构化 `officecli` / `officecli_batch` 调用一律使用 `verb` 字段；不要在工具参数里使用 `command`。如果参考手册里的原始 `officecli batch` JSON 示例出现 `command`，转换成结构化工具调用时必须改写为 `verb`。
+- 对 officecli_batch，commands must be a native array。Do not stringify the array。
+- `officecli_batch` 正确示例：`{{"commands":[{{"verb":"create","file":"deck.pptx"}}]}}`；错误示例：`{{"commands":"[{{\"verb\":\"create\",\"file\":\"deck.pptx\"}}]"}}`
 - 只允许使用 OfficeCLI 工具；禁止编写或执行 Python、bash、shell 脚本来生成或修改 Office 文档。
 - 配图能力：
   - 优先调用 `list_user_images` 查看用户已通过前端上传的图片素材；命中即把对应 `url`（优先）或 `path` 作为 `officecli add ... --type picture --prop src=<...>` 的入参。
@@ -460,23 +315,106 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
     raw_reference_files = state.get("reference_files", task_profile.get("reference_files", [])) or []
     file_hint = str(state.get("file_hint", "") or "").strip()
     goal = str(state.get("goal", "") or "")
-    normalized = normalize_goal_profile(
-        goal=goal,
-        file_hint=file_hint,
+    raw_user_message = str(state.get("raw_user_message", "") or goal)
+    orchestrator_summary = str(state.get("orchestrator_summary", "") or "")
+    request = GoalNormalizationRequest(
+        raw_user_message=raw_user_message,
+        orchestrator_summary=orchestrator_summary,
+        file_hint=file_hint or None,
         source_files=source_files,
         reference_files=[str(item) for item in raw_reference_files],
-        explicit_format=str(state.get("format_hint", "") or ""),
-        explicit_operation=str(state.get("operation_hint", "") or ""),
+        explicit_format=_normalize_format_hint(state.get("format_hint")),
+        explicit_operation=_normalize_operation_hint(state.get("operation_hint")),
+        clarification_history=list(state.get("clarification_history") or []),
     )
-    format_name = str(normalized.get("format", "") or "")
-    operation = str(normalized.get("operation", "") or "")
+    for _ in range(2):
+        normalized = await normalize_goal_profile(request)
+        if isinstance(normalized, NormalizeOk):
+            break
+        if isinstance(normalized, RejectNormalization):
+            cost_ledger = append_stage_record(
+                init_cost_ledger(
+                    task_id=str(state.get("task_id", "") or "office_domain"),
+                    domain="office",
+                    metadata={"runtime_target": infer_office_runtime_target(configurable)},
+                ),
+                stage="planning",
+                status="rejected",
+                elapsed_ms=0,
+                metadata={"reason": normalized.reason},
+            )
+            return {
+                "current_stage": "finalize",
+                "terminal_status": "rejected",
+                "terminal_reason": "goal_profile_rejected",
+                "final_result": f"Office 任务已拒绝：{normalized.reason}",
+                "cost_ledger": cost_ledger,
+            }
+
+        clarification = request_interrupt(
+            {
+                "content": "\n".join(str(item) for item in normalized.questions if str(item).strip()),
+                "context": "这条澄清会决定 Office 任务的格式、页数或输入文件范围，避免任务悄悄跑偏。",
+                "placeholder": _clarification_placeholder(normalized),
+                "interrupt_type": "clarification",
+            }
+        )
+        answer = str(clarification or "").strip()
+        if not answer:
+            cost_ledger = append_stage_record(
+                init_cost_ledger(
+                    task_id=str(state.get("task_id", "") or "office_domain"),
+                    domain="office",
+                    metadata={"runtime_target": infer_office_runtime_target(configurable)},
+                ),
+                stage="planning",
+                status="blocked",
+                elapsed_ms=0,
+                metadata={"missing_fields": list(normalized.missing_fields)},
+            )
+            return {
+                "current_stage": "finalize",
+                "terminal_status": "clarification_required",
+                "terminal_reason": "goal_profile_needs_clarification",
+                "final_result": "Office 任务暂停：缺少关键信息，等待用户澄清。",
+                "cost_ledger": cost_ledger,
+            }
+        request = request.model_copy(
+            update={
+                "raw_user_message": "\n\n".join(
+                    item
+                    for item in [request.raw_user_message, f"用户补充：{answer}"]
+                    if str(item or "").strip()
+                )
+            }
+        )
+    else:
+        return {
+            "current_stage": "finalize",
+            "terminal_status": "clarification_failed",
+            "terminal_reason": "goal_profile_needs_clarification",
+            "final_result": "Office 任务暂停：关键字段澄清后仍无法完成目标归一化。",
+        }
+
+    profile = normalized.profile
+    format_name = str(profile.format or "")
+    operation = str(profile.operation or "")
     runtime_target = infer_office_runtime_target(configurable)
-    default_create_file = str(normalized.get("default_create_file", "") or "")
-    requested_slide_count = int(normalized.get("requested_slide_count", 0) or 0) or None
-    quality_profile = dict(normalized.get("quality_profile") or {})
-    build_batch_size = int(normalized.get("build_batch_size", 0) or 0) or 1
-    inner_limit = int(normalized.get("inner_recursion_limit", OFFICE_INNER_RECURSION_LIMIT) or OFFICE_INNER_RECURSION_LIMIT)
-    reference_files = [str(item).strip() for item in normalized.get("reference_files", []) if str(item).strip()]
+    default_create_file = str(profile.output_filename or "")
+    requested_slide_count = profile.requested_slide_count
+    quality_profile = profile.quality_profile.model_dump()
+    build_batch_size = infer_build_batch_size(
+        format_name=format_name,
+        operation=operation,
+        requested_slide_count=requested_slide_count,
+    )
+    inner_limit = compute_dynamic_inner_limit(
+        format_name=format_name,
+        operation=operation,
+        requested_slide_count=requested_slide_count,
+        quality_profile=quality_profile,
+    )
+    reference_files = [str(item).strip() for item in profile.reference_files if str(item).strip()]
     cost_ledger = init_cost_ledger(
         task_id=str(state.get("task_id", "") or "office_domain"),
         domain="office",
@@ -493,7 +431,7 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
         status="ready",
         elapsed_ms=0,
         metadata={
-            "requested_slide_count": requested_slide_count or 0,
+            "requested_slide_count": requested_slide_count,
             "build_batch_size": build_batch_size,
             "inner_recursion_limit": inner_limit,
             "quality_profile": quality_profile,
@@ -505,7 +443,7 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
         "operation": operation,
         "file_hint": file_hint or default_create_file,
         "default_create_file": default_create_file,
-        "requested_slide_count": requested_slide_count or 0,
+        "requested_slide_count": requested_slide_count,
         "build_batch_size": build_batch_size,
         "allowed_source_files": source_files,
         "reference_files": reference_files,
@@ -514,6 +452,7 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
         "quality_profile": quality_profile,
         "inner_recursion_limit": inner_limit,
         "cost_ledger": cost_ledger,
+        "goal_profile": profile.model_dump(),
         "task_profile": {
             "format": format_name,
             "operation": operation,
@@ -523,6 +462,7 @@ async def preflight_node(state: OfficeWorkflowState) -> dict[str, Any]:
             "reference_files": reference_files,
             "runtime_target": runtime_target,
             "quality_profile": quality_profile,
+            "confidence": profile.confidence,
         },
         "current_stage": "planning",
         "current_batch_index": 0,
@@ -653,7 +593,7 @@ async def resolve_reference_inputs_node(state: OfficeWorkflowState) -> dict[str,
 
 
 async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
-    requested_slide_count = int(state.get("requested_slide_count", 0) or 0) or 0
+    requested_slide_count = _state_requested_slide_count(state)
     build_batch_size = int(state.get("build_batch_size", 0) or 0) or 1
     default_create_file = str(state.get("default_create_file", "") or "")
     strategy_format = str(state.get("format", "") or state.get("format_hint", "") or "").strip().lower()
@@ -692,7 +632,7 @@ async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
     )
     raw_plan = strategy.build_plan(
         goal=str(state.get("goal", "") or ""),
-        requested_slide_count=requested_slide_count or 6,
+        requested_slide_count=requested_slide_count,
         build_batch_size=build_batch_size,
         default_create_file=default_create_file,
         merged_constraints=merged_constraints,
@@ -700,7 +640,7 @@ async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
     deck_plan, planner_validation_issues = strategy.validate_plan(
         plan=raw_plan,
         goal=str(state.get("goal", "") or ""),
-        requested_slide_count=requested_slide_count or 6,
+        requested_slide_count=requested_slide_count,
         build_batch_size=build_batch_size,
         default_create_file=default_create_file,
         merged_constraints=merged_constraints,
@@ -749,7 +689,7 @@ async def planning_node(state: OfficeWorkflowState) -> dict[str, Any]:
 async def build_node(state: OfficeWorkflowState) -> dict[str, Any]:
     format_hint = str(state.get("format", "") or state.get("format_hint", "") or "auto")
     operation = str(state.get("operation", "") or "create")
-    requested_slide_count = int(state.get("requested_slide_count", 0) or 0) or None
+    requested_slide_count = _state_requested_slide_count(state)
     strategy = get_strategy_for_format(format_hint if format_hint != "auto" else "", operation=operation)
     format_specific_guidance = _build_format_specific_guidance(
         goal=str(state.get("goal", "") or ""),
@@ -792,7 +732,11 @@ def build_office_workflow_graph() -> Any:
 
     graph.add_edge(START, "analyze")
     graph.add_edge("analyze", "preflight")
-    graph.add_edge("preflight", "resolve_reference_inputs")
+    graph.add_conditional_edges(
+        "preflight",
+        route_after_preflight,
+        {"resolve_reference_inputs": "resolve_reference_inputs", "finalize": "finalize"},
+    )
     graph.add_edge("resolve_reference_inputs", "select_strategy")
     graph.add_edge("select_strategy", "planning")
     graph.add_edge("planning", "build")
@@ -808,3 +752,35 @@ def build_office_workflow_graph() -> Any:
     )
     graph.add_edge("finalize", END)
     return graph.compile(name="office_workflow")
+
+
+def _normalize_format_hint(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    return text if text in {"pptx", "docx", "xlsx"} else None
+
+
+def _normalize_operation_hint(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    return text if text in {"create", "edit", "inspect", "transform"} else None
+
+
+def _state_requested_slide_count(state: dict[str, Any]) -> int | None:
+    value = state.get("requested_slide_count")
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return count if count > 0 else None
+
+
+def _clarification_placeholder(result: NeedClarification) -> str:
+    fields = list(result.missing_fields or [])
+    if "requested_slide_count" in fields:
+        return "例如：12 页"
+    if "format" in fields:
+        return "例如：PPT"
+    if "source_files" in fields:
+        return "例如：请修改 /Users/name/Documents/q4_report.pptx"
+    if "operation" in fields:
+        return "例如：创建一个新的 PPT"
+    return "补充一句话说明即可"

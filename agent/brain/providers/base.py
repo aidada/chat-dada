@@ -35,8 +35,14 @@ class ProviderChatModelAdapter(BaseChatModel):
     """Minimal BaseChatModel wrapper for custom provider adapters."""
 
     model: str
+    name: str | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        if not self.name:
+            self.name = str(self.model)
 
     @property
     def _llm_type(self) -> str:
@@ -45,10 +51,6 @@ class ProviderChatModelAdapter(BaseChatModel):
     @property
     def _identifying_params(self) -> dict[str, Any]:
         return {"model": self.model}
-
-    @property
-    def name(self) -> str:
-        return str(self.model)
 
     @property
     def model_name(self) -> str:
@@ -106,4 +108,3 @@ class ProviderChatModelAdapter(BaseChatModel):
         del run_manager
         message = await self._ainvoke_message(messages, stop=stop, **kwargs)
         return self._chat_result(message)
-

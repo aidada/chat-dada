@@ -3,6 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 
+def route_after_preflight(state: dict[str, Any]) -> str:
+    if state.get("terminal_status") or str(state.get("current_stage", "") or "") == "finalize":
+        return "finalize"
+    return "resolve_reference_inputs"
+
+
 def route_after_build(state: dict[str, Any]) -> str:
     if state.get("terminal_status"):
         return "finalize"

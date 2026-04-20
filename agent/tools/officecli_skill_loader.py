@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 _SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills" / "officecli"
 _BASE_SKILL = _SKILLS_ROOT / "SKILL.md"
@@ -58,8 +59,22 @@ _FALLBACK_SKILL_TEXT = (
 _STRUCTURED_TOOL_REMINDER = (
     "Structured tool reminder:\n"
     "- `officecli(...)` and `officecli_batch(...)` always use the canonical `verb` field.\n"
-    "- Some raw `officecli batch` CLI examples below may show JSON objects with `command`.\n"
-    "- When converting those raw CLI examples into structured tool calls, rewrite `command` to `verb`."
+    "- CLI-only batch shell examples are omitted in this structured-tool bundle.\n"
+    "- When converting legacy batch examples into structured tool calls, rewrite `command` to `verb`."
+)
+_STRUCTURED_BATCH_ARRAY_REMINDER = (
+    "Structured batch reminder:\n"
+    "- officecli_batch(commands=[...]) must receive a native array of command objects.\n"
+    "- commands must be a native array, never a JSON string.\n"
+    '- Good: {"commands":[{"verb":"create","file":"demo.pptx"}]}\n'
+    '- Bad: {"commands":"[{\\"verb\\":\\"create\\",\\"file\\":\\"demo.pptx\\"}]"}\n'
+    "- Keep each officecli_batch call small: at most 10 commands per call. "
+    "If a slide needs more shape/text operations, split into multiple "
+    "officecli_batch calls instead of packing everything into one large array."
+)
+_RAW_BATCH_BLOCK_RE = re.compile(
+    r"```[\w-]*\n(?:(?!```)[\s\S])*?officecli batch(?:(?!```)[\s\S])*?```",
+    re.IGNORECASE,
 )
 
 
@@ -67,6 +82,33 @@ def load_officecli_skill_text(path: Path) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8")
     return ""
+
+
+def _sanitize_structured_tool_skill_text(content: str) -> str:
+    raw_batch_found = False
+
+    def _replace_block(match: re.Match[str]) -> str:
+        nonlocal raw_batch_found
+        raw_batch_found = True
+        return (
+            "```text\n"
+            "Raw officecli batch CLI example omitted in structured tool mode.\n"
+            "Use officecli_batch(commands=[...]) with a native array instead.\n"
+            "```\n"
+        )
+
+    sanitized = _RAW_BATCH_BLOCK_RE.sub(_replace_block, content)
+    filtered_lines: list[str] = []
+    for line in sanitized.splitlines():
+        if "officecli batch" in line.lower():
+            raw_batch_found = True
+            continue
+        filtered_lines.append(line)
+
+    sanitized = "\n".join(filtered_lines).strip()
+    if raw_batch_found:
+        sanitized = f"{_STRUCTURED_BATCH_ARRAY_REMINDER}\n\n{sanitized}".strip()
+    return sanitized
 
 
 def select_officecli_skill_paths(
@@ -110,11 +152,11 @@ def build_officecli_skill_bundle(
         format_hint=format_hint,
         operation_hint=operation_hint,
     )
-    base_text = load_officecli_skill_text(paths[0]) or _FALLBACK_SKILL_TEXT
+    base_text = _sanitize_structured_tool_skill_text(load_officecli_skill_text(paths[0])) or _FALLBACK_SKILL_TEXT
     parts = [base_text]
 
     for path in paths[1:]:
-        content = load_officecli_skill_text(path)
+        content = _sanitize_structured_tool_skill_text(load_officecli_skill_text(path))
         if not content:
             continue
         parts.extend(

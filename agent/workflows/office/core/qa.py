@@ -276,14 +276,16 @@ def run_qa_fix_stage(
     max_qa_fix_rounds = int(state.get("max_qa_fix_rounds", 2) or 2)
     next_round = qa_fix_round + 1
     if next_round > max_qa_fix_rounds:
+        requested_pages = _coerce_optional_positive_int(state.get("requested_slide_count"))
         partial_progress = {
             "stage": "qa_fix",
             "completed_pages": completed_pages,
-            "requested_pages": int(state.get("requested_slide_count", 0) or completed_pages),
             "qa_fix_round": next_round,
             "max_qa_fix_rounds": max_qa_fix_rounds,
             "reason": "qa_fix_round_exhausted",
         }
+        if requested_pages is not None:
+            partial_progress["requested_pages"] = requested_pages
         cost_ledger = attach_partial_progress(cost_ledger, partial_progress=partial_progress)
         return {
             "evaluations": [evaluation],
@@ -311,14 +313,16 @@ def run_qa_fix_stage(
             ),
         }
 
+    requested_pages = _coerce_optional_positive_int(state.get("requested_slide_count"))
     partial_progress = {
         "stage": "build",
         "completed_pages": completed_pages,
-        "requested_pages": int(state.get("requested_slide_count", 0) or completed_pages),
         "qa_fix_round": next_round,
         "max_qa_fix_rounds": max_qa_fix_rounds,
         "reason": "quality_gate_fixable",
     }
+    if requested_pages is not None:
+        partial_progress["requested_pages"] = requested_pages
     cost_ledger = attach_partial_progress(cost_ledger, partial_progress=partial_progress)
     return {
         "evaluations": [evaluation],
@@ -330,3 +334,11 @@ def run_qa_fix_stage(
         "partial_progress": partial_progress,
         "quality_report": quality_report,
     }
+
+
+def _coerce_optional_positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None

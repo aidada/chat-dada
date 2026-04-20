@@ -15,17 +15,21 @@ from agent.workflows.office.reference_models import (
 
 class OfficeWorkflowState(TypedDict, total=False):
     goal: str
+    raw_user_message: str
+    orchestrator_summary: str
     task_id: str
     report_profile: str
     format_hint: str
     file_hint: str
     default_create_file: str
-    requested_slide_count: int
+    requested_slide_count: int | None
     build_batch_size: int
     source_files: list[str]
     reference_files: list[str]
+    clarification_history: list[dict[str, Any]]
     operation_hint: str
     quality_profile: dict[str, Any]
+    goal_profile: dict[str, Any]
     cost_ledger: dict[str, Any]
     current_stage: str
     task_profile: dict[str, Any]

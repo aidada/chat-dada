@@ -286,6 +286,10 @@ async def _flush_write_artifacts(artifact_refs: list[dict[str, Any]]) -> list[st
 
 async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDomainResult:
     query = input_data.get("query") or input_data.get("task", "")
+    raw_user_message = str(input_data.get("raw_user_message") or query or "")
+    orchestrator_summary = str(
+        input_data.get("orchestrator_summary") or (query if str(query or "") != raw_user_message else "")
+    )
     task_id = input_data.get("task_id", "office_unknown")
     source_files = _collect_source_files(input_data)
     reference_files = _collect_reference_files(input_data)
@@ -305,12 +309,15 @@ async def run_office_domain_orchestrated(input_data: dict[str, Any]) -> OfficeDo
 
     initial_state: dict[str, Any] = {
         "goal": str(query),
+        "raw_user_message": raw_user_message,
+        "orchestrator_summary": orchestrator_summary,
         "task_id": str(task_id),
         "report_profile": "",
         "format_hint": str(input_data.get("format_hint", "") or ""),
         "file_hint": str(input_data.get("file_hint", "") or ""),
         "source_files": source_files,
         "reference_files": reference_files,
+        "clarification_history": list(input_data.get("clarification_history") or []),
         "operation_hint": str(input_data.get("operation_hint", "") or ""),
         "cost": 0.0,
         "progress": 0.0,

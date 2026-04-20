@@ -20,7 +20,7 @@ def init_cost_ledger(
     return {
         "task_id": str(task_id or ""),
         "domain": str(domain or ""),
-        "requested_pages": int(requested_pages or 0),
+        "requested_pages": _coerce_optional_positive_int(requested_pages),
         "completed_pages": 0,
         "total_cost_usd": 0.0,
         "model_cost_usd": 0.0,
@@ -105,7 +105,7 @@ def summarize_cost_ledger(ledger: dict[str, Any] | None) -> dict[str, Any]:
     summary = {
         "task_id": active.get("task_id", ""),
         "domain": active.get("domain", ""),
-        "requested_pages": int(active.get("requested_pages", 0) or 0),
+        "requested_pages": _coerce_optional_positive_int(active.get("requested_pages")),
         "completed_pages": int(active.get("completed_pages", 0) or 0),
         "total_cost_usd": round(float(active.get("total_cost_usd", 0.0) or 0.0), 6),
         "model_cost_usd": round(float(active.get("model_cost_usd", 0.0) or 0.0), 6),
@@ -303,3 +303,11 @@ def _copy_summary_dict(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
     return dict(payload)
+
+
+def _coerce_optional_positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None

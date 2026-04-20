@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.config import get_config
@@ -18,6 +19,19 @@ from agent.platform.streaming import stream_nested_graph
 from agent.runtime.cost_logging import append_stage_record, attach_partial_progress, update_completed_pages
 from agent.tools.officecli import ALLOWED_DIR
 from agent.tools.officecli_skill_loader import build_officecli_skill_bundle
+
+
+class _OfficeStrictToolBindingMiddleware(AgentMiddleware[Any, Any, Any]):
+    """Force strict tool binding only for Office-domain model calls."""
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler,
+    ) -> ModelResponse[Any]:
+        settings = dict(request.model_settings or {})
+        settings["strict"] = True
+        return await handler(request.override(model_settings=settings))
 
 
 async def run_build_stage(
@@ -51,7 +65,7 @@ async def run_build_stage(
     operation = str(state.get("operation", "") or "create")
     runtime_target = str(state.get("runtime_target_hint", "") or "server")
     default_create_file = str(state.get("default_create_file", "") or "")
-    requested_slide_count = int(state.get("requested_slide_count", 0) or 0) or None
+    requested_slide_count = _coerce_optional_positive_int(state.get("requested_slide_count"))
     build_batch_size = int(state.get("build_batch_size", 0) or 0) or 1
     cost_ledger = dict(state.get("cost_ledger") or {})
     deck_plan = dict(state.get("deck_plan") or {})
@@ -99,6 +113,7 @@ async def run_build_stage(
         model=build_chat_model(office_model_role),
         system_prompt=system_prompt,
         tools=tools,
+        middleware=[_OfficeStrictToolBindingMiddleware()],
         subagents=subagents,
         backend=backend,
         checkpointer=False,
@@ -255,7 +270,7 @@ async def run_build_stage(
         elapsed_ms=elapsed_ms,
         metadata={
             "build_batch_size": build_batch_size,
-            "requested_slide_count": requested_slide_count or 0,
+            "requested_slide_count": requested_slide_count,
         },
     )
     _safe_emit("step", f"Office: Sequential done ({len(output)} chars)")
@@ -304,15 +319,16 @@ def _build_partial_progress(state: OfficeWorkflowState | dict[str, Any], *, reas
     batches = list(plan.get("batches") or [])
     current_batch_index = int(active.get("current_batch_index", 0) or 0)
     current_batch = batches[current_batch_index] if 0 <= current_batch_index < len(batches) else None
-    requested_pages = int(active.get("requested_slide_count", 0) or plan.get("slide_count", 0) or 0)
+    requested_pages = _coerce_optional_positive_int(active.get("requested_slide_count"))
     progress = {
         "stage": str(active.get("current_stage", "") or "build"),
         "completed_pages": int(active.get("completed_pages", 0) or 0),
-        "requested_pages": requested_pages,
         "current_batch_index": current_batch_index,
         "total_batches": len(batches),
         "build_batch_size": int(active.get("build_batch_size", 0) or 0),
     }
+    if requested_pages is not None:
+        progress["requested_pages"] = requested_pages
     if current_batch is not None:
         progress["current_batch_slide_range"] = [
             int(current_batch.get("slide_start", 0) or 0),
@@ -322,3 +338,11 @@ def _build_partial_progress(state: OfficeWorkflowState | dict[str, Any], *, reas
     if reason:
         progress["reason"] = reason
     return progress
+
+
+def _coerce_optional_positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
