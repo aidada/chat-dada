@@ -14,6 +14,7 @@ from agent.hands.gateway import ToolGateway
 from agent.hands.local_executor import LocalToolExecutor
 from agent.hands.desktop_manager import DesktopHandsManager, DesktopConnection
 from agent.hands.desktop_executor import DesktopToolExecutor
+from agent.hands.scope import ToolScope
 
 __all__ = [
     "DesktopConnection",
@@ -25,4 +26,5 @@ __all__ = [
     "ToolExecutor",
     "ToolGateway",
     "ToolResult",
+    "ToolScope",
 ]
