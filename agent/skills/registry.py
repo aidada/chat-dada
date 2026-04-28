@@ -42,15 +42,17 @@ class SkillDefinition:
     @classmethod
     def from_file(cls, path: Path) -> "SkillDefinition | None":
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            _log.warning("Failed to load skill file %s: %s", path, exc)
+            raw_bytes = path.read_bytes()
+        except OSError as exc:
+            _log.warning("Failed to read skill file %s: %s", path, exc)
+            return None
+        try:
+            raw = json.loads(raw_bytes)
+        except json.JSONDecodeError as exc:
+            _log.warning("Failed to parse skill file %s: %s", path, exc)
             return None
 
-        raw_bytes = path.read_bytes()
         raw["checksum"] = hashlib.sha256(raw_bytes).hexdigest()
-        raw.pop("tools_required", raw.get("tools_required", []))
-        raw.pop("tools_optional", raw.get("tools_optional", []))
 
         return cls(
             name=raw.get("name", path.stem.split(".")[0]),
