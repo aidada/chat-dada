@@ -18,6 +18,10 @@ from agent.runtime.task_execution import (
     format_sse,
     task_is_terminal,
 )
+from agent.skills.loader import SkillLoader
+from agent.skills.policy import PolicyResolver
+from agent.skills.registry import SkillRegistry
+from agent.hands.scope import ToolScope
 from domain.conversations.context import ConversationContextBuilder
 from domain.conversations.services import ConversationEmbeddingService, ConversationService
 from infra.db.session_store import PostgresSessionStore
@@ -56,7 +60,22 @@ def _build_checkpointer_factory(database_url: str):
 def build_task_service(database_url: str, redis_url: str) -> TaskService:
     redis = aioredis.from_url(redis_url, decode_responses=True)
     session = SessionRuntime(redis, PostgresSessionStore())
-    return TaskService(
+
+    # Initialize Skill infrastructure
+    skill_registry = SkillRegistry(
+        Path(__file__).resolve().parent.parent / "agent" / "skills" / "definitions"
+    )
+    skill_registry.reload()
+    skill_loader = SkillLoader(skill_registry, skill_registry._dir or Path("."))
+
+    # Initialize PolicyResolver with tool scopes
+    policy_resolver = PolicyResolver([
+        ToolScope(name="tavily_search", capability="web.search", audit_label="web_search"),
+        ToolScope(name="exa_search", capability="web.search", audit_label="web_search"),
+        ToolScope(name="web_fetch", capability="web.fetch", audit_label="web_fetch"),
+    ])
+
+    task_service = TaskService(
         session=session,
         redis=redis,
         checkpointer_factory=_build_checkpointer_factory(database_url),
@@ -64,6 +83,13 @@ def build_task_service(database_url: str, redis_url: str) -> TaskService:
         embedding_service=ConversationEmbeddingService(),
         conversation_service=ConversationService(),
     )
+
+    # Attach skill infrastructure to TaskService
+    task_service._skill_loader = skill_loader
+    task_service._skill_registry = skill_registry
+    task_service._policy_resolver = policy_resolver
+
+    return task_service
 
 
 task_service = build_task_service(settings.database_url, settings.redis_url)

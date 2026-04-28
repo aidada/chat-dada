@@ -20,7 +20,7 @@ from agent.runtime.interaction import (
     set_preloaded_user_replies,
     set_task_interaction_handler,
 )
-from agent.runtime.root_graph import build_root_graph
+from agent.root.graph import build_root_graph
 from agent.runtime.cost_logging import (
     attach_partial_progress,
     attach_quality_summary,
@@ -585,6 +585,18 @@ class TaskService:
                 "request_payload": dict(request_payload),
                 "initial_route_payload": route_payload,
             }
+            from agent.skills.policy import PolicyContext
+
+            policy_ctx = PolicyContext(
+                user_id=user_id,
+                user_role="member",
+                environment="development",
+            )
+            resolved_policy = None
+            _policy_resolver = getattr(self, "_policy_resolver", None)
+            if _policy_resolver is not None:
+                resolved_policy = _policy_resolver.resolve(policy_ctx)
+
             config = {
                 "configurable": {
                     "thread_id": task_id,
@@ -594,6 +606,8 @@ class TaskService:
                     "conversation_service": self._conversation_service,
                     "desktop_manager": self._desktop_manager,
                     "tool_gateway": self._tool_gateway,
+                    "skill_loader": getattr(self, "_skill_loader", None),
+                    "resolved_policy": resolved_policy,
                     "request_user_id": user_id,
                 }
             }
