@@ -10,12 +10,16 @@ from collections.abc import Callable
 from typing import Any
 
 from agent.sub_graphs.base import build_react_graph
+from agent.sub_graphs.research import build_research_sub_graph
+from agent.sub_graphs.patent import build_patent_sub_graph
+from agent.sub_graphs.office import build_office_sub_graph
+from agent.sub_graphs.writer import build_writer_sub_graph
 
 AGENT_TYPE_REGISTRY: dict[str, Callable[[], Any]] = {
-    "research":    build_react_graph,
-    "patent":      build_react_graph,
-    "office":      build_react_graph,
-    "writer":      build_react_graph,
+    "research":    build_research_sub_graph,
+    "patent":      build_patent_sub_graph,
+    "office":      build_office_sub_graph,
+    "writer":      build_writer_sub_graph,
     "analyst":     build_react_graph,
 }
 
