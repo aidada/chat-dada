@@ -44,6 +44,52 @@ class ToolGateway:
         self._desktop_manager = desktop_manager
         self._desktop_executor = desktop_executor
 
+    def _scopes_from_context(self, ctx: ToolContext) -> dict:
+        """Return this task's policy scopes from ToolContext.
+        ToolGateway is service-level shared state. Never store per-task policy
+        on self, otherwise concurrent tasks can overwrite each other.
+        """
+        from agent.hands.scope import ToolScope
+        policy_obj = getattr(ctx, "policy", None)
+        allowed_tools = list(getattr(policy_obj, "allowed_tools", []) or [])
+        scopes: dict = {}
+        for item in allowed_tools:
+            if isinstance(item, ToolScope):
+                scopes[item.name] = item
+            elif isinstance(item, dict):
+                name = str(item.get("name", "") or "")
+                if name:
+                    scopes[name] = ToolScope(**item)
+        return scopes
+
+    def is_allowed(self, call: ToolCall, ctx: ToolContext) -> bool:
+        scopes = self._scopes_from_context(ctx)
+        if not scopes:
+            return True
+        scope = scopes.get(call.tool_name)
+        if scope is None:
+            return False
+        if scope.write_scope and call.params:
+            target = call.params.get("path") or call.params.get("file") or ""
+            if target and not scope.matches_resource(target):
+                return False
+        return True
+
+    def describe(self, allowed_tools: list) -> str:
+        """Generate a human-readable tool capability description from allowed tools list."""
+        lines = ["## 可用工具\n"]
+        for item in allowed_tools:
+            name = getattr(item, "name", str(item))
+            cap = getattr(item, "capability", "")
+            desc = getattr(item, "description", "")
+            write_scope = getattr(item, "write_scope", None)
+            approval_required = bool(getattr(item, "approval_required", False))
+            write = f" (写入范围: {write_scope})" if write_scope else ""
+            approval = " [需审批]" if approval_required else ""
+            lines.append(f"- **{name}** ({cap}){write}{approval}" +
+                        (f": {desc}" if desc else ""))
+        return "\n".join(lines)
+
     def set_route(self, tool_name: str, target: str) -> None:
         """Configure routing for a specific tool (local / remote / desktop)."""
         self._routing[tool_name] = target
@@ -59,6 +105,13 @@ class ToolGateway:
         """
         import uuid
         from agent.session.protocol import EventType
+
+        if not self.is_allowed(call, ctx):
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Tool not allowed by policy: {call.tool_name}",
+            )
 
         # Desktop routing: if user has an active desktop connection with this tool
         target = self._routing.get(call.tool_name, "local")
