@@ -271,6 +271,9 @@ class FakeQuotaService:
     def estimate_cost_from_usage(self, llm_usage):
         return 0.0
 
+    def estimate_cost_usd(self, *args, **kwargs):
+        return 0.0
+
     async def record_task_usage(self, **kwargs) -> None:
         return None
 
@@ -470,6 +473,12 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
                 for event in events
             )
         )
+
+
+def test_task_service_uses_coordinator_root_graph() -> None:
+    from agent.runtime import task_execution
+
+    assert task_execution.build_root_graph.__module__ == "agent.runtime.root_graph"
 
 
 class TaskEndpointTests(unittest.TestCase):

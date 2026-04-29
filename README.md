@@ -285,10 +285,10 @@ SSE 事件流会：
 
 | 领域           | 入口                                             | 说明                                    |
 | -------------- | ------------------------------------------------ | --------------------------------------- |
-| `research`     | `agent/domains/research/orchestrated.py`         | 模块化科研工作流                        |
-| `patent`       | `agent/domains/patent/orchestrated.py`           | 专利草稿工作流                          |
-| `zero_report`  | `agent/domains/zero_report/orchestrated.py`      | 归零报告工作流                          |
-| `ppt`          | `agent/domains/ppt/orchestrated.py`              | 生成内容后再渲染 `.pptx`                |
+| `research`     | `agent/workflows/research/orchestrated.py`       | 模块化科研工作流                        |
+| `patent`       | `agent/workflows/patent/orchestrated.py`         | 专利草稿工作流                          |
+| `zero_report`  | `agent/workflows/zero_report/orchestrated.py`    | 归零报告工作流                          |
+| `office`       | `agent/workflows/office/orchestrated.py`         | 统一处理 `.pptx`/`.docx`/`.xlsx`，含配图能力 |
 
 轻量问答和跨领域 DAG 组合（如「先调研再做 PPT」）现在由 Coordinator 统一处理：`understand_goal` 节点根据用户意图路由到 direct（直答）、single_skill（单领域）或 dag（多任务编排）三种执行模式。
 
@@ -474,13 +474,19 @@ GEMINI_API_KEY=
 
 CO_API_KEY=
 OPENAI_API_KEY=
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 MINIMAX_API_KEY=
 MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 MOONSHOT_API_KEY=
 GOOGLE_API_KEY=
 ANTHROPIC_API_KEY=
-YESCODE_GEMINI_BASE_URL=
+YESCODE_GEMINI_BASE_URL=https://co.yes.vg/gemini
 ```
+
+`browser-use` 使用独立的 `browser_agent` 模型角色，默认走 YesCode Gemini 端点和
+`gemini-3.1-pro-preview-customtools`。如果大陆访问不稳定，可按 YesCode 文档将
+`co` 替换为 `co-cdn`。
 
 ### 图片生成
 

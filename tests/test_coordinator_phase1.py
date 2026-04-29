@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -164,6 +164,19 @@ def test_skill_registry_has_research():
     assert desc.name == "do_research"
 
 
+def test_skill_summary_keeps_office_and_drops_ppt() -> None:
+    """ppt 已并入 office，registry 不应再出现 do_ppt；office 必须可被 LLM 选择。"""
+    from agent.coordinator.skills import skill_registry
+
+    summary = skill_registry.skill_summary_for_llm()
+    assert "do_office" in summary
+    assert "do_ppt" not in summary
+    assert skill_registry.get_description("do_ppt") is None
+    office_desc = skill_registry.get_description("do_office")
+    assert office_desc is not None
+    assert office_desc.selectable is True
+
+
 def test_skill_description_fields():
     from agent.coordinator.skills import skill_registry
     desc = skill_registry.get_description("do_research")
@@ -230,12 +243,24 @@ def test_understand_goal_prompt_modes():
     assert "dag" in system_content
 
 
+def test_understand_goal_prompt_routes_research_pricing_to_research_skill():
+    from agent.coordinator.prompts import build_understand_goal_prompt
+
+    msgs = build_understand_goal_prompt("调研 AWS S3 和阿里云 OSS 的定价对比", "skills")
+    system_content = msgs[0]["content"]
+
+    assert "定价" in system_content
+    assert "do_research" in system_content
+    assert "不应选择 direct" in system_content
+
+
 def test_direct_answer_prompt():
     from agent.coordinator.prompts import build_direct_answer_prompt
     msgs = build_direct_answer_prompt("你好", "")
     assert len(msgs) >= 2
     assert msgs[-1]["role"] == "user"
     assert "你好" in msgs[-1]["content"]
+    assert "用户使用中文时，必须使用中文回答" in msgs[0]["content"]
 
 
 def test_direct_answer_prompt_with_context():
@@ -254,8 +279,9 @@ def test_ppt_capability_inquiry_routes_to_direct():
 
 def test_ppt_request_needs_clarification_for_vague_goal():
     from agent.coordinator.agent import _ppt_request_needs_clarification
-    assert _ppt_request_needs_clarification("帮我做一个PPT")
-    assert _ppt_request_needs_clarification("你能帮我写一个ppt出来吗")
+    assert not _ppt_request_needs_clarification("帮我做一个PPT")
+    assert not _ppt_request_needs_clarification("你能帮我写一个ppt出来吗")
+    assert _ppt_request_needs_clarification("帮我修改这个PPT")
     assert not _ppt_request_needs_clarification("帮我做一个关于公司介绍的PPT，面向客户，8页左右")
 
 
@@ -269,6 +295,83 @@ def test_direct_answer_prompt_empty_context_ignored():
     from agent.coordinator.prompts import build_direct_answer_prompt
     msgs = build_direct_answer_prompt("你好", "   ")
     assert len(msgs) == 2
+
+
+@pytest.mark.asyncio
+async def test_understand_goal_office_rewrite_preserves_llm_operation_hint():
+    from agent.coordinator.agent import understand_goal_node
+    from agent.coordinator.state import CoordinatorConfig
+
+    class FakeGoalLLM:
+        async def ainvoke(self, _messages, **_kwargs):
+            return AIMessage(
+                content="""```json
+{
+  "execution_mode": "single_skill",
+  "reasoning": "用户在重写已有 PPT，应交给 Office 域处理",
+  "goal_understanding": "重写现有 PPT 并扩充到 6 页",
+  "selected_skill": "do_office",
+  "skill_input": {
+    "query": "对于chat-dada-agent-intro.pptx 重写，当前的 ppt 内容、结构都太单薄",
+    "operation_hint": "edit",
+    "file_hint": "chat-dada-agent-intro.pptx"
+  }
+}
+```"""
+            )
+
+    with patch("core.models.get_llm", return_value=FakeGoalLLM()):
+        result = await understand_goal_node(
+            {
+                "original_goal": "对于chat-dada-agent-intro.pptx 重写，当前的 ppt 内容、结构都太单薄",
+                "trace_id": "trace-office-rewrite",
+                "config": CoordinatorConfig(),
+                "clarification_history": [],
+                "source_files": [],
+            }
+        )
+
+    assert result["execution_mode"].value == "single_skill"
+    assert result["selected_skill"] == "do_office"
+    assert result["skill_input"]["operation_hint"] == "edit"
+    assert result["skill_input"]["file_hint"] == "chat-dada-agent-intro.pptx"
+
+
+@pytest.mark.asyncio
+async def test_understand_goal_requests_json_response_format():
+    from agent.coordinator.agent import understand_goal_node
+    from agent.coordinator.state import CoordinatorConfig
+
+    class FakeGoalLLM:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        async def ainvoke(self, _messages, **kwargs):
+            self.kwargs = kwargs
+            return AIMessage(
+                content=json.dumps(
+                    {
+                        "execution_mode": "direct",
+                        "reasoning": "json routing",
+                        "goal_understanding": "回答 Python list 和 tuple 的区别",
+                    }
+                )
+            )
+
+    fake_llm = FakeGoalLLM()
+
+    with patch("core.models.get_llm", return_value=fake_llm):
+        await understand_goal_node(
+            {
+                "original_goal": "Python 的 list 和 tuple 有什么区别？",
+                "trace_id": "trace-json-routing",
+                "config": CoordinatorConfig(),
+                "clarification_history": [],
+                "source_files": [],
+            }
+        )
+
+    assert fake_llm.kwargs == {"response_format": {"type": "json_object"}}
 
 
 @pytest.mark.asyncio
@@ -306,7 +409,7 @@ async def test_direct_mode_can_call_runtime_desktop_tools():
             return AIMessage(content="下载目录里主要是文档和图片。")
 
     class FakeGoalLLM:
-        async def ainvoke(self, _messages):
+        async def ainvoke(self, _messages, **_kwargs):
             return SimpleNamespace(
                 text=None,
                 content=json.dumps(

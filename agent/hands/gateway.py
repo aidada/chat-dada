@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, TYPE_CHECKING
 
@@ -43,6 +44,52 @@ class ToolGateway:
         self._desktop_manager = desktop_manager
         self._desktop_executor = desktop_executor
 
+    def _scopes_from_context(self, ctx: ToolContext) -> dict:
+        """Return this task's policy scopes from ToolContext.
+        ToolGateway is service-level shared state. Never store per-task policy
+        on self, otherwise concurrent tasks can overwrite each other.
+        """
+        from agent.hands.scope import ToolScope
+        policy_obj = getattr(ctx, "policy", None)
+        allowed_tools = list(getattr(policy_obj, "allowed_tools", []) or [])
+        scopes: dict = {}
+        for item in allowed_tools:
+            if isinstance(item, ToolScope):
+                scopes[item.name] = item
+            elif isinstance(item, dict):
+                name = str(item.get("name", "") or "")
+                if name:
+                    scopes[name] = ToolScope(**item)
+        return scopes
+
+    def is_allowed(self, call: ToolCall, ctx: ToolContext) -> bool:
+        scopes = self._scopes_from_context(ctx)
+        if not scopes:
+            return True
+        scope = scopes.get(call.tool_name)
+        if scope is None:
+            return False
+        if scope.write_scope and call.params:
+            target = call.params.get("path") or call.params.get("file") or ""
+            if target and not scope.matches_resource(target):
+                return False
+        return True
+
+    def describe(self, allowed_tools: list) -> str:
+        """Generate a human-readable tool capability description from allowed tools list."""
+        lines = ["## 可用工具\n"]
+        for item in allowed_tools:
+            name = getattr(item, "name", str(item))
+            cap = getattr(item, "capability", "")
+            desc = getattr(item, "description", "")
+            write_scope = getattr(item, "write_scope", None)
+            approval_required = bool(getattr(item, "approval_required", False))
+            write = f" (写入范围: {write_scope})" if write_scope else ""
+            approval = " [需审批]" if approval_required else ""
+            lines.append(f"- **{name}** ({cap}){write}{approval}" +
+                        (f": {desc}" if desc else ""))
+        return "\n".join(lines)
+
     def set_route(self, tool_name: str, target: str) -> None:
         """Configure routing for a specific tool (local / remote / desktop)."""
         self._routing[tool_name] = target
@@ -58,6 +105,13 @@ class ToolGateway:
         """
         import uuid
         from agent.session.protocol import EventType
+
+        if not self.is_allowed(call, ctx):
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Tool not allowed by policy: {call.tool_name}",
+            )
 
         # Desktop routing: if user has an active desktop connection with this tool
         target = self._routing.get(call.tool_name, "local")
@@ -91,6 +145,12 @@ class ToolGateway:
 
         # 每次工具调用生成唯一 ID，前端通过 toolCallId 关联 started/completed/failed
         tool_call_id = str(uuid.uuid4())
+        stage = str(call.params.get("_cost_stage", "") or "unknown")
+        public_args = {
+            str(key): value
+            for key, value in (call.params or {}).items()
+            if not str(key).startswith("_")
+        }
 
         await self._session.emit_event(
             call.task_id,
@@ -98,8 +158,9 @@ class ToolGateway:
             {
                 "toolCallId": tool_call_id,
                 "name":       call.tool_name,
-                "args":       call.params or {},
+                "args":       public_args,
                 "target":     target,
+                "stage":      stage,
             },
         )
 
@@ -111,6 +172,7 @@ class ToolGateway:
                     "toolCallId": tool_call_id,
                     "name":       call.tool_name,
                     "error":      availability_error,
+                    "stage":      stage,
                 },
             )
             return ToolResult(
@@ -131,6 +193,8 @@ class ToolGateway:
                     "name":              call.tool_name,
                     "output":            result.output,
                     "execution_time_ms": result.execution_time_ms,
+                    "stage":             stage,
+                    **_tool_result_event_metadata(result),
                 },
             )
         else:
@@ -141,6 +205,8 @@ class ToolGateway:
                     "toolCallId": tool_call_id,
                     "name":       call.tool_name,
                     "error":      result.error or "tool execution failed",
+                    "stage":      stage,
+                    **_tool_result_event_metadata(result),
                 },
             )
 
@@ -154,15 +220,46 @@ class ToolGateway:
         内部仍走 gateway.execute() 路径，确保事件记录一致。
         过渡期实现：包装现有工具函数为 gateway-aware adapters。
         """
-        # 过渡期：返回现有域工具，后续迁移到纯 gateway 调用
         if domain == "patent":
-            from agent.domains.patent.tools import get_patent_tools
-            return get_patent_tools()
+            from agent.workflows.patent.tools import get_patent_tools
+            domain_tools = list(get_patent_tools())
         elif domain == "zero_report":
-            from agent.domains.zero_report.tools import get_zero_report_tools
-            return get_zero_report_tools()
-        elif domain == "ppt":
-            from agent.domains.ppt.tools import get_ppt_tools
-            return get_ppt_tools()
+            from agent.workflows.zero_report.tools import get_zero_report_tools
+            domain_tools = list(get_zero_report_tools())
+        elif domain in ("office", "ppt"):
+            # ppt 已并入 office 域，统一走 office 工具集（包括 officecli 与 image 能力）。
+            from agent.workflows.office.tools import get_office_tools
+            domain_tools = list(get_office_tools())
         else:
-            return []
+            domain_tools = []
+
+        if self._desktop_manager is None or ctx.user_id == "":
+            return domain_tools
+
+        from agent.hands.langchain_tools import build_desktop_langchain_tools
+
+        descriptors = [
+            descriptor
+            for descriptor in self._desktop_manager.list_tool_descriptors(ctx.user_id)
+            if str(descriptor.get("name", "") or "").strip()
+            not in {"list_dir", "file_read", "file_write", "file_edit", "file_search", "grep", "shell", "officecli"}
+        ]
+        desktop_tools = build_desktop_langchain_tools(descriptors, self, ctx)
+        return [*domain_tools, *desktop_tools]
+
+
+def _tool_result_event_metadata(result: ToolResult) -> dict[str, Any]:
+    output = str(result.output or "")
+    if not output:
+        return {}
+    try:
+        parsed = json.loads(output)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    payload: dict[str, Any] = {}
+    for key in ("kind", "command", "message"):
+        if parsed.get(key) is not None:
+            payload[key] = parsed.get(key)
+    return payload

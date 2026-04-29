@@ -19,9 +19,9 @@ class RendererRegistry:
 
 registry = RendererRegistry()
 
-from agent.domains.patent.renderers import render_patent_markdown, render_patent_pptx  # noqa: E402
-from agent.domains.research.renderers import render_markdown, render_pptx  # noqa: E402
-from agent.domains.zero_report.renderers import render_zero_report_markdown, render_zero_report_pptx  # noqa: E402
+from agent.workflows.patent.renderers import render_patent_markdown, render_patent_pptx  # noqa: E402
+from agent.workflows.research.renderers import render_markdown, render_pptx  # noqa: E402
+from agent.workflows.zero_report.renderers import render_zero_report_markdown, render_zero_report_pptx  # noqa: E402
 
 registry.register("research_markdown", render_markdown)
 registry.register("research_pptx", render_pptx)

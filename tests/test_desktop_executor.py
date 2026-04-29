@@ -91,6 +91,23 @@ class TestDesktopToolExecutor(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.success)
         self.assertIn("timeout", result.error.lower())
+        self.assertTrue(any(msg["type"] == "tool_cancel" for msg in ws.sent))
+
+    async def test_execute_timeout_enables_task_cooldown(self):
+        mgr = DesktopHandsManager()
+        executor = DesktopToolExecutor(mgr, default_timeout_s=0.1)
+        ws = FakeWebSocket()
+        mgr.register("user_1", ws, {"tools": [{"name": "officecli", "operations": []}]})
+
+        call = ToolCall(tool_name="officecli", params={"operation": "create"}, task_id="t1", timeout_ms=100)
+        ctx = ToolContext(user_id="user_1", task_id="t1")
+
+        first = await executor.execute(call, ctx)
+        second = await executor.execute(call, ctx)
+
+        self.assertFalse(first.success)
+        self.assertFalse(second.success)
+        self.assertIn("cooling down", second.error.lower())
 
     async def test_execute_generic_tool_uses_tool_name_as_operation(self):
         mgr = DesktopHandsManager()

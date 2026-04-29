@@ -29,6 +29,10 @@ class TestDesktopHandsManager(unittest.IsolatedAsyncioTestCase):
         capabilities = {
             "client_version": "0.1.0",
             "platform": "darwin-aarch64",
+            "paths": {
+                "home": "/Users/test",
+                "downloads": "/Users/test/Downloads",
+            },
             "tools": [
                 {
                     "name": "officecli",
@@ -46,6 +50,7 @@ class TestDesktopHandsManager(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(conn)
         self.assertIs(conn.ws, ws)
         self.assertIn("officecli", conn.tool_names)
+        self.assertEqual(conn.path_aliases["downloads"], "/Users/test/Downloads")
 
     async def test_get_returns_none_for_unknown_user(self):
         mgr = DesktopHandsManager()
@@ -85,6 +90,21 @@ class TestDesktopHandsManager(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(descriptor)
         self.assertEqual(descriptor["permission_level"], "safe")
         self.assertEqual(len(mgr.list_tool_descriptors("user_1")), 1)
+
+    async def test_can_query_path_aliases(self):
+        mgr = DesktopHandsManager()
+        ws = FakeWebSocket()
+        mgr.register("user_1", ws, {
+            "paths": {
+                "home": "/Users/test",
+                "downloads": "/Users/test/Downloads",
+                "documents": "/Users/test/Documents",
+            },
+            "tools": [],
+        })
+        aliases = mgr.get_path_aliases("user_1")
+        self.assertEqual(aliases["home"], "/Users/test")
+        self.assertEqual(aliases["documents"], "/Users/test/Documents")
 
     async def test_stale_disconnect_does_not_remove_new_connection(self):
         mgr = DesktopHandsManager()

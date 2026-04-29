@@ -18,6 +18,7 @@ class ToolCall:
     params: dict[str, Any]
     task_id: str
     timeout_ms: int = 30_000
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -38,6 +39,9 @@ class ToolContext:
     user_id: str
     task_id: str
     trace_id: str = ""
+    agent_id: str = ""
+    checkpoint_ns: str = ""
+    policy: Any = None  # ResolvedPolicy; kept Any to avoid protocol-layer import cycles
 
     async def get_secret(self, key: str) -> str | None:
         """仅在 Harness / LocalExecutor 侧解析 secret。

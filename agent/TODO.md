@@ -86,7 +86,7 @@
 - [x] `grep -rn "asyncpg" agent/` → 零结果
 - [x] `rg -n "^def _safe_emit|_safe_emit\(" agent/` → 无散装副本
 - [x] `rg -n "get_stream_writer\(" agent/` → 仅 `platform/emit.py` + `platform/streaming.py`
-- [ ] `grep -rn "from agent\.tools\." agent/domains/` → 零结果
+- [ ] `grep -rn "from agent\.tools\." agent/workflows/` → 零结果
 - [ ] 注入 Mock SessionRuntime + Mock ToolGateway，TaskService 全流程通过
 - [ ] 页面刷新后 `taskPanelSteps` / `extractPlanModules` / `currentStageArtifactPanel` 恢复正常
 - [ ] kill -9 后 `Session.wake(task_id)` 恢复执行，已完成 skill 不重跑

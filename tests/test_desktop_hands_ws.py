@@ -43,6 +43,10 @@ class TestDesktopHandsWebSocket(unittest.TestCase):
                 "payload": {
                     "client_version": "0.1.0",
                     "platform": "darwin-aarch64",
+                    "paths": {
+                        "home": "/Users/test",
+                        "downloads": "/Users/test/Downloads",
+                    },
                     "tools": [
                         {"name": "officecli", "version": "1.2.0", "operations": []},
                     ],
@@ -56,6 +60,10 @@ class TestDesktopHandsWebSocket(unittest.TestCase):
 
             # Verify manager has the connection registered
             self.assertTrue(self.manager.is_connected("user_1"))
+            self.assertEqual(
+                self.manager.get_path_aliases("user_1")["downloads"],
+                "/Users/test/Downloads",
+            )
 
     def test_reject_invalid_token(self):
         with self.assertRaises(Exception):

@@ -4,8 +4,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable as AbcCallable
-from datetime import UTC
-from typing import Any, Awaitable
+from typing import Any
 
 import redis.asyncio as aioredis
 from langgraph.types import Command
@@ -21,6 +20,16 @@ from agent.runtime.interaction import (
     set_task_interaction_handler,
 )
 from agent.runtime.root_graph import build_root_graph
+from agent.runtime.cost_logging import (
+    attach_partial_progress,
+    attach_quality_summary,
+    build_failure_diagnostics,
+    init_cost_ledger,
+    merge_llm_usage_into_ledger,
+    merge_tool_events_into_ledger,
+    summarize_cost_ledger,
+)
+from agent.workflows.office.core.quality_report import quality_report_summary_lines, summarize_quality_report
 from core.langsmith_config import build_langsmith_run_config
 from core.logger import monitor, new_trace_id
 from core.models import set_thinking_level
@@ -74,6 +83,17 @@ def parse_step_payload(step_info: str) -> tuple[str, dict[str, Any]]:
 
 def _merge_nested_interrupt_pending(current_pending: bool, payload: dict[str, Any]) -> bool:
     return current_pending or bool(payload.get("nested_graph"))
+
+
+def _merge_quality_report_summary(
+    quality_report: dict[str, Any] | None,
+    *summary_sources: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = summarize_quality_report(quality_report)
+    for source in summary_sources:
+        if isinstance(source, dict):
+            merged.update({key: value for key, value in source.items() if value is not None})
+    return merged
 
 
 class TaskService:
@@ -434,7 +454,6 @@ class TaskService:
         resume_last_step_content = ""
         skipped_resume_replay_step = False
 
-        decision = None
         route_payload = snapshot.get("initial_route_payload")
         if not is_human_resume and not is_recovery_resume:
             # C7: Dispatcher routing deleted — Coordinator's understand_goal does routing internally.
@@ -542,7 +561,10 @@ class TaskService:
             request_payload["nested_interrupt_pending"] = nested_interrupt_pending
             if resume_value is not None and nested_interrupt_pending:
                 replay_replies = [
-                    str(item.get("answer", "") or "")
+                    {
+                        "question": str(item.get("question", item.get("content", "")) or ""),
+                        "answer": str(item.get("answer", "") or ""),
+                    }
                     for item in clarification_history
                     if isinstance(item, dict)
                     and str(item.get("nested_graph", "") or "").strip()
@@ -564,6 +586,18 @@ class TaskService:
                 "request_payload": dict(request_payload),
                 "initial_route_payload": route_payload,
             }
+            from agent.skills.policy import PolicyContext
+
+            policy_ctx = PolicyContext(
+                user_id=user_id,
+                user_role="member",
+                environment="development",
+            )
+            resolved_policy = None
+            _policy_resolver = getattr(self, "_policy_resolver", None)
+            if _policy_resolver is not None:
+                resolved_policy = _policy_resolver.resolve(policy_ctx)
+
             config = {
                 "configurable": {
                     "thread_id": task_id,
@@ -573,6 +607,8 @@ class TaskService:
                     "conversation_service": self._conversation_service,
                     "desktop_manager": self._desktop_manager,
                     "tool_gateway": self._tool_gateway,
+                    "skill_loader": getattr(self, "_skill_loader", None),
+                    "resolved_policy": resolved_policy,
                     "request_user_id": user_id,
                 }
             }
@@ -752,7 +788,7 @@ class TaskService:
             reset_task_interaction_handler(interaction_token)
 
         summary = monitor.get_summary(trace_id)
-        await self.record_event(task_id, EventType.SYSTEM_MONITORING.value, {"content": summary})
+        events = await self._session.get_events(task_id)
         async with SessionFactory() as session:
             usage_service = QuotaService(UserQuotaRepository(session), UsageEventRepository(session))
             llm_usage = list(summary.get("llm_usage", []) or [])
@@ -760,6 +796,83 @@ class TaskService:
             total_output_tokens = int(sum(int(item.get("output_tokens", 0) or 0) for item in llm_usage))
             primary_model = str(llm_usage[0].get("model", "") or "") if llm_usage else ""
             estimated_cost_usd = usage_service.estimate_cost_from_usage(llm_usage)
+
+            latest_snapshot = await self._session.get_task(task_id) or {}
+            budget = dict(latest_snapshot.get("budget") or {})
+            review = dict(latest_snapshot.get("review") or {})
+            artifact_refs = list(latest_snapshot.get("artifact_refs") or [])
+            quality_report = dict(review.get("quality_report") or {})
+            cost_ledger = dict(budget.get("cost_ledger") or {})
+            quality_report_summary = _merge_quality_report_summary(
+                quality_report,
+                review.get("quality_report_summary") if isinstance(review.get("quality_report_summary"), dict) else None,
+                budget.get("quality_report_summary") if isinstance(budget.get("quality_report_summary"), dict) else None,
+                cost_ledger.get("quality_report_summary") if isinstance(cost_ledger.get("quality_report_summary"), dict) else None,
+            )
+            partial_progress = dict(review.get("partial_progress") or cost_ledger.get("partial_progress") or {})
+            if not cost_ledger:
+                cost_ledger = init_cost_ledger(task_id=task_id, domain="office")
+            cost_ledger = merge_tool_events_into_ledger(cost_ledger, events=events)
+            cost_ledger = merge_llm_usage_into_ledger(
+                cost_ledger,
+                llm_usage=llm_usage,
+                estimate_cost=usage_service.estimate_cost_usd,
+            )
+            diagnostics = build_failure_diagnostics(events)
+            if diagnostics.get("completed_pages"):
+                cost_ledger["completed_pages"] = int(diagnostics["completed_pages"])
+            elif partial_progress.get("completed_pages"):
+                cost_ledger["completed_pages"] = int(partial_progress["completed_pages"])
+            cost_ledger = attach_partial_progress(cost_ledger, partial_progress=partial_progress)
+            cost_ledger = attach_quality_summary(
+                cost_ledger,
+                quality_report_summary=quality_report_summary,
+            )
+            budget["cost_ledger"] = summarize_cost_ledger(cost_ledger)
+            budget["monitoring_summary"] = summary
+            if quality_report_summary:
+                budget["quality_report_summary"] = quality_report_summary
+                review["quality_report_summary"] = quality_report_summary
+
+            result_text = str(latest_snapshot.get("result_text", "") or "")
+            if (
+                "inner_recursion_limit" in str(review.get("reason", "") or "")
+                or "内层 agent 超过" in result_text
+                or not bool(review.get("passed", True))
+            ):
+                detail_lines = []
+                if diagnostics.get("current_stage"):
+                    detail_lines.append(f"当前阶段: {diagnostics['current_stage']}")
+                if diagnostics.get("completed_pages"):
+                    detail_lines.append(f"已推断完成页数: {diagnostics['completed_pages']}")
+                elif partial_progress.get("completed_pages"):
+                    detail_lines.append(f"已完成页数: {partial_progress['completed_pages']}")
+                last_success = diagnostics.get("last_successful_tool") or {}
+                if last_success.get("command"):
+                    detail_lines.append(f"最后一次成功工具调用: {last_success['command']}")
+                detail_lines.extend(quality_report_summary_lines(quality_report_summary))
+                if detail_lines:
+                    result_text = f"{result_text}\n" + "\n".join(detail_lines)
+                    await self._session.set_result_text(task_id, result_text)
+
+            await self._session.update_projection(
+                task_id,
+                projection_patch={
+                    "budget": budget or None,
+                    "review": review or None,
+                    "artifact_refs": artifact_refs,
+                },
+            )
+            await self.record_event(
+                task_id,
+                EventType.SYSTEM_MONITORING.value,
+                {
+                    "content": summary,
+                    "cost_ledger": budget["cost_ledger"],
+                    "diagnostics": diagnostics,
+                    "quality_report_summary": quality_report_summary,
+                },
+            )
             await usage_service.record_task_usage(
                 user_id=user_id,
                 task_id=task_id,

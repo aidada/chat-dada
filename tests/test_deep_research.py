@@ -8,7 +8,7 @@ from unittest.mock import patch
 import httpx
 from agent.capabilities.review_gates import ReviewResult
 from agent.capabilities.memory import ResearchMemory
-from agent.domains.research.config import (
+from agent.workflows.research.config import (
     ACADEMIC_DELIVERABLE_TYPE,
     ACADEMIC_PAPER_GUIDANCE_PROFILE,
     DEFAULT_DELIVERABLE_TYPE,
@@ -17,14 +17,16 @@ from agent.domains.research.config import (
     resolve_deliverable_type,
     resolve_report_profile,
 )
-from agent.domains.research.reviewers import ResearchReviewGate
-from agent.domains.research.workflow import (
+from agent.workflows.research.reviewers import ResearchReviewGate
+from agent.workflows.research.workflow import (
     _actionable_revision_targets,
     _should_retry_workflow_llm_node,
     aggregate_draft_node,
     build_research_workflow_graph,
+    checkpoint_c_node,
     checkpoint_a_node,
     checkpoint_b_node,
+    intake_node,
     planner_node,
     synthesize_final_node,
 )
@@ -72,6 +74,72 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(_should_retry_workflow_llm_node(httpx.RemoteProtocolError("incomplete chunked read")))
         self.assertTrue(_should_retry_workflow_llm_node(RuntimeError("502 Bad Gateway")))
         self.assertFalse(_should_retry_workflow_llm_node(ValueError("invalid planner json")))
+
+    async def test_intake_does_not_interrupt_for_llm_unresolved_questions_by_default(self) -> None:
+        state = {
+            "query": "调研 AWS S3 和阿里云 OSS 的定价对比",
+            "input_payload": {},
+            "workflow_trace": [],
+        }
+
+        with patch(
+            "agent.workflows.research.workflow._invoke_llm_text",
+            return_value='{"unresolved_questions":["更关注哪个区域？"]}',
+        ), patch("agent.workflows.research.workflow.ask_user") as mocked_ask:
+            result = await intake_node(state)
+
+        mocked_ask.assert_not_called()
+        self.assertEqual(result["brief"]["unresolved_questions"], [])
+        self.assertIn("未澄清假设：更关注哪个区域？", result["brief"]["user_constraints"])
+
+    async def test_checkpoint_a_is_non_blocking_by_default(self) -> None:
+        state = {
+            "plan": {"modules": [{"module_id": "problem_definition", "title": "研究问题定义"}]},
+            "skip_checkpoint_a_once": False,
+            "workflow_trace": [],
+        }
+
+        with patch("agent.workflows.research.workflow.ask_user") as mocked_ask:
+            result = await checkpoint_a_node(state)
+
+        mocked_ask.assert_not_called()
+        self.assertFalse(result["needs_replan"])
+        self.assertEqual(result["active_checkpoint"], "checkpoint_a")
+
+    async def test_checkpoint_b_auto_continues_actionable_revision_by_default(self) -> None:
+        state = {
+            "task_id": "task_auto_revision",
+            "needs_replan": False,
+            "revision_targets": [{"module_id": "related_work", "reason": "覆盖不足", "actions": ["补证据"]}],
+            "evaluations": [{"summary": "评审未通过，需要补强。", "revision_targets": []}],
+            "aggregated_draft": "## 草稿\n\n需要补强。",
+            "feedback_history": [],
+            "plan": {"modules": [{"module_id": "related_work"}]},
+            "module_status": {"related_work": "needs_revision"},
+            "workflow_trace": [],
+        }
+
+        with patch("agent.workflows.research.workflow.ask_user") as mocked_ask:
+            result = await checkpoint_b_node(state)
+
+        mocked_ask.assert_not_called()
+        self.assertFalse(result["needs_replan"])
+        self.assertEqual(result["revision_targets"][0]["module_id"], "related_work")
+
+    async def test_checkpoint_c_is_non_blocking_by_default(self) -> None:
+        state = {
+            "brief": {"deliverable_type": "literature_review"},
+            "aggregated_draft": "## 草稿",
+            "feedback_history": [],
+            "workflow_trace": [],
+        }
+
+        with patch("agent.workflows.research.workflow.ask_user") as mocked_ask:
+            result = await checkpoint_c_node(state)
+
+        mocked_ask.assert_not_called()
+        self.assertEqual(result["revision_targets"], [])
+        self.assertFalse(result["needs_replan"])
 
     async def test_research_review_gate_emits_revision_targets(self) -> None:
         gate = ResearchReviewGate()
@@ -235,7 +303,7 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "workflow_trace": [],
         }
 
-        with patch("agent.domains.research.workflow.ask_user", return_value="继续修订"):
+        with patch("agent.workflows.research.workflow.ask_user", return_value="继续修订"):
             result = await checkpoint_b_node(state)
 
         self.assertTrue(result["needs_replan"])
@@ -254,7 +322,7 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "workflow_trace": [],
         }
 
-        with patch("agent.domains.research.workflow._invoke_llm_text", return_value=""):
+        with patch("agent.workflows.research.workflow._invoke_llm_text", return_value=""):
             result = await planner_node(state)
 
         self.assertEqual(result["budget"]["soft_budget_total"], 6)
@@ -271,7 +339,7 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "workflow_trace": [],
         }
 
-        with patch("agent.domains.research.workflow.ask_user") as mocked_ask:
+        with patch("agent.workflows.research.workflow.ask_user") as mocked_ask:
             result = await checkpoint_a_node(state)
 
         mocked_ask.assert_not_called()
@@ -298,8 +366,8 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             def _memory_factory(task_id: str):
                 return ResearchMemory(task_id, root=Path(tmpdir))
 
-            with patch("agent.domains.research.workflow._invoke_llm_text", return_value=""), patch(
-                "agent.domains.research.workflow.ResearchMemory",
+            with patch("agent.workflows.research.workflow._invoke_llm_text", return_value=""), patch(
+                "agent.workflows.research.workflow.ResearchMemory",
                 side_effect=_memory_factory,
             ):
                 result = await aggregate_draft_node(state)
@@ -321,8 +389,8 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
         }
         emitted: list[tuple[str, object]] = []
 
-        with patch("agent.domains.research.workflow.ask_user", return_value="继续修订"), patch(
-            "agent.domains.research.workflow._safe_emit",
+        with patch("agent.workflows.research.workflow.ask_user", return_value="继续修订"), patch(
+            "agent.workflows.research.workflow._safe_emit",
             side_effect=lambda event_type, content: emitted.append((event_type, content)),
         ):
             await checkpoint_b_node(state)
@@ -356,11 +424,11 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             def _memory_factory(task_id: str):
                 return ResearchMemory(task_id, root=Path(tmpdir))
 
-            with patch("agent.domains.research.workflow._invoke_llm_text", return_value=""), patch(
-                "agent.domains.research.workflow.ResearchMemory",
+            with patch("agent.workflows.research.workflow._invoke_llm_text", return_value=""), patch(
+                "agent.workflows.research.workflow.ResearchMemory",
                 side_effect=_memory_factory,
             ), patch(
-                "agent.domains.research.workflow._safe_emit",
+                "agent.workflows.research.workflow._safe_emit",
                 side_effect=lambda event_type, content: emitted.append((event_type, content)),
             ):
                 result = await synthesize_final_node(state)
@@ -402,7 +470,7 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "workflow_trace": [],
         }
 
-        with patch("agent.domains.research.workflow.ask_user", return_value="继续"):
+        with patch("agent.workflows.research.workflow.ask_user", return_value="继续"):
             result = await checkpoint_b_node(state)
 
         self.assertFalse(result["budget"]["awaiting_user_decision"])

@@ -41,6 +41,7 @@ class SkillDescription:
     timeout_seconds: int = 300  # Default timeout
     retryable: bool = True  # Whether retry is allowed
     nested_depth_limit: int = 0  # Max nested call depth, 0 = no nesting allowed
+    selectable: bool = True  # Whether the coordinator LLM may select this skill directly
 
     # Fields merged from DomainSpec (PRD §8.3 C3)
     tools: list[Any] = field(default_factory=list)  # Tools available to this skill
@@ -98,9 +99,12 @@ class SkillRegistry:
         """Check if a skill is registered."""
         return self.get_runner(name) is not None
 
-    def list_skills(self) -> list[SkillDescription]:
+    def list_skills(self, *, selectable_only: bool = False) -> list[SkillDescription]:
         """Return all registered skill descriptions."""
-        return list(self._skills.values())
+        skills = list(self._skills.values())
+        if selectable_only:
+            skills = [skill for skill in skills if skill.selectable]
+        return skills
 
     def skill_summary_for_llm(self) -> str:
         """Generate a text summary of all skills for LLM context.
@@ -108,7 +112,7 @@ class SkillRegistry:
         Format is optimized for LLM to understand skill capabilities.
         """
         lines = ["## Available Skills\n"]
-        for skill in self._skills.values():
+        for skill in self.list_skills(selectable_only=True):
             lines.append(f"- **{skill.name}** (v{skill.version}): {skill.description}")
             if skill.best_for:
                 lines.append(f"  Best for: {', '.join(skill.best_for)}")
@@ -138,14 +142,14 @@ skill_registry = SkillRegistry()
 
 
 def discover_skills() -> None:
-    """Scan agent/domains/*/orchestrated.py and register domain skills.
+    """Scan agent/workflows/*/orchestrated.py and register domain skills.
 
     Migrated from agent.platform.domain_registry.auto_discover().
 
     Falls back to legacy static imports when an orchestrated module does not
     expose an AgentProtocol subclass.
     """
-    agents_root = pathlib.Path(__file__).resolve().parent.parent / "domains"
+    agents_root = pathlib.Path(__file__).resolve().parent.parent / "workflows"
 
     for child in sorted(agents_root.iterdir()):
         if not child.is_dir() or child.name.startswith("_"):
@@ -154,7 +158,7 @@ def discover_skills() -> None:
         if not mod_path.exists():
             continue
 
-        module_name = f"agent.domains.{child.name}.orchestrated"
+        module_name = f"agent.workflows.{child.name}.orchestrated"
         try:
             mod = importlib.import_module(module_name)
         except Exception:
@@ -216,9 +220,9 @@ def _create_skill_description(domain_name: str) -> SkillDescription:
             "best_for": ["patent drafting", "IP documentation", "invention disclosure"],
             "timeout_seconds": 300,
         },
-        "ppt": {
-            "description": "Create PowerPoint presentations via OfficeCLI",
-            "best_for": ["presentation creation", "slide generation", "report visualization"],
+        "office": {
+            "description": "Create, edit, inspect, or transform Office documents via OfficeCLI",
+            "best_for": ["office document creation", "document editing", "spreadsheet updates", "presentation generation"],
             "timeout_seconds": 300,
         },
         "zero_report": {
@@ -240,6 +244,7 @@ def _create_skill_description(domain_name: str) -> SkillDescription:
         timeout_seconds=config.get("timeout_seconds", 300),
         retryable=True,
         nested_depth_limit=0,
+        selectable=bool(config.get("selectable", True)),
     )
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import unittest
 
-from agent.brain.defaults import ACTIVE_MODEL_CONFIG_PRESET, MODEL_CONFIGS, MODEL_CONFIG_PRESETS
+from agent.brain.defaults import ACTIVE_MODEL_CONFIG_PRESET, MODEL_CONFIGS, MODEL_CONFIG_PRESETS, PROVIDERS
 from agent.brain.registry import ModelRegistry, ModelSpec
 
 
@@ -14,13 +14,16 @@ class TestModelRegistry(unittest.TestCase):
         self.registry = ModelRegistry()
 
     def test_get_returns_default_config(self) -> None:
+        expected = MODEL_CONFIGS["orchestrator"]
+        provider_config = PROVIDERS[expected["provider"]]
+
         spec = self.registry.get("orchestrator")
         self.assertIsInstance(spec, ModelSpec)
         self.assertEqual(spec.role, "orchestrator")
-        self.assertEqual(spec.model, "gpt-5.4")
-        self.assertEqual(spec.provider, "proxy")
-        self.assertEqual(spec.client_type, "openai")
-        self.assertEqual(spec.api_key_env, "CO_API_KEY")
+        self.assertEqual(spec.model, expected["model"])
+        self.assertEqual(spec.provider, expected["provider"])
+        self.assertEqual(spec.client_type, provider_config["client"])
+        self.assertEqual(spec.api_key_env, provider_config["api_key_env"])
 
     def test_get_unknown_role_raises(self) -> None:
         with self.assertRaises(KeyError):
@@ -30,7 +33,7 @@ class TestModelRegistry(unittest.TestCase):
         self.registry.update("orchestrator", model="gpt-6")
         spec = self.registry.get("orchestrator")
         self.assertEqual(spec.model, "gpt-6")
-        self.assertEqual(spec.provider, "proxy")
+        self.assertEqual(spec.provider, MODEL_CONFIGS["orchestrator"]["provider"])
 
     def test_update_changes_provider(self) -> None:
         self.registry.update("orchestrator", provider="openai")
@@ -38,6 +41,38 @@ class TestModelRegistry(unittest.TestCase):
         self.assertEqual(spec.provider, "openai")
         self.assertEqual(spec.client_type, "openai")
         self.assertEqual(spec.api_key_env, "OPENAI_API_KEY")
+
+    def test_deepseek_provider_uses_deepseek_openai_adapter_client(self) -> None:
+        self.assertIn("deepseek", PROVIDERS)
+
+        self.registry.update("orchestrator", model="deepseek-v4-pro", provider="deepseek")
+        spec = self.registry.get("orchestrator")
+
+        self.assertEqual(spec.model, "deepseek-v4-pro")
+        self.assertEqual(spec.provider, "deepseek")
+        self.assertEqual(spec.client_type, "deepseek_openai")
+        self.assertEqual(spec.api_key_env, "DEEPSEEK_API_KEY")
+        self.assertEqual(spec.endpoint_url, "https://api.deepseek.com")
+
+    def test_deepseek_preset_is_declared(self) -> None:
+        self.assertIn("deepseek", MODEL_CONFIG_PRESETS)
+        self.assertEqual(
+            MODEL_CONFIG_PRESETS["deepseek"]["orchestrator"],
+            {"model": "deepseek-v4-pro", "provider": "deepseek"},
+        )
+
+    def test_browser_agent_follows_active_provider_family_unless_google_research(self) -> None:
+        expected_by_preset = {
+            "balanced": {"model": "gpt-5.5", "provider": "proxy"},
+            "all_proxy": {"model": "gpt-5.5", "provider": "proxy"},
+            "openai_direct": {"model": "gpt-5.5", "provider": "openai"},
+            "deepseek": {"model": "deepseek-v4-pro", "provider": "deepseek"},
+            "google_research": {"model": "gemini-3.1-pro-preview-customtools", "provider": "google_proxy"},
+            "minimax_research": {"model": "MiniMax-M2.7-highspeed", "provider": "minimax"},
+        }
+        for preset_name, expected in expected_by_preset.items():
+            with self.subTest(preset=preset_name):
+                self.assertEqual(MODEL_CONFIG_PRESETS[preset_name]["browser_agent"], expected)
 
     def test_update_unknown_provider_raises(self) -> None:
         with self.assertRaises(KeyError):
@@ -61,12 +96,12 @@ class TestModelRegistry(unittest.TestCase):
                     "search": {"provider": "nonexistent"},
                 }
             )
-        self.assertEqual(self.registry.get("orchestrator").model, "gpt-5.4")
+        self.assertEqual(self.registry.get("orchestrator").model, MODEL_CONFIGS["orchestrator"]["model"])
 
     def test_reset_restores_defaults(self) -> None:
         self.registry.update("orchestrator", model="gpt-6")
         self.registry.reset()
-        self.assertEqual(self.registry.get("orchestrator").model, "gpt-5.4")
+        self.assertEqual(self.registry.get("orchestrator").model, MODEL_CONFIGS["orchestrator"]["model"])
 
     def test_snapshot_returns_all_roles(self) -> None:
         snap = self.registry.snapshot()
@@ -81,7 +116,7 @@ class TestModelRegistry(unittest.TestCase):
     def test_task_context_overrides_registry(self) -> None:
         spec = self.registry.get("orchestrator", task_context={"model": "gpt-6"})
         self.assertEqual(spec.model, "gpt-6")
-        self.assertEqual(spec.provider, "proxy")
+        self.assertEqual(spec.provider, MODEL_CONFIGS["orchestrator"]["provider"])
 
     def test_task_context_overrides_provider(self) -> None:
         spec = self.registry.get("orchestrator", task_context={"provider": "openai"})
@@ -103,7 +138,7 @@ class TestModelRegistry(unittest.TestCase):
             spec2 = self.registry.get("search")
             self.assertEqual(spec2.provider, "openai")
             spec3 = self.registry.get("writer")
-            self.assertEqual(spec3.model, "gpt-5.4")
+            self.assertEqual(spec3.model, MODEL_CONFIGS["writer"]["model"])
         finally:
             clear_task_model_override(token)
 

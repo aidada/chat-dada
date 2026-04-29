@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 
-from agent.domains.research.worker import build_worker_graph, coordinate_modules, run_worker
+from agent.workflows.research.worker import _execute_tool_call, build_worker_graph, coordinate_modules, run_worker
 
 
 _LONG_DRAFT = (
@@ -49,13 +49,28 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
             "objective": "梳理文献并补齐引用。",
         }
 
-        with patch("agent.domains.research.worker.get_llm", return_value=_DraftOnlyLLM()):
+        with patch("agent.workflows.research.worker.get_llm", return_value=_DraftOnlyLLM()):
             result = await run_worker(module, brief={"clarified_goal": "test"}, tools=[])
 
         self.assertEqual(result["module_id"], "related_work")
         self.assertEqual(result["status"], "completed")
         self.assertIn("Module Draft", result["findings"])
         self.assertTrue(result["evidence"])
+
+    async def test_execute_tool_call_degrades_tool_exceptions(self) -> None:
+        class _FailingTool:
+            async def ainvoke(self, payload):
+                raise RuntimeError("missing service key")
+
+        text, metadata = await _execute_tool_call(
+            "web_search",
+            {"query": "AWS S3 pricing"},
+            {"web_search": _FailingTool()},
+        )
+
+        self.assertIn("web_search failed", text)
+        self.assertEqual(metadata["tool_error"]["type"], "RuntimeError")
+        self.assertIn("missing service key", metadata["tool_error"]["message"])
 
     async def test_coordinate_modules_respects_dependencies(self) -> None:
         plan = {
@@ -85,7 +100,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
         }
         module_status = {module["module_id"]: "pending" for module in plan["modules"]}
 
-        with patch("agent.domains.research.worker.get_llm", return_value=_DraftOnlyLLM()):
+        with patch("agent.workflows.research.worker.get_llm", return_value=_DraftOnlyLLM()):
             result = await coordinate_modules(
                 plan=plan,
                 brief={"clarified_goal": "test"},
@@ -127,7 +142,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
             ]
         }
 
-        with patch("agent.domains.research.worker.get_llm", return_value=_EmptyLLM()):
+        with patch("agent.workflows.research.worker.get_llm", return_value=_EmptyLLM()):
             result = await coordinate_modules(
                 plan=plan,
                 brief={"clarified_goal": "test"},
@@ -181,7 +196,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "worker_state": {"evidence_pack": [], "search_history": [], "query_fingerprints": {}, "search_round": 0, "last_search_metrics": {}},
             }
 
-        with patch("agent.domains.research.worker.run_worker", side_effect=_fake_run_worker):
+        with patch("agent.workflows.research.worker.run_worker", side_effect=_fake_run_worker):
             result = await coordinate_modules(
                 plan=plan,
                 brief={"clarified_goal": "test"},
@@ -251,7 +266,7 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "worker_state": {"evidence_pack": [], "search_history": [], "query_fingerprints": {}, "search_round": 0, "last_search_metrics": {}},
             }
 
-        with patch("agent.domains.research.worker.run_worker", side_effect=_fake_run_worker):
+        with patch("agent.workflows.research.worker.run_worker", side_effect=_fake_run_worker):
             result = await coordinate_modules(
                 plan=plan,
                 brief={"clarified_goal": "test"},

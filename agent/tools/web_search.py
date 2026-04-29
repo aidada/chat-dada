@@ -28,11 +28,15 @@ async def run(input_data) -> dict:
     if not HAS_TAVILY:
         return {"status": "ok", "result": f"(Tavily search tool unavailable, skipping search for '{query}')"}
 
-    if not os.environ.get("TAVILY_API_KEY"):
+    if not str(os.environ.get("TAVILY_API_KEY") or "").strip():
         return {"status": "ok", "result": f"(TAVILY_API_KEY not configured, skipping search for '{query}')"}
 
-    search = TavilySearch(max_results=5)
-    results = await search.ainvoke(query)
+    try:
+        search = TavilySearch(max_results=5)
+        results = await search.ainvoke(query)
+    except Exception as exc:
+        return {"status": "ok", "result": f"(Tavily search unavailable: {exc}. Skipping search for '{query}')"}
+
     formatted = "\n\n".join(f"[{item['url']}]\n{item['content']}" for item in results)
     if not formatted:
         formatted = f"(Tavily returned no results for '{query}')"

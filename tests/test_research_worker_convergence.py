@@ -6,7 +6,7 @@ from unittest.mock import patch
 import httpx
 from langchain_core.messages import AIMessage
 
-from agent.domains.research.worker import run_worker
+from agent.workflows.research.worker import run_worker
 
 
 class _FakeSearchTool:
@@ -116,7 +116,7 @@ class ResearchWorkerConvergenceTests(unittest.IsolatedAsyncioTestCase):
             "objective": "先收束问题定义",
         }
 
-        with patch("agent.domains.research.worker.get_llm", return_value=_ConvergingLLM()):
+        with patch("agent.workflows.research.worker.get_llm", return_value=_ConvergingLLM()):
             result = await run_worker(
                 module,
                 brief={"clarified_goal": "test"},
@@ -138,7 +138,7 @@ class ResearchWorkerConvergenceTests(unittest.IsolatedAsyncioTestCase):
             "objective": "先收束问题定义",
         }
 
-        with patch("agent.domains.research.worker.get_llm", return_value=llm):
+        with patch("agent.workflows.research.worker.get_llm", return_value=llm):
             result = await run_worker(
                 module,
                 brief={"clarified_goal": "test"},

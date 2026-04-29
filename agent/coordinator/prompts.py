@@ -16,6 +16,7 @@ def build_understand_goal_prompt(
     goal: str,
     skill_summary: str,
     capability_summary: str = "",
+    source_files: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Build prompt for understanding user goal and determining execution mode.
 
@@ -138,18 +139,38 @@ def build_understand_goal_prompt(
 
 `model_hints` 仅在默认模型明显不适合时输出，用于提示下游角色选择更合适的模型；如果没有明确偏好，请省略该字段。
 
+## Office 任务补充规则
+
+- 对 Office / PPT / Word / Excel 请求，优先让模型基于完整语义判断，不要把词面上的“写/重写”机械映射成 create。
+- 如果用户提到现有文件名或路径，并要求重写、修改、更新、润色、扩充、检查、转换，通常应选择 `single_skill` + `do_office`。
+- 对这类已有文件任务，在 `skill_input` 中尽量补充：
+  - `operation_hint`: `edit` / `inspect` / `transform`
+  - `file_hint`: 用户提到的原始文件名或路径
+  - `source_files`: 若运行时已提供上传文件，直接透传
+- 如果用户只提到 bare filename（例如 `deck.pptx`）但意图明显是修改已有文件，也不要因为缺少绝对路径就改判为 create；应保持 edit/inspect/transform 意图，让下游继续解析或澄清。
+- 只有当用户明确要新建文档，或完全没有引用现有文件时，才选择 create 导向的 Office 处理。
+- 对 Office create 任务，`skill_input` 应尽量给出 `file_hint`，文件名必须贴合 goal，用简洁的英文 kebab-case 表达主题；避免使用 `ai.pptx`、`deck.pptx`、`presentation.pptx` 这类过于泛化的名称。
+- 如果用户已经明确给出了现有文件名或目标文件名，保留用户原意，不要擅自改名。
+
 ## 决策原则
 
 - 如果用户请求是简单问答或闲聊 → direct
 - 如果明确属于单一领域且有对应技能 → single_skill
 - 如果涉及多个步骤或跨领域协作 → dag
-- 优先选择 single_skill（比 dag 开销更小）"""
+- 优先选择 single_skill（比 dag 开销更小）
+- 对调研、研究、对比、定价、价格、最新信息、市场/竞品/云服务费用等需要外部事实或检索的请求，通常选择 `single_skill` + `do_research`，不应选择 direct"""
 
     capability_section = ""
     if capability_summary.strip():
         capability_section = f"\n\n## Runtime Capabilities\n\n{capability_summary.strip()}"
 
-    user_prompt = f"""{skill_summary}{capability_section}
+    source_files_section = ""
+    if source_files:
+        source_lines = "\n".join(f"- {str(item).strip()}" for item in source_files if str(item).strip())
+        if source_lines:
+            source_files_section = f"\n\n已提供的源文件：\n{source_lines}"
+
+    user_prompt = f"""{skill_summary}{capability_section}{source_files_section}
 
 ---
 
@@ -185,7 +206,8 @@ def build_direct_answer_prompt(
 7. 如果上下文说明当前可用桌面本机工具，请优先使用这些工具处理本地文件或本机环境请求，而不是直接声称无法访问
 8. 对有副作用的本机工具保持克制，仅在确有必要时调用；若权限被拒绝或工具离线，再向用户解释限制
 9. 对只读本地文件任务，优先使用 list_dir、file_read、file_search、grep 等专用工具，不要用 shell 代替
-10. 只有当专用工具无法满足需求时，才考虑 shell 这类高风险工具"""
+10. 只有当专用工具无法满足需求时，才考虑 shell 这类高风险工具
+11. 默认使用用户问题的语言回答；用户使用中文时，必须使用中文回答"""
 
     context_section = ""
     if conversation_context:

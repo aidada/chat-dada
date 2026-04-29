@@ -19,18 +19,37 @@ from agent.platform.emit import safe_emit_progress
 
 _log = logging.getLogger("chatdada.coordinator.agent")
 
-_PPT_KEYWORDS = ("ppt", "powerpoint", "幻灯片", "演示文稿")
-_PPT_CLARIFY_HINTS = ("关于", "主题", "受众", "页", "要点", "汇报", "介绍", "培训", "答辩", "总结", "方案", "计划", "分析", "报告")
-_PPT_CREATE_HINTS = ("做", "写", "生成", "创建", "制作")
-_PPT_COMPLEX_HINTS = ("研究", "调研", "专利", "零报告")
-_PPT_CAPABILITY_PATTERNS = (
-    re.compile(r"(能不能|能否|可不可以|可以|会不会|是否能|能帮我|可以帮我).*(做|写|生成|创建|制作).*(ppt|powerpoint|演示文稿|幻灯片)", re.IGNORECASE),
-    re.compile(r"(ppt|powerpoint|演示文稿|幻灯片).*(能不能|能否|可不可以|可以|会不会|是否能)", re.IGNORECASE),
+_OFFICE_KEYWORDS = (
+    "ppt",
+    "powerpoint",
+    "pptx",
+    "幻灯片",
+    "演示文稿",
+    "slide deck",
+    "deck",
+    "presentation",
+    "docx",
+    "word",
+    "xlsx",
+    "excel",
+    "spreadsheet",
+    "workbook",
+    "电子表格",
+    "工作簿",
 )
-_PPT_BOILERPLATE_RE = re.compile(
-    r"(请|帮我|给我|一下|一个|一份|做|写|生成|创建|制作|出来|一下子|能不能|能否|可不可以|可以|会不会|是否能|吗|呢|吧|呀|啊|的|个|份|ppt|powerpoint|演示文稿|幻灯片|演示|文稿|\s|[?？!！,，。.:：])",
-    re.IGNORECASE,
+_OFFICE_CREATE_HINTS = ("做", "写", "生成", "创建", "制作", "起草", "create", "generate", "draft")
+_OFFICE_EDIT_HINTS = ("修改", "编辑", "更新", "润色", "改", "替换", "fix", "edit", "update")
+_OFFICE_INSPECT_HINTS = ("查看", "检查", "分析", "读取", "提取", "总结", "inspect", "review", "analyze", "read")
+_OFFICE_TRANSFORM_HINTS = ("导出", "转换", "另存为", "转成", "export", "convert")
+_OFFICE_ACTION_HINTS = _OFFICE_CREATE_HINTS + _OFFICE_EDIT_HINTS + _OFFICE_INSPECT_HINTS + _OFFICE_TRANSFORM_HINTS
+_OFFICE_SPECIFICITY_HINTS = ("关于", "主题", "受众", "页", "要点", "路径", "内容", "章节", "sheet", "slide")
+_OFFICE_COMPLEX_HINTS = ("研究", "调研", "专利", "零报告")
+_OFFICE_CAPABILITY_PATTERNS = (
+    re.compile(r"(能不能|能否|可不可以|可以|会不会|是否能|能帮我|可以帮我).*(ppt|powerpoint|docx|word|xlsx|excel|演示文稿|电子表格)", re.IGNORECASE),
+    re.compile(r"(ppt|powerpoint|docx|word|xlsx|excel|演示文稿|电子表格).*(能不能|能否|可不可以|可以|会不会|是否能)", re.IGNORECASE),
 )
+_OFFICE_PATH_RE = re.compile(r"([A-Za-z]:\\|/|~|\.pptx\b|\.docx\b|\.xlsx\b)", re.IGNORECASE)
+_OFFICE_ROUTABLE_SOURCE_RE = re.compile(r"(^[A-Za-z]:\\|^/|^~)", re.IGNORECASE)
 
 
 def _normalize_model_hints(model_hints: Any) -> dict[str, dict[str, Any]] | None:
@@ -55,45 +74,91 @@ def _normalize_model_hints(model_hints: Any) -> dict[str, dict[str, Any]] | None
     return normalized or None
 
 
-def _mentions_ppt(goal: str) -> bool:
+def _mentions_office(goal: str) -> bool:
     lowered = str(goal or "").lower()
-    return any(keyword in lowered for keyword in _PPT_KEYWORDS) or any(keyword in str(goal or "") for keyword in _PPT_KEYWORDS[2:])
+    return any(keyword in lowered for keyword in _OFFICE_KEYWORDS)
+
+
+def _is_office_capability_inquiry(goal: str) -> bool:
+    text = str(goal or "").strip()
+    if not text or not _mentions_office(text):
+        return False
+    if any(marker in text for marker in _OFFICE_SPECIFICITY_HINTS):
+        return False
+    if _OFFICE_PATH_RE.search(text):
+        return False
+    return any(pattern.search(text) for pattern in _OFFICE_CAPABILITY_PATTERNS)
+
+
+def _office_skill_input(goal: str, source_files: list[str]) -> dict[str, Any]:
+    payload: dict[str, Any] = {"query": goal}
+    if source_files:
+        payload["source_files"] = list(source_files)
+    return payload
+
+
+def _normalize_office_operation_hint(skill_input: dict[str, Any]) -> str:
+    operation = str(skill_input.get("operation_hint", "") or "").strip().lower()
+    return operation if operation in {"create", "edit", "inspect", "transform"} else ""
+
+
+def _has_explicit_office_source(goal: str, skill_input: dict[str, Any]) -> bool:
+    if skill_input.get("source_files"):
+        return True
+    file_hint = str(skill_input.get("file_hint", "") or "").strip()
+    if file_hint and _OFFICE_ROUTABLE_SOURCE_RE.search(file_hint):
+        return True
+    return bool(_OFFICE_ROUTABLE_SOURCE_RE.search(str(goal or "")))
+
+
+def _is_edit_like_office_request(goal: str) -> bool:
+    lowered = str(goal or "").lower()
+    if any(marker in lowered for marker in _OFFICE_CREATE_HINTS):
+        return False
+    return any(marker in lowered for marker in (*_OFFICE_EDIT_HINTS, *_OFFICE_INSPECT_HINTS, *_OFFICE_TRANSFORM_HINTS))
+
+
+def _office_request_needs_clarification(goal: str, skill_input: dict[str, Any]) -> bool:
+    text = str(goal or "").strip()
+    if not text or not _mentions_office(text):
+        return False
+    operation_hint = _normalize_office_operation_hint(skill_input)
+    if operation_hint in {"edit", "inspect", "transform"}:
+        return not _has_explicit_office_source(text, skill_input)
+    if operation_hint == "create":
+        return False
+    if not _is_edit_like_office_request(text):
+        return False
+    if _has_explicit_office_source(text, skill_input):
+        return False
+    return True
+
+
+def _is_simple_office_request(goal: str) -> bool:
+    text = str(goal or "").strip()
+    if not text or not _mentions_office(text):
+        return False
+    if _is_office_capability_inquiry(text):
+        return False
+    if not any(marker in text for marker in _OFFICE_ACTION_HINTS):
+        return False
+    if any(marker in text for marker in _OFFICE_COMPLEX_HINTS):
+        return False
+    return True
 
 
 def _is_ppt_capability_inquiry(goal: str) -> bool:
     text = str(goal or "").strip()
-    if not text or not _mentions_ppt(text):
-        return False
-    if any(marker in text for marker in _PPT_CLARIFY_HINTS):
-        return False
-    return any(pattern.search(text) for pattern in _PPT_CAPABILITY_PATTERNS)
+    return any(keyword in text.lower() for keyword in ("ppt", "powerpoint", "演示文稿", "幻灯片")) and _is_office_capability_inquiry(text)
 
 
 def _ppt_request_needs_clarification(goal: str) -> bool:
-    text = str(goal or "").strip()
-    if not text or not _mentions_ppt(text):
-        return False
-    if _is_ppt_capability_inquiry(text):
-        return True
-    if any(marker in text for marker in _PPT_CLARIFY_HINTS):
-        return False
-    if any(marker in text for marker in ("\n", ":", "：", "1.", "1、", "•", "-", "—")):
-        return False
-    stripped = _PPT_BOILERPLATE_RE.sub("", text)
-    return len(stripped) <= 6
+    return _office_request_needs_clarification(str(goal or ""), {})
 
 
 def _is_simple_ppt_generation_request(goal: str) -> bool:
     text = str(goal or "").strip()
-    if not text or not _mentions_ppt(text):
-        return False
-    if _is_ppt_capability_inquiry(text):
-        return False
-    if not any(marker in text for marker in _PPT_CREATE_HINTS):
-        return False
-    if any(marker in text for marker in _PPT_COMPLEX_HINTS):
-        return False
-    return True
+    return any(keyword in text.lower() for keyword in ("ppt", "powerpoint", "演示文稿", "幻灯片")) and _is_simple_office_request(text)
 
 
 def _base_coordinator_result(
@@ -137,7 +202,7 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
         return {
             "trace_id": state.get("trace_id") or str(uuid.uuid4()),
             "config": state.get("config") or CoordinatorConfig(),
-            "available_skills": skill_registry.list_skills(),
+            "available_skills": skill_registry.list_skills(selectable_only=True),
             "model_hints": state.get("model_hints"),
         }
 
@@ -152,10 +217,11 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
     safe_emit_progress("progress.step", {"content": "理解目标...", "node": "understand_goal", "trace_id": trace_id})
 
     skill_summary = skill_registry.skill_summary_for_llm()
-    available_skills = skill_registry.list_skills()
+    available_skills = skill_registry.list_skills(selectable_only=True)
     config = state.get("config") or CoordinatorConfig()
+    source_files = list(state.get("source_files") or [])
 
-    if _is_ppt_capability_inquiry(goal):
+    if _is_office_capability_inquiry(goal):
         safe_emit_progress("progress.step", {
             "content": f"执行模式：{ExecutionMode.DIRECT.value}",
             "node": "understand_goal",
@@ -165,34 +231,14 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
         return _base_coordinator_result(
             trace_id=trace_id,
             execution_mode=ExecutionMode.DIRECT,
-            goal_understanding="用户在确认是否可以协助生成 PPT，尚未提供可执行需求",
+            goal_understanding="用户在确认是否可以协助处理 Office 文档，尚未提供可执行需求",
             skill_summary=skill_summary,
             available_skills=available_skills,
             config=config,
         )
 
-    if _is_simple_ppt_generation_request(goal):
-        safe_emit_progress("progress.step", {
-            "content": f"执行模式：{ExecutionMode.SINGLE_SKILL.value}",
-            "node": "understand_goal",
-            "trace_id": trace_id,
-            "execution_mode": ExecutionMode.SINGLE_SKILL.value,
-        })
-        return {
-            **_base_coordinator_result(
-                trace_id=trace_id,
-                execution_mode=ExecutionMode.SINGLE_SKILL,
-                goal_understanding="用户需要生成一份单独的 PPT 交付物",
-                skill_summary=skill_summary,
-                available_skills=available_skills,
-                config=config,
-            ),
-            "selected_skill": "do_ppt",
-            "skill_input": {"query": goal},
-        }
-
     capability_summary = _desktop_capability_summary(state)
-    messages = build_understand_goal_prompt(goal, skill_summary, capability_summary)
+    messages = build_understand_goal_prompt(goal, skill_summary, capability_summary, source_files)
 
     # 调用 LLM
     try:
@@ -204,7 +250,7 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
             else:
                 lc_messages.append(HumanMessage(content=msg["content"]))
 
-        response = await llm.ainvoke(lc_messages)
+        response = await llm.ainvoke(lc_messages, response_format={"type": "json_object"})
         text = response_text(response).strip()
 
         # 解析 JSON（处理 markdown 代码块）
@@ -378,17 +424,20 @@ async def execute_single_skill_node(state: CoordinatorState) -> dict[str, Any]:
     skill_input = dict(state.get("skill_input") or {})
     trace_id = state.get("trace_id", "")
     goal = state.get("original_goal", "")
+    source_files = list(state.get("source_files") or [])
 
     if not skill_input.get("query"):
         skill_input["query"] = goal
+    if source_files and not skill_input.get("source_files"):
+        skill_input["source_files"] = list(source_files)
 
-    if selected_skill == "do_ppt" and _ppt_request_needs_clarification(str(skill_input.get("query") or goal)):
+    if selected_skill in {"do_office", "do_ppt"} and _office_request_needs_clarification(str(skill_input.get("query") or goal), skill_input):
         from agent.platform.interrupts import request_interrupt
 
         clarification = request_interrupt({
-            "content": "我可以帮你制作 PPT，但现在还缺少关键信息。请告诉我：主题、受众、预计页数，以及必须覆盖的要点。",
-            "context": "这些信息会直接决定 PPT 的结构和内容，先补充后再生成可以避免产出空白或偏题文件。",
-            "placeholder": "例如：主题是季度经营复盘；受众是管理层；10 页左右；重点讲业绩、问题、改进计划。",
+            "content": "我可以帮你处理这份 Office 文档，但现在缺少需要操作的源文件。请上传文件，或提供明确的 .pptx / .docx / .xlsx 路径。",
+            "context": "这类请求涉及编辑、检查或转换已有文件。先给出明确文件可以避免误操作或无法定位目标文档。",
+            "placeholder": "例如：请修改 /Users/name/Documents/q4_report.pptx，或直接上传要处理的文件。",
             "interrupt_type": "clarification",
         })
         clarification_text = str(clarification or "").strip()
