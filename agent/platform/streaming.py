@@ -93,6 +93,9 @@ def _normalize_custom_part(part: dict[str, Any], *, checkpoint_id: str = "") -> 
 
     if event_type == "artifact.created":
         payload.setdefault("content", str(payload.get("name") or payload.get("url") or ""))
+    elif raw_type == "review" and event_type == "progress.brief":
+        payload.setdefault("brief_type", "review")
+        payload.setdefault("content", str(payload.get("summary") or "研究评审已更新"))
     elif "content" not in payload and event_type not in {"progress.step", "progress.node", "progress.checkpoint"}:
         payload["content"] = str(data)
 

@@ -23,6 +23,14 @@ def _section_alias_groups(deliverable_type: str) -> list[tuple[str, ...]]:
             ("方法与实验路径建议", "method", "experiment", "experimental path"),
             ("对后续论文写作的明确建议", "writing advice", "paper structure", "论文结构"),
         ]
+    if key == "comparative_analysis":
+        return [
+            ("调研范围", "scope", "assumption"),
+            ("证据摘要", "pricing facts", "evidence summary"),
+            ("对比矩阵", "comparison matrix", "side-by-side"),
+            ("场景化建议", "recommendation", "decision"),
+            ("风险", "caveat", "risk"),
+        ]
     return [
         ("研究问题定义", "research problem definition", "problem definition"),
         ("相关工作与证据综述", "相关工作与文献脉络", "related work", "literature review"),
@@ -109,6 +117,10 @@ class ResearchReviewGate(ReviewGate):
         argument_text = _module_text(module_outputs, "argument_map", "contributions", "limitations")
 
         dimensions: list[ReviewDimension] = []
+        if str(profile.name) == "comparative_analysis":
+            citation_modules = ("subject_a_research", "subject_b_research")
+        else:
+            citation_modules = ("problem_definition", "related_work")
 
         citation_trace_score = 0.2
         if traceable_count >= 5:
@@ -124,11 +136,10 @@ class ResearchReviewGate(ReviewGate):
                 passed=citation_trace_score >= 0.65,
                 strengths=["存在可追溯来源"] if traceable_count else [],
                 weaknesses=[] if traceable_count else ["缺少可追溯引用或 URL"],
-                affected_modules=["related_work", "problem_definition"],
+                affected_modules=list(citation_modules),
             )
         )
 
-        citation_modules = ("problem_definition", "related_work")
         citation_module_count = sum(
             1
             for module_id in citation_modules
@@ -159,7 +170,7 @@ class ResearchReviewGate(ReviewGate):
                 weaknesses=[
                     "problem_definition / related_work 仍缺正文支撑，或证据虽多但没有被稳定写入模块草稿"
                 ] if citation_module_ratio < 1.0 or traceable_count < 3 else [],
-                affected_modules=["related_work", "problem_definition"],
+                affected_modules=list(citation_modules),
             )
         )
 
@@ -210,7 +221,11 @@ class ResearchReviewGate(ReviewGate):
             )
         )
 
-        argument_modules = ("argument_map", "contributions", "limitations")
+        argument_modules = (
+            ("comparative_matrix", "decision_recommendations", "caveats_and_risks")
+            if str(profile.name) == "comparative_analysis"
+            else ("argument_map", "contributions", "limitations")
+        )
         argument_module_ratio = (
             sum(
                 1
@@ -219,13 +234,22 @@ class ResearchReviewGate(ReviewGate):
             )
             / len(argument_modules)
         )
-        argument_concepts = {
-            "background": ("背景", "background", "context"),
-            "gap": ("空白", "gap", "challenge", "motivation", "unresolved"),
-            "method": ("方法", "method", "approach", "framework", "model"),
-            "contribution": ("贡献", "contribution", "novelty", "claim"),
-            "limitation": ("局限", "limitation", "risk", "threat"),
-        }
+        if str(profile.name) == "comparative_analysis":
+            argument_concepts = {
+                "scope": ("范围", "scope", "assumption"),
+                "comparison": ("对比", "比较", "matrix", "difference", "delta"),
+                "cost": ("价格", "定价", "费用", "成本", "pricing", "cost"),
+                "scenario": ("场景", "scenario", "workload", "usage"),
+                "risk": ("风险", "局限", "caveat", "risk"),
+            }
+        else:
+            argument_concepts = {
+                "background": ("背景", "background", "context"),
+                "gap": ("空白", "gap", "challenge", "motivation", "unresolved"),
+                "method": ("方法", "method", "approach", "framework", "model"),
+                "contribution": ("贡献", "contribution", "novelty", "claim"),
+                "limitation": ("局限", "limitation", "risk", "threat"),
+            }
         argument_hits = sum(1 for aliases in argument_concepts.values() if any(token in argument_text for token in aliases))
         argument_score = min(0.2 + (argument_hits / len(argument_concepts)) * 0.45 + argument_module_ratio * 0.3, 0.95)
         dimensions.append(
@@ -235,7 +259,7 @@ class ResearchReviewGate(ReviewGate):
                 passed=argument_score >= 0.68,
                 strengths=["论证链基本闭环"] if argument_hits >= 4 and argument_module_ratio >= 0.67 else [],
                 weaknesses=["背景-空白-方法-贡献-局限链条仍不完整"] if argument_hits < 4 or argument_module_ratio < 0.67 else [],
-                affected_modules=["argument_map", "contributions", "limitations"],
+                affected_modules=list(argument_modules),
             )
         )
 
@@ -246,11 +270,12 @@ class ResearchReviewGate(ReviewGate):
             for aliases in section_groups
             if any(alias.lower() in report_lower for alias in aliases)
         )
-        required_alignment_modules = (
-            ("problem_definition", "related_work", "argument_map", "contributions")
-            if str(profile.name) != "paper_guidance"
-            else ("related_work", "method_candidates", "experiment_design", "argument_map", "contributions")
-        )
+        if str(profile.name) == "paper_guidance":
+            required_alignment_modules = ("related_work", "method_candidates", "experiment_design", "argument_map", "contributions")
+        elif str(profile.name) == "comparative_analysis":
+            required_alignment_modules = tuple(profile.required_modules)
+        else:
+            required_alignment_modules = ("problem_definition", "related_work", "argument_map", "contributions")
         aligned_module_ratio = (
             sum(
                 1
@@ -313,28 +338,58 @@ class ResearchReviewGate(ReviewGate):
                 requires_new_evidence=requires_new_evidence,
             )
 
+        profile = get_deliverable_profile((payload.get("brief") or {}).get("deliverable_type"))
+        if str(profile.name) == "comparative_analysis":
+            citation_target = "subject_a_research"
+            citation_target_secondary = "subject_b_research"
+            argument_target = "comparative_matrix"
+            risk_target = "caveats_and_risks"
+            intent_target = "comparison_scope"
+        else:
+            citation_target = "related_work"
+            citation_target_secondary = ""
+            argument_target = "argument_map"
+            risk_target = "limitations"
+            intent_target = "problem_definition"
+
         for dimension in dimensions:
             if dimension.passed:
                 continue
             if dimension.name == "citation_authenticity_traceability":
                 _upsert(
-                    "related_work",
+                    citation_target,
                     "引用真实性与可追溯性不足",
                     priority="high",
                     actions=["补充可追溯 URL、论文题目、作者或来源信息"],
                     requires_new_evidence=True,
                 )
+                if citation_target_secondary:
+                    _upsert(
+                        citation_target_secondary,
+                        "引用真实性与可追溯性不足",
+                        priority="high",
+                        actions=["补充可追溯 URL、官方价格页或来源信息"],
+                        requires_new_evidence=True,
+                    )
             elif dimension.name == "citation_relevance_coverage":
                 _upsert(
-                    "related_work",
+                    citation_target,
                     "相关工作覆盖不足",
                     priority="high",
                     actions=["补充关键方向和代表性工作，明确研究空白"],
                     requires_new_evidence=True,
                 )
+                if citation_target_secondary:
+                    _upsert(
+                        citation_target_secondary,
+                        "对比对象证据覆盖不足",
+                        priority="high",
+                        actions=["补充另一侧对象的官方来源、计费细项和限制条件"],
+                        requires_new_evidence=True,
+                    )
             elif dimension.name == "citation_recency":
                 _upsert(
-                    "related_work",
+                    citation_target,
                     "近年文献覆盖不足",
                     actions=["补充近 3-5 年关键文献，区分经典工作与近年进展"],
                     requires_new_evidence=True,
@@ -355,18 +410,18 @@ class ResearchReviewGate(ReviewGate):
                 )
             elif dimension.name == "argument_chain_completeness":
                 _upsert(
-                    "argument_map",
+                    argument_target,
                     "论证链不完整",
                     actions=["补足研究背景、问题、空白、方法、贡献之间的逻辑闭环"],
                 )
                 _upsert(
-                    "limitations",
+                    risk_target,
                     "局限性与风险刻画不足",
                     actions=["明确不能写过头的点和当前证据边界"],
                 )
             elif dimension.name == "intent_alignment":
                 _upsert(
-                    "problem_definition",
+                    intent_target,
                     "当前草案与用户目标或产物类型不够对齐",
                     priority="high",
                     actions=["重新校准任务定义、输出重点与最终产物结构"],
@@ -375,7 +430,7 @@ class ResearchReviewGate(ReviewGate):
         for issue in issues:
             if issue.severity == "error" and "空" in issue.message:
                 _upsert(
-                    "problem_definition",
+                    intent_target,
                     issue.message,
                     priority="high",
                     actions=["先生成基本模块草案，再进入评估与整合"],

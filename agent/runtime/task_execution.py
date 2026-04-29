@@ -4,8 +4,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable as AbcCallable
-from datetime import UTC
-from typing import Any, Awaitable
+from typing import Any
 
 import redis.asyncio as aioredis
 from langgraph.types import Command
@@ -20,7 +19,7 @@ from agent.runtime.interaction import (
     set_preloaded_user_replies,
     set_task_interaction_handler,
 )
-from agent.root.graph import build_root_graph
+from agent.runtime.root_graph import build_root_graph
 from agent.runtime.cost_logging import (
     attach_partial_progress,
     attach_quality_summary,
@@ -455,7 +454,6 @@ class TaskService:
         resume_last_step_content = ""
         skipped_resume_replay_step = False
 
-        decision = None
         route_payload = snapshot.get("initial_route_payload")
         if not is_human_resume and not is_recovery_resume:
             # C7: Dispatcher routing deleted — Coordinator's understand_goal does routing internally.
@@ -563,7 +561,10 @@ class TaskService:
             request_payload["nested_interrupt_pending"] = nested_interrupt_pending
             if resume_value is not None and nested_interrupt_pending:
                 replay_replies = [
-                    str(item.get("answer", "") or "")
+                    {
+                        "question": str(item.get("question", item.get("content", "")) or ""),
+                        "answer": str(item.get("answer", "") or ""),
+                    }
                     for item in clarification_history
                     if isinstance(item, dict)
                     and str(item.get("nested_graph", "") or "").strip()

@@ -20,6 +20,7 @@ from agent.brain.factory import (
 )
 from agent.brain.providers import (
     BrowserUseResponsesAdapter,
+    DeepSeekOpenAIAdapter,
     GeminiOpenAIAdapter,
     MiniMaxOpenAIAdapter,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "DEFAULT_LLM_TIMEOUT_SECONDS",
     "DEFAULT_LLM_MAX_RETRIES",
     "GOOGLE_PROXY_SUPPORTED_THINKING_LEVELS",
+    "DeepSeekOpenAIAdapter",
     "MiniMaxOpenAIAdapter",
     "GeminiOpenAIAdapter",
     "BrowserUseResponsesAdapter",

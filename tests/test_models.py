@@ -13,12 +13,14 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import tool
 from pydantic import BaseModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from core.models import (
     DEFAULT_LLM_MAX_RETRIES,
     DEFAULT_LLM_TIMEOUT_SECONDS,
+    DeepSeekOpenAIAdapter,
     GeminiOpenAIAdapter,
+    MODEL_CONFIGS,
     MiniMaxOpenAIAdapter,
     _build_client,
     build_chat_model,
@@ -417,6 +419,185 @@ class MiniMaxOpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(holders["async_client"], adapter._async_client)
 
 
+class DeepSeekOpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def _patch_deepseek_clients(self, parsed_payload: dict[str, Any]):
+        holders: dict[str, Any] = {}
+
+        class _FakeResponse:
+            def __init__(self, payload: dict[str, Any]) -> None:
+                self._payload = payload
+
+            def model_dump(self, **kwargs):
+                return self._payload
+
+        class _FakeAsyncCompletions:
+            def __init__(self) -> None:
+                self.last_payload = None
+
+            async def create(self, **payload):
+                self.last_payload = payload
+                return _FakeResponse(parsed_payload)
+
+        class _FakeSyncCompletions:
+            def __init__(self) -> None:
+                self.last_payload = None
+
+            def create(self, **payload):
+                self.last_payload = payload
+                return _FakeResponse(parsed_payload)
+
+        class _FakeAsyncOpenAI:
+            def __init__(self, **kwargs) -> None:
+                holders["async_ctor_kwargs"] = kwargs
+                self.chat = SimpleNamespace(completions=_FakeAsyncCompletions())
+                holders["async_client"] = self
+
+        class _FakeOpenAI:
+            def __init__(self, **kwargs) -> None:
+                holders["sync_ctor_kwargs"] = kwargs
+                self.chat = SimpleNamespace(completions=_FakeSyncCompletions())
+                holders["sync_client"] = self
+
+        return (
+            holders,
+            patch("agent.brain.providers.deepseek.AsyncOpenAI", new=_FakeAsyncOpenAI),
+            patch("agent.brain.providers.deepseek.OpenAI", new=_FakeOpenAI),
+        )
+
+    async def test_adapter_applies_thinking_defaults_and_round_trips_reasoning_content(self) -> None:
+        parsed_payload = {
+            "id": "chatcmpl-deepseek-1",
+            "model": "deepseek-v4-pro",
+            "usage": {
+                "prompt_tokens": 101,
+                "completion_tokens": 29,
+                "total_tokens": 130,
+                "completion_tokens_details": {"reasoning_tokens": 17},
+            },
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "final answer",
+                        "reasoning_content": "Need live prices before comparing S3 and OSS.",
+                    },
+                }
+            ],
+        }
+
+        holders, async_patch, sync_patch = self._patch_deepseek_clients(parsed_payload)
+        with async_patch, sync_patch:
+            adapter = DeepSeekOpenAIAdapter(
+                "deepseek-v4-pro",
+                "test-key",
+                base_url="https://api.deepseek.com",
+                thinking_level="xhigh",
+                temperature=0.2,
+                top_p=0.9,
+                timeout=12,
+                max_retries=3,
+            )
+            previous_assistant = AIMessage(
+                content="",
+                additional_kwargs={"reasoning_content": "I should search before answering."},
+                tool_calls=[{"id": "call_1", "name": "search", "args": {"q": "aws s3 pricing"}}],
+            )
+            result = await adapter.ainvoke(
+                [
+                    previous_assistant,
+                    ToolMessage(content="search result", tool_call_id="call_1"),
+                    HumanMessage(content="continue"),
+                ]
+            )
+
+        self.assertEqual(holders["async_ctor_kwargs"]["base_url"], "https://api.deepseek.com")
+        self.assertEqual(holders["async_ctor_kwargs"]["timeout"], 12)
+        self.assertEqual(holders["async_ctor_kwargs"]["max_retries"], 3)
+        payload = holders["async_client"].chat.completions.last_payload
+        self.assertEqual(payload["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertEqual(payload["reasoning_effort"], "max")
+        self.assertNotIn("temperature", payload)
+        self.assertNotIn("top_p", payload)
+        self.assertEqual(payload["messages"][0]["reasoning_content"], "I should search before answering.")
+        self.assertEqual(result.content, "final answer")
+        self.assertEqual(result.additional_kwargs["reasoning_content"], "Need live prices before comparing S3 and OSS.")
+        self.assertEqual(result.usage_metadata["input_tokens"], 101)
+        self.assertEqual(result.usage_metadata["output_token_details"]["reasoning"], 17)
+        self.assertEqual(result.response_metadata["usage"]["total_tokens"], 130)
+
+    async def test_adapter_bind_tools_keeps_reasoning_content_and_tools(self) -> None:
+        parsed_payload = {
+            "id": "chatcmpl-deepseek-2",
+            "model": "deepseek-v4-pro",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "Use search first.",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "search", "arguments": "{\"q\":\"x\"}"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+
+        holders, async_patch, sync_patch = self._patch_deepseek_clients(parsed_payload)
+
+        @tool
+        def search(q: str) -> str:
+            """Search helper."""
+            return q
+
+        with async_patch, sync_patch:
+            adapter = DeepSeekOpenAIAdapter(
+                "deepseek-v4-pro",
+                "test-key",
+                base_url="https://api.deepseek.com",
+            ).bind_tools([search])
+            result = await adapter.ainvoke([HumanMessage(content="search")])
+
+        payload = holders["async_client"].chat.completions.last_payload
+        self.assertIn("tools", payload)
+        self.assertEqual(payload["tools"][0]["function"]["name"], "search")
+        self.assertEqual(result.tool_calls[0]["name"], "search")
+        self.assertEqual(result.additional_kwargs["reasoning_content"], "Use search first.")
+
+    async def test_adapter_is_base_chat_model_compatible_with_resolve_model(self) -> None:
+        parsed_payload = {
+            "id": "chatcmpl-deepseek-3",
+            "model": "deepseek-v4-pro",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "choices": [
+                {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}
+            ],
+        }
+
+        holders, async_patch, sync_patch = self._patch_deepseek_clients(parsed_payload)
+        with async_patch, sync_patch:
+            adapter = DeepSeekOpenAIAdapter(
+                "deepseek-v4-pro",
+                "test-key",
+                base_url="https://api.deepseek.com",
+            )
+            bound = adapter.bind_tools([])
+
+        self.assertIsInstance(adapter, BaseChatModel)
+        self.assertIs(resolve_model(adapter), adapter)
+        self.assertIsInstance(bound, BaseChatModel)
+        self.assertIs(holders["async_client"], adapter._async_client)
+
+
 class ModelDefaultsTests(unittest.TestCase):
     def setUp(self) -> None:
         registry.reset()
@@ -459,13 +640,13 @@ class ModelDefaultsTests(unittest.TestCase):
 
     def test_get_llm_applies_default_timeout_and_retries(self) -> None:
         with patch.dict(os.environ, {"CO_API_KEY": "test-key"}, clear=False):
-            registry.update("search", model="gpt-5.4", provider="proxy")
+            registry.update("search", model="gpt-5.5", provider="proxy")
             with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
                 with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
                     client, role, model = get_llm("search")
 
         self.assertEqual(role, "search")
-        self.assertEqual(model, "gpt-5.4")
+        self.assertEqual(model, "gpt-5.5")
         kwargs = build_client.call_args.kwargs
         self.assertEqual(kwargs["timeout"], DEFAULT_LLM_TIMEOUT_SECONDS)
         self.assertEqual(kwargs["max_retries"], DEFAULT_LLM_MAX_RETRIES)
@@ -535,6 +716,42 @@ class ModelDefaultsTests(unittest.TestCase):
         self.assertEqual(kwargs["extra_body"], {"reasoning_split": True})
         self.assertEqual(kwargs["disable_streaming"], "tool_calling")
         self.assertNotIn("thinking_level", kwargs)
+
+    def test_get_llm_builds_deepseek_provider_via_openai_compatible_client(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"DEEPSEEK_API_KEY": "test-key"},
+            clear=False,
+        ):
+            registry.update("search", model="deepseek-v4-pro", provider="deepseek")
+            with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
+                with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                    client, role, model = get_llm("search")
+
+        self.assertEqual(role, "search")
+        self.assertEqual(model, "deepseek-v4-pro")
+        self.assertIs(client, build_client.return_value)
+        self.assertEqual(build_client.call_args.args, ("deepseek_openai", "deepseek-v4-pro", "test-key"))
+        kwargs = build_client.call_args.kwargs
+        self.assertEqual(kwargs["base_url"], "https://api.deepseek.com")
+        self.assertIn("thinking_level", kwargs)
+
+    def test_get_llm_uses_deepseek_env_base_url_override(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DEEPSEEK_API_KEY": "test-key",
+                "DEEPSEEK_BASE_URL": "https://api.deepseek.com/",
+            },
+            clear=False,
+        ):
+            registry.update("search", model="deepseek-v4-flash", provider="deepseek")
+            with patch("agent.brain.factory._build_client", return_value=object()) as build_client:
+                with patch("core.logger._LoggingLLM", side_effect=lambda client, role, model: (client, role, model)):
+                    get_llm("search")
+
+        kwargs = build_client.call_args.kwargs
+        self.assertEqual(kwargs["base_url"], "https://api.deepseek.com")
 
     def test_get_llm_uses_minimax_env_base_url_override(self) -> None:
         with patch.dict(
@@ -646,14 +863,14 @@ class ModelDefaultsTests(unittest.TestCase):
                 raise AssertionError("structured output should not be used in this test")
 
         fake_llm = _FakeLLM()
-        registry.update("search", model="gpt-5.4", provider="proxy")
+        registry.update("search", model="gpt-5.5", provider="proxy")
         with patch("agent.brain.factory.get_llm", return_value=fake_llm) as mocked_get_llm:
             adapter = get_browser_use_llm("search")
             result = self._run_async(adapter.ainvoke([BrowserSystemMessage(content="hello")], session_id="abc"))
 
         mocked_get_llm.assert_called_once_with("search")
         self.assertEqual(adapter.provider, "openai")
-        self.assertEqual(adapter.model, "gpt-5.4")
+        self.assertEqual(adapter.model, "gpt-5.5")
         self.assertEqual(result.completion, "adapter text")
         self.assertEqual(fake_llm.kwargs, {})
 
@@ -679,6 +896,22 @@ class ModelDefaultsTests(unittest.TestCase):
         self.assertEqual(result.completion, "gemini text")
         self.assertEqual(fake_llm.kwargs, {})
 
+    def test_get_browser_use_llm_browser_agent_uses_active_preset_config(self) -> None:
+        class _FakeLLM:
+            async def ainvoke(self, messages, **kwargs):
+                return "browser text"
+
+            def with_structured_output(self, schema):
+                return self
+
+        registry.reset()
+        expected = dict(MODEL_CONFIGS["browser_agent"])
+        with patch("agent.brain.factory.get_llm", return_value=_FakeLLM()) as mocked_get_llm:
+            adapter = get_browser_use_llm("browser_agent")
+
+        mocked_get_llm.assert_called_once_with("browser_agent")
+        self.assertEqual(adapter.model, expected["model"])
+
     def test_get_browser_use_llm_structured_output_uses_responses_api(self) -> None:
         class _StructuredOut(BaseModel):
             value: str
@@ -702,7 +935,7 @@ class ModelDefaultsTests(unittest.TestCase):
             raise AssertionError("chat.completions.create should not be used")
 
         with patch.dict(os.environ, {"CO_API_KEY": "test-key"}, clear=False):
-            registry.update("search", model="gpt-5.4", provider="proxy")
+            registry.update("search", model="gpt-5.5", provider="proxy")
             adapter = get_browser_use_llm("search")
 
         raw_llm = adapter._llm._llm

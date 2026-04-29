@@ -89,6 +89,53 @@ class ResearchReviewDiffTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("problem_definition", diff["unchanged_modules"])
         self.assertTrue(any(item["name"] == "citation_relevance_coverage" for item in diff["dimension_changes"]))
 
+    async def test_evaluate_draft_emits_frontend_visible_review_brief(self) -> None:
+        review = SimpleNamespace(
+            passed=False,
+            needs_replan=False,
+            summary="评审未通过，需要补充来源。",
+            dimensions=[],
+            revision_targets=[],
+            lock_modules=[],
+            user_feedback_required=False,
+            issues=[
+                SimpleNamespace(
+                    severity="warning",
+                    message="缺少可追溯来源",
+                    metadata={},
+                )
+            ],
+        )
+        state = {
+            "brief": {"clarified_goal": "test", "deliverable_type": "literature_review"},
+            "plan": {"modules": [{"module_id": "related_work"}]},
+            "aggregated_draft": "## Draft\n\ncurrent text",
+            "module_outputs": {"related_work": {"content": "draft"}},
+            "module_status": {"related_work": "completed"},
+            "evaluations": [],
+            "locked_modules": {},
+            "evidence_bank": [],
+            "citation_bank": [],
+            "blocked_modules": [],
+            "workflow_trace": [],
+        }
+        emitted: list[tuple[str, object]] = []
+
+        with patch("agent.workflows.research.workflow.ResearchReviewGate.evaluate", return_value=review), patch(
+            "agent.workflows.research.workflow._safe_emit",
+            side_effect=lambda event_type, content: emitted.append((event_type, content)),
+        ):
+            await evaluate_draft_node(state)
+
+        self.assertEqual(emitted[-1][0], "review")
+        payload = emitted[-1][1]
+        self.assertIsInstance(payload, dict)
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["brief_type"], "review")
+        self.assertEqual(payload["content"], "评审未通过，需要补充来源。")
+        self.assertEqual(payload["summary"], "评审未通过，需要补充来源。")
+        self.assertEqual(payload["issues"][0]["message"], "缺少可追溯来源")
+
     async def test_evaluate_draft_keeps_blocked_targets_blocked(self) -> None:
         review = SimpleNamespace(
             passed=False,

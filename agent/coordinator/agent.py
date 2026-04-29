@@ -6,7 +6,7 @@ import re
 import uuid
 from typing import Any
 from langgraph.constants import END, START
-from langgraph.config import get_config, get_stream_writer
+from langgraph.config import get_config
 from langgraph.graph import StateGraph
 
 from agent.coordinator.state import (
@@ -250,7 +250,7 @@ async def understand_goal_node(state: CoordinatorState) -> dict[str, Any]:
             else:
                 lc_messages.append(HumanMessage(content=msg["content"]))
 
-        response = await llm.ainvoke(lc_messages)
+        response = await llm.ainvoke(lc_messages, response_format={"type": "json_object"})
         text = response_text(response).strip()
 
         # 解析 JSON（处理 markdown 代码块）

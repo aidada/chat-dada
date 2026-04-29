@@ -16,8 +16,10 @@ from agent.workflows.research.orchestrated import run_research_domain_orchestrat
 from agent.workflows.zero_report.agent import run_zero_report_domain
 from agent.runtime.interaction import (
     ask_user,
+    reset_graph_interrupt_bridge,
     reset_preloaded_user_replies,
     reset_task_interaction_handler,
+    set_graph_interrupt_bridge,
     set_preloaded_user_replies,
     set_task_interaction_handler,
 )
@@ -79,6 +81,35 @@ class StreamingAdapterTests(unittest.TestCase):
         self.assertEqual(payload["strategy"], "sequential")
         self.assertEqual(payload["text"], "Strategy selected: sequential")
 
+    def test_review_custom_event_translates_to_progress_brief_with_review_payload(self) -> None:
+        events = translate_stream_part(
+            {
+                "type": "custom",
+                "data": {
+                    "event_type": "review",
+                    "status": "failed",
+                    "summary": "评审未通过，需要补充来源。",
+                    "issues": [{"severity": "warning", "message": "缺少来源"}],
+                    "blocked_modules": [{"module_id": "related_work", "reason": "budget exhausted"}],
+                },
+            },
+            thread_id="task_review",
+            domain="research",
+            checkpoint_id="ckpt_review",
+            trace_metadata={"task_id": "task_review"},
+        )
+
+        self.assertEqual(len(events), 1)
+        event_type, payload = events[0]
+        self.assertEqual(event_type, "progress.brief")
+        self.assertEqual(payload["type"], "progress.brief")
+        self.assertEqual(payload["brief_type"], "review")
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["summary"], "评审未通过，需要补充来源。")
+        self.assertEqual(payload["content"], "评审未通过，需要补充来源。")
+        self.assertEqual(payload["issues"][0]["message"], "缺少来源")
+        self.assertEqual(payload["blocked_modules"][0]["module_id"], "related_work")
+
 
 class InteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_ask_user_consumes_preloaded_replies_before_interrupting(self) -> None:
@@ -86,6 +117,22 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         try:
             self.assertEqual(await ask_user("q1"), "answer a")
             self.assertEqual(await ask_user("q2"), "answer b")
+        finally:
+            reset_preloaded_user_replies(token)
+
+    async def test_ask_user_only_consumes_matching_structured_preloaded_reply(self) -> None:
+        token = set_preloaded_user_replies([
+            {"question": "旧问题？", "answer": "旧答案"},
+            {"question": "当前问题？", "answer": "当前答案"},
+        ])
+        try:
+            self.assertEqual(await ask_user("当前问题？"), "当前答案")
+            bridge_token = set_graph_interrupt_bridge(lambda payload: "bridge-answer")
+            try:
+                self.assertEqual(await ask_user("新问题？"), "bridge-answer")
+            finally:
+                reset_graph_interrupt_bridge(bridge_token)
+            self.assertEqual(await ask_user("旧问题？"), "旧答案")
         finally:
             reset_preloaded_user_replies(token)
 

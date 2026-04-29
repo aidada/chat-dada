@@ -474,13 +474,19 @@ GEMINI_API_KEY=
 
 CO_API_KEY=
 OPENAI_API_KEY=
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 MINIMAX_API_KEY=
 MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 MOONSHOT_API_KEY=
 GOOGLE_API_KEY=
 ANTHROPIC_API_KEY=
-YESCODE_GEMINI_BASE_URL=
+YESCODE_GEMINI_BASE_URL=https://co.yes.vg/gemini
 ```
+
+`browser-use` 使用独立的 `browser_agent` 模型角色，默认走 YesCode Gemini 端点和
+`gemini-3.1-pro-preview-customtools`。如果大陆访问不稳定，可按 YesCode 文档将
+`co` 替换为 `co-cdn`。
 
 ### 图片生成
 

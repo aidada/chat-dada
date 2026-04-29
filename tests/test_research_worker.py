@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 
-from agent.workflows.research.worker import build_worker_graph, coordinate_modules, run_worker
+from agent.workflows.research.worker import _execute_tool_call, build_worker_graph, coordinate_modules, run_worker
 
 
 _LONG_DRAFT = (
@@ -56,6 +56,21 @@ class ResearchWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "completed")
         self.assertIn("Module Draft", result["findings"])
         self.assertTrue(result["evidence"])
+
+    async def test_execute_tool_call_degrades_tool_exceptions(self) -> None:
+        class _FailingTool:
+            async def ainvoke(self, payload):
+                raise RuntimeError("missing service key")
+
+        text, metadata = await _execute_tool_call(
+            "web_search",
+            {"query": "AWS S3 pricing"},
+            {"web_search": _FailingTool()},
+        )
+
+        self.assertIn("web_search failed", text)
+        self.assertEqual(metadata["tool_error"]["type"], "RuntimeError")
+        self.assertIn("missing service key", metadata["tool_error"]["message"])
 
     async def test_coordinate_modules_respects_dependencies(self) -> None:
         plan = {

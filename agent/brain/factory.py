@@ -14,6 +14,7 @@ from agent.brain.providers.browser_use import (
     BrowserUseResponsesAdapter,
     browser_use_provider_name,
 )
+from agent.brain.providers.deepseek import DeepSeekOpenAIAdapter
 from agent.brain.providers.gemini import GeminiOpenAIAdapter
 from agent.brain.providers.minimax import MiniMaxOpenAIAdapter, _apply_minimax_defaults
 from agent.brain.registry import registry
@@ -74,6 +75,15 @@ def _build_client(client_type: str, model: str, api_key: str, **kwargs: Any) -> 
             **kwargs,
         )
 
+    if client_type == "deepseek_openai":
+        base_url = kwargs.pop("base_url", None)
+        return DeepSeekOpenAIAdapter(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            **kwargs,
+        )
+
     if client_type == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -115,7 +125,7 @@ def _normalize_provider_endpoint(client_type: str, endpoint_url: str) -> tuple[s
     endpoint_url = endpoint_url.rstrip("/")
     extra: dict[str, Any] = {}
 
-    if client_type in {"openai", "minimax_openai"}:
+    if client_type in {"openai", "minimax_openai", "deepseek_openai"}:
         if endpoint_url.endswith("/v1/responses"):
             return endpoint_url.removesuffix("/responses"), {
                 "use_responses_api": True,

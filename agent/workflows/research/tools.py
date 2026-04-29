@@ -1,11 +1,12 @@
 """科研领域工具集合。"""
 from __future__ import annotations
 
+import os
+
 from langchain_core.tools import tool
 
 from agent.runtime.interaction import ask_user
 from agent.capabilities.toolkits.browser_toolkit import browser_navigate_task
-from core.models import get_browser_use_llm
 from agent.tools.research_notes import save_research_note, recall_research_notes
 from agent.tools.brave_search import run as run_brave_search
 
@@ -16,14 +17,27 @@ except ImportError:
     HAS_TAVILY = False
 
 
+def _configured_env_value(name: str) -> str:
+    return str(os.environ.get(name) or "").strip()
+
+
+def _is_tavily_enabled() -> bool:
+    return HAS_TAVILY and bool(_configured_env_value("TAVILY_API_KEY"))
+
+
 @tool
 async def web_search(query: str) -> str:
     """用 Tavily 搜索互联网，适合研究型查询和提取较完整的摘要。"""
-    if HAS_TAVILY:
+    if not HAS_TAVILY:
+        return f"(Tavily search tool unavailable, skipping '{query}')"
+    if not _configured_env_value("TAVILY_API_KEY"):
+        return f"(TAVILY_API_KEY not configured, skipping '{query}')"
+    try:
         search = TavilySearchResults(max_results=5)
         results = await search.ainvoke(query)
-        return "\n\n".join(f"[{r['url']}]\n{r['content']}" for r in results)
-    return f"(TAVILY_API_KEY not configured, skipping '{query}')"
+    except Exception as exc:
+        return f"(Tavily search unavailable: {exc}. Skipping '{query}')"
+    return "\n\n".join(f"[{r['url']}]\n{r['content']}" for r in results)
 
 
 @tool
@@ -83,8 +97,7 @@ async def exa_deep_search(
 @tool
 async def browser_navigate(task_description: str) -> str:
     """控制浏览器完成复杂网页任务。"""
-    llm = get_browser_use_llm("deep_research")
-    return await browser_navigate_task(task_description, role="deep_research", llm=llm)
+    return await browser_navigate_task(task_description)
 
 
 @tool
@@ -113,4 +126,8 @@ CORE_TOOLS = [
 
 
 def get_research_tools():
-    return list(CORE_TOOLS)
+    return [
+        item
+        for item in CORE_TOOLS
+        if getattr(item, "name", "") != "web_search" or _is_tavily_enabled()
+    ]

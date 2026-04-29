@@ -23,8 +23,10 @@ from agent.workflows.research.workflow import (
     _should_retry_workflow_llm_node,
     aggregate_draft_node,
     build_research_workflow_graph,
+    checkpoint_c_node,
     checkpoint_a_node,
     checkpoint_b_node,
+    intake_node,
     planner_node,
     synthesize_final_node,
 )
@@ -72,6 +74,72 @@ class ResearchWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(_should_retry_workflow_llm_node(httpx.RemoteProtocolError("incomplete chunked read")))
         self.assertTrue(_should_retry_workflow_llm_node(RuntimeError("502 Bad Gateway")))
         self.assertFalse(_should_retry_workflow_llm_node(ValueError("invalid planner json")))
+
+    async def test_intake_does_not_interrupt_for_llm_unresolved_questions_by_default(self) -> None:
+        state = {
+            "query": "调研 AWS S3 和阿里云 OSS 的定价对比",
+            "input_payload": {},
+            "workflow_trace": [],
+        }
+
+        with patch(
+            "agent.workflows.research.workflow._invoke_llm_text",
+            return_value='{"unresolved_questions":["更关注哪个区域？"]}',
+        ), patch("agent.workflows.research.workflow.ask_user") as mocked_ask:
+            result = await intake_node(state)
+
+        mocked_ask.assert_not_called()
+        self.assertEqual(result["brief"]["unresolved_questions"], [])
+        self.assertIn("未澄清假设：更关注哪个区域？", result["brief"]["user_constraints"])
+
+    async def test_checkpoint_a_is_non_blocking_by_default(self) -> None:
+        state = {
+            "plan": {"modules": [{"module_id": "problem_definition", "title": "研究问题定义"}]},
+            "skip_checkpoint_a_once": False,
+            "workflow_trace": [],
+        }
+
+        with patch("agent.workflows.research.workflow.ask_user") as mocked_ask:
+            result = await checkpoint_a_node(state)
+
+        mocked_ask.assert_not_called()
+        self.assertFalse(result["needs_replan"])
+        self.assertEqual(result["active_checkpoint"], "checkpoint_a")
+
+    async def test_checkpoint_b_auto_continues_actionable_revision_by_default(self) -> None:
+        state = {
+            "task_id": "task_auto_revision",
+            "needs_replan": False,
+            "revision_targets": [{"module_id": "related_work", "reason": "覆盖不足", "actions": ["补证据"]}],
+            "evaluations": [{"summary": "评审未通过，需要补强。", "revision_targets": []}],
+            "aggregated_draft": "## 草稿\n\n需要补强。",
+            "feedback_history": [],
+            "plan": {"modules": [{"module_id": "related_work"}]},
+            "module_status": {"related_work": "needs_revision"},
+            "workflow_trace": [],
+        }
+
+        with patch("agent.workflows.research.workflow.ask_user") as mocked_ask:
+            result = await checkpoint_b_node(state)
+
+        mocked_ask.assert_not_called()
+        self.assertFalse(result["needs_replan"])
+        self.assertEqual(result["revision_targets"][0]["module_id"], "related_work")
+
+    async def test_checkpoint_c_is_non_blocking_by_default(self) -> None:
+        state = {
+            "brief": {"deliverable_type": "literature_review"},
+            "aggregated_draft": "## 草稿",
+            "feedback_history": [],
+            "workflow_trace": [],
+        }
+
+        with patch("agent.workflows.research.workflow.ask_user") as mocked_ask:
+            result = await checkpoint_c_node(state)
+
+        mocked_ask.assert_not_called()
+        self.assertEqual(result["revision_targets"], [])
+        self.assertFalse(result["needs_replan"])
 
     async def test_research_review_gate_emits_revision_targets(self) -> None:
         gate = ResearchReviewGate()

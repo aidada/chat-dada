@@ -139,6 +139,7 @@ OLD_TO_NEW_TYPE_MAP: dict[str, str] = {
     "plan":           EventType.PROGRESS_PLAN.value,
     "brief":          EventType.PROGRESS_BRIEF.value,
     "strategy":       EventType.PROGRESS_BRIEF.value,
+    "review":         EventType.PROGRESS_BRIEF.value,
     "checkpoint":     EventType.PROGRESS_CHECKPOINT.value,
     "checkpoint_saved": EventType.PROGRESS_CHECKPOINT.value,  # 折叠
     # system/ 映射

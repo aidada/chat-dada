@@ -11,6 +11,7 @@ from agent.capabilities.evidence_store import EvidenceCollection, EvidenceItem
 from core.content_utils import extract_result_text, normalize_markdown_report
 
 from agent.workflows.research.config import (
+    COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE,
     DEFAULT_DELIVERABLE_TYPE,
     DEFAULT_RESEARCH_MODE,
     get_deliverable_profile,
@@ -26,6 +27,7 @@ from agent.workflows.research.schemas import (
 )
 
 _URL_RE = re.compile(r"https?://[^\s\)\]\"'>]+")
+_COMPARISON_SPLIT_RE = re.compile(r"\s+(?:vs\.?|versus)\s+|和|与|及|以及|、|,|，", re.IGNORECASE)
 
 
 def extract_json_payload(text: str) -> dict[str, Any] | None:
@@ -257,6 +259,9 @@ def merge_brief(base: dict[str, Any], override: dict[str, Any], input_data: dict
 
 def fallback_plan(brief: dict[str, Any]) -> dict[str, Any]:
     profile = get_deliverable_profile(brief.get("deliverable_type"))
+    if profile.name == COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE:
+        return _comparison_fallback_plan(brief)
+
     blueprint = {
         "problem_definition": {
             "title": "研究问题定义",
@@ -365,6 +370,99 @@ def fallback_plan(brief: dict[str, Any]) -> dict[str, Any]:
             ).model_dump()
         )
 
+    return {"modules": modules, "checkpoints": ["checkpoint_a", "checkpoint_b", "checkpoint_c"]}
+
+
+def _clean_comparison_subject(value: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^(请|帮我|帮忙|麻烦|调研|研究|分析|比较|对比)\s*", "", text)
+    text = re.sub(r"(的)?(定价|价格|成本|费用|pricing|cost)?(对比|比较|分析|调研|研究).*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(关于|针对)\s*", "", text)
+    return text.strip(" ：:，,。 ")
+
+
+def _extract_comparison_subjects(query: str) -> tuple[str, str]:
+    cleaned = _clean_comparison_subject(query)
+    parts = [_clean_comparison_subject(part) for part in _COMPARISON_SPLIT_RE.split(cleaned)]
+    subjects = [part for part in parts if part]
+    if len(subjects) >= 2:
+        return subjects[0], subjects[1]
+    return "对象 A", "对象 B"
+
+
+def _comparison_fallback_plan(brief: dict[str, Any]) -> dict[str, Any]:
+    query = str(brief.get("raw_query", "") or brief.get("clarified_goal", "") or "")
+    subject_a, subject_b = _extract_comparison_subjects(query)
+    comparison_focus = "价格、计费项、免费额度、流量费用、请求费用、存储类型、区域差异和典型用量场景"
+
+    modules = [
+        ResearchModulePlan(
+            module_id="comparison_scope",
+            title="调研范围与对比维度",
+            module_type="comparison_scope",
+            owner_role="argument_worker",
+            objective=f"定义 {subject_a} 与 {subject_b} 的对比口径，明确 {comparison_focus}，列出默认假设和需要统一的计量单位。",
+            depends_on=[],
+            required_evidence=["pricing dimensions", "scenario assumptions"],
+            required_output_fields=["scope", "dimensions", "assumptions"],
+            evaluation_dimensions=["intent_alignment", "argument_chain_completeness"],
+        ).model_dump(),
+        ResearchModulePlan(
+            module_id="subject_a_research",
+            title=f"{subject_a} 资料调研",
+            module_type="subject_research",
+            owner_role="citation_worker",
+            objective=f"独立调研 {subject_a} 的官方定价、计费细项、区域差异、请求/流量/存储费用和适用条件，输出可追溯来源。",
+            depends_on=[],
+            required_evidence=["official pricing", "pricing examples", "region notes"],
+            required_output_fields=["pricing facts", "source urls", "caveats"],
+            evaluation_dimensions=["citation_authenticity_traceability", "citation_relevance_coverage"],
+        ).model_dump(),
+        ResearchModulePlan(
+            module_id="subject_b_research",
+            title=f"{subject_b} 资料调研",
+            module_type="subject_research",
+            owner_role="citation_worker",
+            objective=f"独立调研 {subject_b} 的官方定价、计费细项、区域差异、请求/流量/存储费用和适用条件，输出可追溯来源。",
+            depends_on=[],
+            required_evidence=["official pricing", "pricing examples", "region notes"],
+            required_output_fields=["pricing facts", "source urls", "caveats"],
+            evaluation_dimensions=["citation_authenticity_traceability", "citation_relevance_coverage"],
+        ).model_dump(),
+        ResearchModulePlan(
+            module_id="comparative_matrix",
+            title="对比矩阵",
+            module_type="comparative_matrix",
+            owner_role="argument_worker",
+            objective=f"从全景角度汇总 {subject_a} 与 {subject_b} 的关键差异，形成按计费项和场景组织的对比矩阵。",
+            depends_on=["comparison_scope", "subject_a_research", "subject_b_research"],
+            required_evidence=["normalized comparison", "scenario mapping"],
+            required_output_fields=["matrix", "deltas", "interpretation"],
+            evaluation_dimensions=["argument_chain_completeness", "intent_alignment"],
+        ).model_dump(),
+        ResearchModulePlan(
+            module_id="decision_recommendations",
+            title="场景化建议",
+            module_type="decision_recommendations",
+            owner_role="argument_worker",
+            objective="基于对比矩阵给出不同用量、地域、出网流量、请求频率和生态绑定场景下的选择建议。",
+            depends_on=["comparative_matrix"],
+            required_evidence=["scenario analysis", "decision criteria"],
+            required_output_fields=["recommendations", "decision rules"],
+            evaluation_dimensions=["argument_chain_completeness", "intent_alignment"],
+        ).model_dump(),
+        ResearchModulePlan(
+            module_id="caveats_and_risks",
+            title="风险与注意事项",
+            module_type="caveats_and_risks",
+            owner_role="argument_worker",
+            objective="明确价格表时效、区域差异、折扣/预留容量、跨云迁移、税费和未覆盖计费项等风险边界。",
+            depends_on=["comparative_matrix"],
+            required_evidence=["risk factors", "pricing caveats"],
+            required_output_fields=["risks", "open gaps", "validation needs"],
+            evaluation_dimensions=["argument_chain_completeness", "intent_alignment"],
+        ).model_dump(),
+    ]
     return {"modules": modules, "checkpoints": ["checkpoint_a", "checkpoint_b", "checkpoint_c"]}
 
 

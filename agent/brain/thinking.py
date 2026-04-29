@@ -5,7 +5,7 @@ from typing import Any
 
 from agent.brain.defaults import GOOGLE_PROXY_SUPPORTED_THINKING_LEVELS
 
-_thinking_level: ContextVar[str] = ContextVar("thinking_level", default="medium")
+_thinking_level: ContextVar[str] = ContextVar("thinking_level", default="xhigh")
 
 
 def set_thinking_level(level: str) -> None:

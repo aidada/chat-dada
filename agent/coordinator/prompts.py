@@ -157,7 +157,8 @@ def build_understand_goal_prompt(
 - 如果用户请求是简单问答或闲聊 → direct
 - 如果明确属于单一领域且有对应技能 → single_skill
 - 如果涉及多个步骤或跨领域协作 → dag
-- 优先选择 single_skill（比 dag 开销更小）"""
+- 优先选择 single_skill（比 dag 开销更小）
+- 对调研、研究、对比、定价、价格、最新信息、市场/竞品/云服务费用等需要外部事实或检索的请求，通常选择 `single_skill` + `do_research`，不应选择 direct"""
 
     capability_section = ""
     if capability_summary.strip():
@@ -205,7 +206,8 @@ def build_direct_answer_prompt(
 7. 如果上下文说明当前可用桌面本机工具，请优先使用这些工具处理本地文件或本机环境请求，而不是直接声称无法访问
 8. 对有副作用的本机工具保持克制，仅在确有必要时调用；若权限被拒绝或工具离线，再向用户解释限制
 9. 对只读本地文件任务，优先使用 list_dir、file_read、file_search、grep 等专用工具，不要用 shell 代替
-10. 只有当专用工具无法满足需求时，才考虑 shell 这类高风险工具"""
+10. 只有当专用工具无法满足需求时，才考虑 shell 这类高风险工具
+11. 默认使用用户问题的语言回答；用户使用中文时，必须使用中文回答"""
 
     context_section = ""
     if conversation_context:

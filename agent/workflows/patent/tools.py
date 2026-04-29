@@ -5,9 +5,9 @@ from agent.capabilities.toolkits.browser_toolkit import browser_navigate_task
 
 def get_patent_tools():
     """Return tools available to patent domain subagents."""
-    from agent.workflows.research.tools import CORE_TOOLS
+    from agent.workflows.research.tools import get_research_tools
 
-    return list(CORE_TOOLS)
+    return get_research_tools()
 
 
 async def browser_verify_patent_page(task_description: str, *, enabled: bool = False) -> str:

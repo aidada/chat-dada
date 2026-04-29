@@ -16,7 +16,7 @@ _graph_interrupt_bridge: ContextVar[GraphInterruptBridge | None] = ContextVar(
     "graph_interrupt_bridge",
     default=None,
 )
-_preloaded_user_replies: ContextVar[deque[str] | None] = ContextVar(
+_preloaded_user_replies: ContextVar[deque[Any] | None] = ContextVar(
     "preloaded_user_replies",
     default=None,
 )
@@ -43,14 +43,54 @@ def reset_graph_interrupt_bridge(token: Token[GraphInterruptBridge | None]) -> N
 
 
 def set_preloaded_user_replies(
-    replies: list[str] | None,
-) -> Token[deque[str] | None]:
-    normalized = deque(str(item) for item in (replies or []) if str(item).strip())
+    replies: list[Any] | None,
+) -> Token[deque[Any] | None]:
+    normalized: deque[Any] = deque()
+    for item in replies or []:
+        if isinstance(item, dict):
+            answer = str(item.get("answer", "") or "").strip()
+            if answer:
+                normalized.append(
+                    {
+                        "question": str(item.get("question", item.get("content", "")) or "").strip(),
+                        "answer": answer,
+                    }
+                )
+            continue
+        text = str(item).strip()
+        if text:
+            normalized.append(text)
     return _preloaded_user_replies.set(normalized or None)
 
 
-def reset_preloaded_user_replies(token: Token[deque[str] | None]) -> None:
+def reset_preloaded_user_replies(token: Token[deque[Any] | None]) -> None:
     _preloaded_user_replies.reset(token)
+
+
+def _normalize_question(value: str) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def _pop_preloaded_reply(
+    queued_replies: deque[Any],
+    question: str,
+) -> str | None:
+    if not queued_replies:
+        return None
+
+    first = queued_replies[0]
+    if not isinstance(first, dict):
+        return str(queued_replies.popleft())
+
+    normalized_question = _normalize_question(question)
+    for item in list(queued_replies):
+        if not isinstance(item, dict):
+            continue
+        stored_question = _normalize_question(str(item.get("question", "") or ""))
+        if stored_question and stored_question == normalized_question:
+            queued_replies.remove(item)
+            return str(item.get("answer", "") or "")
+    return None
 
 
 async def ask_user(
@@ -61,7 +101,9 @@ async def ask_user(
 ) -> str | None:
     queued_replies = _preloaded_user_replies.get()
     if queued_replies:
-        return queued_replies.popleft()
+        preloaded = _pop_preloaded_reply(queued_replies, question)
+        if preloaded is not None:
+            return preloaded
 
     bridge = _graph_interrupt_bridge.get()
     payload: dict[str, Any] = {"content": str(question or "").strip()}

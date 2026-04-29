@@ -400,6 +400,20 @@ async def _invoke_named_tool(tool: Any, payload: dict[str, Any]) -> str:
     return str(result or "")
 
 
+def _tool_error_response(tool_name: str, exc: Exception) -> tuple[str, dict[str, Any]]:
+    message = str(exc) or type(exc).__name__
+    return (
+        f"({tool_name} failed: {message})",
+        {
+            "tool_error": {
+                "tool_name": tool_name,
+                "type": type(exc).__name__,
+                "message": message,
+            }
+        },
+    )
+
+
 async def _execute_tool_call(tool_name: str, args: dict[str, Any], tools: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     query = _extract_query(tool_name, args)
     metadata: dict[str, Any] = {}
@@ -445,7 +459,10 @@ async def _execute_tool_call(tool_name: str, args: dict[str, Any], tools: dict[s
     tool = tools.get(tool_name)
     if tool is None:
         raise RuntimeError(f"Unknown worker tool: {tool_name}")
-    text = await _invoke_named_tool(tool, args)
+    try:
+        text = await _invoke_named_tool(tool, args)
+    except Exception as exc:
+        return _tool_error_response(tool_name, exc)
     return text, metadata
 
 

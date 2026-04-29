@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent.workflows.research.utils import fallback_brief, feedback_action, merge_brief
+from agent.workflows.research.utils import fallback_brief, fallback_plan, feedback_action, merge_brief
 
 
 class MergeBriefTests(unittest.TestCase):
@@ -83,6 +83,20 @@ class MergeBriefTests(unittest.TestCase):
         )
 
         self.assertIn("论文目标是什么？ -> 英文 SCI 期刊", brief["user_constraints"])
+
+    def test_comparison_query_fallback_plan_has_parallel_research_directions(self) -> None:
+        brief = fallback_brief("调研 AWS S3 和阿里云 OSS 的定价对比", None, {})
+        plan = fallback_plan(brief)
+
+        first_wave = [module for module in plan["modules"] if not module.get("depends_on")]
+        self.assertGreaterEqual(len(first_wave), 3)
+        objectives = "\n".join(str(module.get("objective", "")) for module in first_wave)
+        self.assertIn("AWS S3", objectives)
+        self.assertIn("阿里云 OSS", objectives)
+        self.assertTrue(
+            any(module["module_id"] == "comparative_matrix" for module in plan["modules"]),
+            "orchestrator-facing comparison synthesis module should be explicit",
+        )
 
 
 if __name__ == "__main__":

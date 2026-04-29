@@ -70,6 +70,22 @@ def test_put_model_can_update_provider():
     assert registry.get("doc_analyst").provider == "openai"
 
 
+def test_put_model_can_update_to_deepseek_provider():
+    client = _make_client()
+
+    response = client.put(
+        "/api/admin/models/doc_analyst",
+        json={"model": "deepseek-v4-pro", "provider": "deepseek"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["role"] == "doc_analyst"
+    assert data["model"] == "deepseek-v4-pro"
+    assert data["provider"] == "deepseek"
+    assert data["client_type"] == "deepseek_openai"
+    assert registry.get("doc_analyst").provider == "deepseek"
+
+
 def test_put_unknown_role_returns_404():
     client = _make_client()
 

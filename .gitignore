@@ -47,10 +47,6 @@
 !old/**
 !static/
 !static/**
-!outputs/
-!outputs/**
-!docs/
-!docs/**
 !tests/
 !tests/**
 !todo.md
@@ -94,3 +90,7 @@ logs/*.log*
 
 # Local git worktrees
 .worktrees/
+
+# Local-only directories (kept locally, not tracked)
+docs/
+outputs/

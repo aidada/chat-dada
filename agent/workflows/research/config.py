@@ -10,6 +10,7 @@ ACADEMIC_PAPER_GUIDANCE_PROFILE = "academic_paper_guidance"
 
 DEFAULT_DELIVERABLE_TYPE = "literature_review"
 ACADEMIC_DELIVERABLE_TYPE = "paper_guidance"
+COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE = "comparative_analysis"
 
 DEFAULT_RESEARCH_MODE = "review"
 
@@ -54,6 +55,14 @@ DELIVERABLE_TYPE_ALIASES = {
     "paper outline": "paper_outline",
     "outline": "paper_outline",
     "论文提纲": "paper_outline",
+    COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE: COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE,
+    "comparison": COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE,
+    "comparative analysis": COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE,
+    "pricing comparison": COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE,
+    "cost comparison": COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE,
+    "对比": COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE,
+    "比较": COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE,
+    "定价对比": COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE,
 }
 
 ACADEMIC_PROFILE_KEYWORDS = (
@@ -226,6 +235,34 @@ DELIVERABLE_PROFILES: dict[str, DeliverableProfile] = {
             "intent_alignment",
         ),
     ),
+    COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE: DeliverableProfile(
+        name=COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE,
+        label="对比调研",
+        description="输出面向决策的多对象对比、证据表、适用场景和风险边界。",
+        required_modules=(
+            "comparison_scope",
+            "subject_a_research",
+            "subject_b_research",
+            "comparative_matrix",
+            "decision_recommendations",
+            "caveats_and_risks",
+        ),
+        final_sections=(
+            "## 调研范围与假设",
+            "## 对象 A 证据摘要",
+            "## 对象 B 证据摘要",
+            "## 对比矩阵",
+            "## 场景化建议",
+            "## 风险与注意事项",
+            "## 参考来源",
+        ),
+        evaluator_focus=(
+            "citation_authenticity_traceability",
+            "citation_relevance_coverage",
+            "argument_chain_completeness",
+            "intent_alignment",
+        ),
+    ),
     "research_proposal": DeliverableProfile(
         name="research_proposal",
         label="研究方案",
@@ -267,6 +304,27 @@ def looks_like_academic_paper_task(query: str) -> bool:
     return any(keyword in lowered for keyword in ACADEMIC_PROFILE_KEYWORDS)
 
 
+def looks_like_comparison_task(query: str) -> bool:
+    """根据关键词判断当前是否偏多对象对比调研。"""
+    text = str(query or "").lower()
+    return any(
+        token in text
+        for token in (
+            "对比",
+            "比较",
+            "相比",
+            " vs ",
+            " versus ",
+            "compare",
+            "comparison",
+            "pricing",
+            "定价",
+            "价格",
+            "成本",
+        )
+    )
+
+
 def resolve_report_profile(query: str, requested_profile: str | None = None) -> str:
     """根据显式指定值和 query 内容决定 report_profile。"""
     raw_requested = str(requested_profile or "").strip()
@@ -280,6 +338,8 @@ def resolve_report_profile(query: str, requested_profile: str | None = None) -> 
 
 def resolve_deliverable_type(query: str, requested_profile: str | None = None) -> str:
     """把旧的 report_profile 输入映射到新的产物类型。"""
+    if not requested_profile and not looks_like_academic_paper_task(query) and looks_like_comparison_task(query):
+        return COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE
     profile = resolve_report_profile(query, requested_profile)
     return REPORT_PROFILE_TO_DELIVERABLE.get(profile, DEFAULT_DELIVERABLE_TYPE)
 
@@ -292,6 +352,8 @@ def normalize_deliverable_type(deliverable_type: str | None, *, query: str | Non
     if normalized in DELIVERABLE_TYPE_ALIASES:
         return DELIVERABLE_TYPE_ALIASES[normalized]
     if normalized:
+        if any(token in normalized for token in ("comparison", "compare", "pricing", "cost", "对比", "比较", "定价", "价格", "成本")):
+            return COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE
         if any(token in normalized for token in ("proposal", "研究方案", "study plan", "research plan")):
             return "research_proposal"
         if any(token in normalized for token in ("outline", "提纲", "paper structure")):
@@ -301,6 +363,8 @@ def normalize_deliverable_type(deliverable_type: str | None, *, query: str | Non
         if any(token in normalized for token in ("literature review", "review", "survey", "related work", "综述")):
             return DEFAULT_DELIVERABLE_TYPE
     if query:
+        if not looks_like_academic_paper_task(query) and looks_like_comparison_task(query):
+            return COMPARATIVE_ANALYSIS_DELIVERABLE_TYPE
         return resolve_deliverable_type(query)
     return DEFAULT_DELIVERABLE_TYPE
 

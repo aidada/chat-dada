@@ -201,6 +201,32 @@ def _blocked_modules_summary(items: list[dict[str, Any]]) -> str:
     )
 
 
+def _review_brief_payload(
+    *,
+    status: str,
+    summary: str,
+    issues: list[dict[str, Any]],
+    blocked_modules: list[dict[str, Any]],
+    last_evaluation_diff: dict[str, Any],
+    budget: dict[str, Any],
+) -> dict[str, Any]:
+    issue_count = len(issues)
+    blocked_count = len(blocked_modules)
+    content = summary.strip() or f"研究评审{status}"
+    return {
+        "brief_type": "review",
+        "content": content,
+        "status": status,
+        "summary": summary,
+        "issue_count": issue_count,
+        "blocked_module_count": blocked_count,
+        "issues": issues,
+        "blocked_modules": blocked_modules,
+        "last_evaluation_diff": last_evaluation_diff,
+        "budget": budget,
+    }
+
+
 def _active_modules(module_status: dict[str, str]) -> list[str]:
     return [
         module_id
@@ -361,6 +387,64 @@ def _is_review_driven_replan(state: ResearchWorkflowState) -> bool:
     )
 
 
+def _input_payload(state: ResearchWorkflowState) -> dict[str, Any]:
+    payload = state.get("input_payload", {}) or {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _explicit_interaction_enabled(state: ResearchWorkflowState, checkpoint: str) -> bool:
+    payload = _input_payload(state)
+    if payload.get("interactive") is True or payload.get("require_user_confirmation") is True:
+        return True
+    checkpoints = payload.get("interactive_checkpoints") or payload.get("human_checkpoints") or []
+    if isinstance(checkpoints, str):
+        checkpoints = [item.strip() for item in checkpoints.split(",")]
+    normalized = {str(item).strip() for item in checkpoints if str(item).strip()}
+    if checkpoint in normalized:
+        return True
+    if checkpoint == "checkpoint_a" and payload.get("require_plan_confirmation") is True:
+        return True
+    if checkpoint == "checkpoint_c" and payload.get("require_final_confirmation") is True:
+        return True
+    if checkpoint == "intake" and payload.get("require_intake_clarification") is True:
+        return True
+    return False
+
+
+def _record_unresolved_questions_as_assumptions(brief: dict[str, Any]) -> dict[str, Any]:
+    questions = [str(item).strip() for item in brief.get("unresolved_questions", []) or [] if str(item).strip()]
+    if not questions:
+        return brief
+    constraints = list(brief.get("user_constraints", []) or [])
+    for question in questions:
+        assumption = f"未澄清假设：{question}"
+        if assumption not in constraints:
+            constraints.append(assumption)
+    brief["user_constraints"] = constraints
+    brief["unresolved_questions"] = []
+    return brief
+
+
+def _checkpoint_b_requires_user(
+    state: ResearchWorkflowState,
+    *,
+    latest: dict[str, Any],
+    budget: dict[str, Any],
+    actionable_targets: list[dict[str, Any]],
+) -> bool:
+    if _explicit_interaction_enabled(state, "checkpoint_b"):
+        return True
+    if budget.get("awaiting_user_decision"):
+        return True
+    if bool(state.get("needs_replan")) or bool(latest.get("needs_replan")):
+        return True
+    if latest.get("user_feedback_required") and not actionable_targets:
+        return True
+    if state.get("blocked_modules") and not actionable_targets:
+        return True
+    return False
+
+
 async def intake_node(state: ResearchWorkflowState) -> dict[str, Any]:
     """任务接收阶段：把原始 query 归一化为科研 brief。"""
     query = str(state.get("query", "") or "").strip()
@@ -379,18 +463,22 @@ async def intake_node(state: ResearchWorkflowState) -> dict[str, Any]:
     except Exception:
         log.warning("Research intake LLM failed; using fallback brief", exc_info=True)
 
-    # unresolved_questions 只允许在最前面做一次澄清，避免工作流反复打断用户。
+    # 默认不因为 LLM 产出的 unresolved_questions 打断调研。
+    # 显式交互模式或空查询才转为真正的用户澄清；否则按假设继续执行。
     if brief.get("unresolved_questions"):
-        question = brief["unresolved_questions"][0]
-        answer = await ask_user(
-            question,
-            context="这条澄清会决定后续科研规划的方向与评估标准。",
-            placeholder="一句话说明即可",
-        )
-        if answer:
-            brief["clarified_goal"] = f"{brief.get('clarified_goal', query)}\n用户补充：{answer}"
-            brief["user_constraints"] = [*brief.get("user_constraints", []), str(answer).strip()]
-            brief["unresolved_questions"] = []
+        if _explicit_interaction_enabled(state, "intake") or not query:
+            question = brief["unresolved_questions"][0]
+            answer = await ask_user(
+                question,
+                context="这条澄清会决定后续科研规划的方向与评估标准。",
+                placeholder="一句话说明即可",
+            )
+            if answer:
+                brief["clarified_goal"] = f"{brief.get('clarified_goal', query)}\n用户补充：{answer}"
+                brief["user_constraints"] = [*brief.get("user_constraints", []), str(answer).strip()]
+                brief["unresolved_questions"] = []
+        else:
+            brief = _record_unresolved_questions_as_assumptions(brief)
 
     _safe_emit("step", "Research intake completed")
     _safe_emit("brief", {"status": "generated", "brief": brief})
@@ -483,6 +571,21 @@ async def checkpoint_a_node(state: ResearchWorkflowState) -> dict[str, Any]:
             status="cleared",
         )
         _safe_emit("checkpoint", {"status": "visited", "checkpoint": "checkpoint_a"})
+        return {
+            "active_checkpoint": "checkpoint_a",
+            "needs_replan": False,
+            "skip_checkpoint_a_once": False,
+            "workflow_trace": _append_trace(state, "checkpoint_a"),
+        }
+    if not _explicit_interaction_enabled(state, "checkpoint_a"):
+        _emit_stage_artifacts(
+            task_id,
+            stage_id="checkpoint_a",
+            stage_title="研究计划确认",
+            files=[],
+            status="cleared",
+        )
+        _safe_emit("checkpoint", {"status": "auto_visited", "checkpoint": "checkpoint_a"})
         return {
             "active_checkpoint": "checkpoint_a",
             "needs_replan": False,
@@ -720,14 +823,14 @@ async def evaluate_draft_node(state: ResearchWorkflowState) -> dict[str, Any]:
 
     _safe_emit(
         "review",
-        {
-            "status": "passed" if review.passed else "failed",
-            "summary": review.summary,
-            "issues": evaluation["issues"],
-            "blocked_modules": blocked_modules,
-            "last_evaluation_diff": last_evaluation_diff,
-            "budget": budget,
-        },
+        _review_brief_payload(
+            status="passed" if review.passed else "failed",
+            summary=review.summary,
+            issues=evaluation["issues"],
+            blocked_modules=blocked_modules,
+            last_evaluation_diff=last_evaluation_diff,
+            budget=budget,
+        ),
     )
     return {
         "evaluations": evaluations,
@@ -789,21 +892,32 @@ async def checkpoint_b_node(state: ResearchWorkflowState) -> dict[str, Any]:
         f"{_draft_preview(str(state.get('aggregated_draft', '') or ''))}\n\n"
         "如果需要改方向请直接说明；否则回复“继续修订”或“继续”。"
     )
-    answer = await ask_user(
-        question,
-        context=json.dumps(
-            {
-                "summary": latest.get("summary", ""),
-                "revision_targets": latest.get("revision_targets", []),
-                "blocked_modules": list(state.get("blocked_modules", []) or []),
-                "aggregated_draft": str(state.get("aggregated_draft", "") or ""),
-                "budget": budget,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        placeholder="例如：更偏实验方案，减少引言综述",
+    actionable_targets = _actionable_revision_targets(
+        revision_targets,
+        dict(state.get("module_status", {}) or {}),
     )
+    answer = ""
+    if _checkpoint_b_requires_user(
+        state,
+        latest=dict(latest or {}),
+        budget=budget,
+        actionable_targets=actionable_targets,
+    ):
+        answer = await ask_user(
+            question,
+            context=json.dumps(
+                {
+                    "summary": latest.get("summary", ""),
+                    "revision_targets": latest.get("revision_targets", []),
+                    "blocked_modules": list(state.get("blocked_modules", []) or []),
+                    "aggregated_draft": str(state.get("aggregated_draft", "") or ""),
+                    "budget": budget,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            placeholder="例如：更偏实验方案，减少引言综述",
+        ) or ""
 
     feedback_history = list(state.get("feedback_history", []))
     if answer:
@@ -919,15 +1033,17 @@ async def checkpoint_c_node(state: ResearchWorkflowState) -> dict[str, Any]:
         stage_title="最终成稿前确认",
         files=final_stage_files,
     )
-    answer = await ask_user(
-        CHECKPOINT_C_PROMPT,
-        context=(
-            f"目标产物：{profile.label}\n"
-            f"目标章节：{list(profile.final_sections)}\n\n"
-            f"{_brief_summary(brief)}"
-        ),
-        placeholder="例如：把实验建议写得更具体一些",
-    )
+    answer = ""
+    if _explicit_interaction_enabled(state, "checkpoint_c"):
+        answer = await ask_user(
+            CHECKPOINT_C_PROMPT,
+            context=(
+                f"目标产物：{profile.label}\n"
+                f"目标章节：{list(profile.final_sections)}\n\n"
+                f"{_brief_summary(brief)}"
+            ),
+            placeholder="例如：把实验建议写得更具体一些",
+        ) or ""
 
     feedback_history = list(state.get("feedback_history", []))
     if answer:
